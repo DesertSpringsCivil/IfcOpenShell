@@ -76,6 +76,20 @@ class Aggregate:
 
 
 @interface
+class Alignment:
+    def back_calculate_pis_from_alignment(cls, alignment): pass
+    def clear_layout_segments(cls, h_layout): pass
+    def collect_pis_from_empties(cls, alignment_id): pass
+    def create_objects_for_layout_segments(cls, h_layout, layout_obj): pass
+    def create_pi_edit_empties(cls, alignment, pis): pass
+    def get_horizontal_layout(cls, alignment): pass
+    def layout_by_pi_method(cls, h_layout, hpoints, radii): pass
+    def layout_has_real_segments(cls, h_layout): pass
+    def remove_layout_segment_objects(cls, h_layout): pass
+    def remove_pi_edit_empties(cls, alignment_id): pass
+
+
+@interface
 class Attribute:
     pass
 

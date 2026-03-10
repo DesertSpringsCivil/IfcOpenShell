@@ -120,3 +120,4 @@ src/ifcopenshell-python/ifcopenshell/express/*.exp.cache.dat
 CLAUDE.md
 CLAUDE.local.md
 .mcp.json
+.claude/

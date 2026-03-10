@@ -54,6 +54,13 @@ def aggregate():
 
 
 @pytest.fixture
+def alignment():
+    prophet = Prophecy(bonsai.core.tool.Alignment)
+    yield prophet
+    prophet.verify()
+
+
+@pytest.fixture
 def collector():
     prophet = Prophecy(bonsai.core.tool.Collector)
     yield prophet
