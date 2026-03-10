@@ -55,6 +55,24 @@ class PIGeometryResult:
     total_length: float
 
 
+@dataclass
+class PVIGeometryResult:
+    """Result of PVI geometry calculation for vertical alignment.
+
+    Parallel arrays:
+    - stations/elevations/grades: one entry per PVI (grades has n-1 entries)
+    - k_values/bvc_stations/evc_stations: one entry per *interior* PVI (n-2 entries)
+    """
+
+    stations: List[float]
+    elevations: List[float]
+    grades: List[float]
+    k_values: List[float]
+    bvc_stations: List[float]
+    evc_stations: List[float]
+    total_length: float
+
+
 class Alignment:
     """Tool class for alignment-related Blender operations.
 
@@ -238,6 +256,219 @@ class Alignment:
         dy = p_end[1] - p_start[1]
         full_length = math.sqrt(dx * dx + dy * dy)
         return max(0.0, full_length - start_tangent - end_tangent)
+
+    # =========================================================================
+    # Vertical Alignment Geometry Methods
+    # =========================================================================
+
+    @classmethod
+    def calculate_grade(cls, start_elevation: float, end_elevation: float, horizontal_distance: float) -> float:
+        """Calculate the grade (slope) between two PVI points.
+
+        g = (end_elevation - start_elevation) / horizontal_distance
+
+        Args:
+            start_elevation: Elevation at start PVI
+            end_elevation: Elevation at end PVI
+            horizontal_distance: Horizontal distance between PVIs
+
+        Returns:
+            Grade as a decimal (e.g. 0.02 = 2% uphill). Returns 0.0 for
+            zero or negative horizontal_distance.
+        """
+        if horizontal_distance <= 0:
+            return 0.0
+        return (end_elevation - start_elevation) / horizontal_distance
+
+    @classmethod
+    def calculate_k_value(cls, curve_length: float, grade_change: float) -> float:
+        """Calculate the K-value (rate of grade change) for a vertical curve.
+
+        K = L / |Δg|
+
+        A higher K-value means a more gradual curve. K is used in AASHTO
+        sight-distance calculations for crest and sag curves.
+
+        Args:
+            curve_length: Vertical curve length (L)
+            grade_change: Algebraic grade change Δg = g2 - g1 (decimal)
+
+        Returns:
+            K-value. Returns 0.0 if grade_change is effectively zero (flat
+            curve) or if curve_length is zero.
+        """
+        if abs(grade_change) < 1e-10 or curve_length <= 0:
+            return 0.0
+        return curve_length / abs(grade_change)
+
+    @classmethod
+    def calculate_vertical_curve_length_from_k(cls, k_value: float, grade_change: float) -> float:
+        """Calculate vertical curve length from K-value and grade change.
+
+        L = K * |Δg|
+
+        Args:
+            k_value: Design K-value
+            grade_change: Algebraic grade change Δg = g2 - g1 (decimal)
+
+        Returns:
+            Vertical curve length
+        """
+        return k_value * abs(grade_change)
+
+    @classmethod
+    def calculate_elevation_on_parabola(
+        cls,
+        start_elevation: float,
+        start_gradient: float,
+        end_gradient: float,
+        curve_length: float,
+        distance_from_bvc: float,
+    ) -> float:
+        """Calculate elevation at any point on a symmetric parabolic vertical curve.
+
+        y = y_BVC + g1 * x + ((g2 - g1) / (2 * L)) * x²
+
+        Args:
+            start_elevation: Elevation at BVC (Begin Vertical Curve)
+            start_gradient: Incoming grade g1 (decimal)
+            end_gradient: Outgoing grade g2 (decimal)
+            curve_length: Total curve length L
+            distance_from_bvc: Distance x from BVC to the point of interest
+
+        Returns:
+            Elevation at the given distance from BVC
+        """
+        if curve_length <= 0:
+            return start_elevation + start_gradient * distance_from_bvc
+        grade_change_rate = (end_gradient - start_gradient) / (2.0 * curve_length)
+        return start_elevation + start_gradient * distance_from_bvc + grade_change_rate * distance_from_bvc**2
+
+    @classmethod
+    def calculate_high_low_point_distance(
+        cls,
+        start_gradient: float,
+        end_gradient: float,
+        curve_length: float,
+    ) -> Optional[float]:
+        """Calculate distance from BVC to the high or low point on a parabola.
+
+        The high point occurs on a crest curve (g1 > 0, g2 < 0).
+        The low point occurs on a sag curve (g1 < 0, g2 > 0).
+
+        x_hl = g1 * L / (g1 - g2)
+
+        Args:
+            start_gradient: Incoming grade g1 (decimal)
+            end_gradient: Outgoing grade g2 (decimal)
+            curve_length: Total curve length L
+
+        Returns:
+            Distance from BVC to the high/low point, or None if no
+            high/low point exists within the curve (grades don't change sign).
+        """
+        grade_denominator = start_gradient - end_gradient
+        if abs(grade_denominator) < 1e-10:
+            return None  # Constant gradient — no high/low point
+        x_high_low = start_gradient * curve_length / grade_denominator
+        if 0 < x_high_low < curve_length:
+            return x_high_low
+        return None  # High/low point is outside the curve
+
+    @classmethod
+    def calculate_bvc_evc_stations(cls, pvi_station: float, curve_length: float) -> Tuple[float, float]:
+        """Calculate BVC and EVC stations from the PVI station and curve length.
+
+        For a symmetric parabolic curve:
+            BVC = PVI - L/2
+            EVC = PVI + L/2
+
+        Args:
+            pvi_station: Station of the Point of Vertical Intersection
+            curve_length: Total vertical curve length L
+
+        Returns:
+            Tuple of (bvc_station, evc_station)
+        """
+        half_length = curve_length / 2.0
+        return (pvi_station - half_length, pvi_station + half_length)
+
+    @classmethod
+    def calculate_pvi_geometry(
+        cls,
+        pvis: List[Tuple[float, float]],
+        curve_lengths: Optional[List[float]] = None,
+    ) -> PVIGeometryResult:
+        """Calculate full geometry for a series of PVI (Point of Vertical Intersection) points.
+
+        Args:
+            pvis: List of (station, elevation) tuples, ordered by station
+            curve_lengths: Optional list of curve lengths for interior PVIs.
+                           Must have len(pvis) - 2 entries (no curves at endpoints).
+                           Defaults to 0.0 for all interior PVIs if not provided.
+
+        Returns:
+            PVIGeometryResult with stations, elevations, grades (n-1 entries),
+            and k_values / bvc_stations / evc_stations for each interior PVI (n-2 entries).
+        """
+        num_pvis = len(pvis)
+
+        if num_pvis == 0:
+            return PVIGeometryResult(
+                stations=[], elevations=[], grades=[], k_values=[],
+                bvc_stations=[], evc_stations=[], total_length=0.0,
+            )
+
+        stations = [float(pvi[0]) for pvi in pvis]
+        elevations = [float(pvi[1]) for pvi in pvis]
+
+        if num_pvis == 1:
+            return PVIGeometryResult(
+                stations=stations, elevations=elevations, grades=[], k_values=[],
+                bvc_stations=[], evc_stations=[], total_length=0.0,
+            )
+
+        # Calculate grades between consecutive PVIs (n-1 values)
+        grades = []
+        for i in range(num_pvis - 1):
+            horizontal_distance = stations[i + 1] - stations[i]
+            grades.append(cls.calculate_grade(elevations[i], elevations[i + 1], horizontal_distance))
+
+        # Prepare curve lengths for interior PVIs (n-2 values)
+        num_interior_pvis = num_pvis - 2
+        if curve_lengths is None:
+            interior_curve_lengths = [0.0] * num_interior_pvis
+        else:
+            interior_curve_lengths = list(curve_lengths)
+
+        # Compute K-values and BVC/EVC for each interior PVI
+        k_values = []
+        bvc_station_list = []
+        evc_station_list = []
+
+        for interior_index in range(num_interior_pvis):
+            pvi_index = interior_index + 1  # Interior PVIs are at index 1..(n-2)
+            curve_length = interior_curve_lengths[interior_index] if interior_index < len(interior_curve_lengths) else 0.0
+            grade_incoming = grades[interior_index]
+            grade_outgoing = grades[interior_index + 1]
+            grade_change = grade_outgoing - grade_incoming
+
+            k_values.append(cls.calculate_k_value(curve_length, grade_change))
+            bvc, evc = cls.calculate_bvc_evc_stations(stations[pvi_index], curve_length)
+            bvc_station_list.append(bvc)
+            evc_station_list.append(evc)
+
+        total_length = stations[-1] - stations[0]
+
+        return PVIGeometryResult(
+            stations=stations,
+            elevations=elevations,
+            grades=grades,
+            k_values=k_values,
+            bvc_stations=bvc_station_list,
+            evc_stations=evc_station_list,
+            total_length=total_length,
+        )
 
     # =========================================================================
     # PI Extraction from IFC Segments

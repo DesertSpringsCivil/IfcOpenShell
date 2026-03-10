@@ -21,7 +21,7 @@ import pytest
 import bpy
 import ifcopenshell
 import bonsai.tool as tool
-from bonsai.tool.alignment import Alignment as subject
+from bonsai.tool.alignment import Alignment as subject, PVIGeometryResult
 from test.bim.bootstrap import NewFile
 
 
@@ -411,3 +411,297 @@ class TestSafeLayoutHorizontalByPiMethod(NewFile):
             ifc, layout, hpoints=[(0.0, 0.0), (100.0, 0.0)], radii=[]
         )
         assert result is True
+
+
+# ===========================================================================
+# Vertical Alignment Geometry Tests
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# calculate_grade
+# ---------------------------------------------------------------------------
+
+
+class TestCalculateGrade(NewFile):
+    def test_returns_zero_for_zero_horizontal_distance(self):
+        assert_close(subject.calculate_grade(0.0, 10.0, 0.0), 0.0)
+
+    def test_returns_zero_for_negative_horizontal_distance(self):
+        assert_close(subject.calculate_grade(0.0, 10.0, -100.0), 0.0)
+
+    def test_calculates_positive_uphill_grade(self):
+        """2% uphill: rise=2, run=100 → g=0.02."""
+        assert_close(subject.calculate_grade(100.0, 102.0, 100.0), 0.02)
+
+    def test_calculates_negative_downhill_grade(self):
+        """3% downhill: drop=3, run=100 → g=-0.03."""
+        assert_close(subject.calculate_grade(103.0, 100.0, 100.0), -0.03)
+
+    def test_returns_zero_for_flat_grade(self):
+        assert_close(subject.calculate_grade(50.0, 50.0, 200.0), 0.0)
+
+    def test_grade_is_independent_of_absolute_elevation(self):
+        """Same rise and run at different elevations → same grade."""
+        g1 = subject.calculate_grade(0.0, 5.0, 100.0)
+        g2 = subject.calculate_grade(1000.0, 1005.0, 100.0)
+        assert_close(g1, g2)
+
+
+# ---------------------------------------------------------------------------
+# calculate_k_value
+# ---------------------------------------------------------------------------
+
+
+class TestCalculateKValue(NewFile):
+    def test_returns_zero_for_zero_grade_change(self):
+        assert_close(subject.calculate_k_value(200.0, 0.0), 0.0)
+
+    def test_returns_zero_for_zero_curve_length(self):
+        assert_close(subject.calculate_k_value(0.0, 0.04), 0.0)
+
+    def test_calculates_k_for_positive_grade_change(self):
+        """L=200, Δg=0.04 → K=5000 (sag curve)."""
+        assert_close(subject.calculate_k_value(200.0, 0.04), 5000.0)
+
+    def test_calculates_k_for_negative_grade_change(self):
+        """K uses |Δg|, so sign of grade change does not matter."""
+        assert_close(subject.calculate_k_value(200.0, -0.04), 5000.0)
+
+    def test_k_increases_with_longer_curve(self):
+        k_short = subject.calculate_k_value(100.0, 0.04)
+        k_long = subject.calculate_k_value(400.0, 0.04)
+        assert k_long > k_short
+
+
+# ---------------------------------------------------------------------------
+# calculate_vertical_curve_length_from_k
+# ---------------------------------------------------------------------------
+
+
+class TestCalculateVerticalCurveLengthFromK(NewFile):
+    def test_calculates_length_from_k_and_grade_change(self):
+        """K=5000, Δg=0.04 → L=200."""
+        assert_close(subject.calculate_vertical_curve_length_from_k(5000.0, 0.04), 200.0)
+
+    def test_uses_absolute_value_of_grade_change(self):
+        """Negative Δg gives same length as positive."""
+        l_pos = subject.calculate_vertical_curve_length_from_k(5000.0, 0.04)
+        l_neg = subject.calculate_vertical_curve_length_from_k(5000.0, -0.04)
+        assert_close(l_pos, l_neg)
+
+    def test_returns_zero_for_zero_grade_change(self):
+        assert_close(subject.calculate_vertical_curve_length_from_k(5000.0, 0.0), 0.0)
+
+    def test_round_trips_with_calculate_k_value(self):
+        """L → K → L should recover the original length."""
+        original_length = 300.0
+        grade_change = 0.06
+        k = subject.calculate_k_value(original_length, grade_change)
+        recovered_length = subject.calculate_vertical_curve_length_from_k(k, grade_change)
+        assert_close(recovered_length, original_length)
+
+
+# ---------------------------------------------------------------------------
+# calculate_elevation_on_parabola
+# ---------------------------------------------------------------------------
+
+
+class TestCalculateElevationOnParabola(NewFile):
+    def test_elevation_at_bvc_equals_start_elevation(self):
+        """At x=0 (BVC), elevation must equal start_elevation."""
+        elev = subject.calculate_elevation_on_parabola(
+            start_elevation=100.0,
+            start_gradient=0.02,
+            end_gradient=-0.02,
+            curve_length=200.0,
+            distance_from_bvc=0.0,
+        )
+        assert_close(elev, 100.0)
+
+    def test_elevation_at_evc_matches_tangent_grades(self):
+        """At x=L (EVC), elevation = start_elev + g1*L + (g2-g1)/(2L)*L²
+        which simplifies to start_elev + (g1+g2)/2 * L."""
+        g1, g2, L = 0.02, -0.02, 200.0
+        start_elev = 100.0
+        expected = start_elev + (g1 + g2) / 2.0 * L
+        elev = subject.calculate_elevation_on_parabola(start_elev, g1, g2, L, L)
+        assert_close(elev, expected)
+
+    def test_elevation_is_parabolic_midpoint(self):
+        """At x=L/2 the elevation follows the quadratic formula."""
+        g1, g2, L = 0.03, -0.01, 200.0
+        start_elev = 50.0
+        x = L / 2.0
+        expected = start_elev + g1 * x + (g2 - g1) / (2.0 * L) * x**2
+        assert_close(subject.calculate_elevation_on_parabola(start_elev, g1, g2, L, x), expected)
+
+    def test_falls_back_to_linear_for_zero_curve_length(self):
+        """Zero curve length → straight tangent grade."""
+        elev = subject.calculate_elevation_on_parabola(
+            start_elevation=100.0, start_gradient=0.05,
+            end_gradient=-0.05, curve_length=0.0, distance_from_bvc=50.0,
+        )
+        assert_close(elev, 102.5)  # 100 + 0.05 * 50
+
+    def test_crest_curve_elevation_at_high_point(self):
+        """On a crest curve the high point is where g1*x + (g2-g1)/(2L)*x² is maximised."""
+        g1, g2, L = 0.04, -0.02, 300.0
+        start_elev = 200.0
+        # x_hl = g1 * L / (g1 - g2) = 0.04 * 300 / 0.06 = 200
+        x_hl = g1 * L / (g1 - g2)
+        elev_hl = subject.calculate_elevation_on_parabola(start_elev, g1, g2, L, x_hl)
+        # Elevation just before and after should both be lower
+        elev_before = subject.calculate_elevation_on_parabola(start_elev, g1, g2, L, x_hl - 1.0)
+        elev_after = subject.calculate_elevation_on_parabola(start_elev, g1, g2, L, x_hl + 1.0)
+        assert elev_hl >= elev_before
+        assert elev_hl >= elev_after
+
+
+# ---------------------------------------------------------------------------
+# calculate_high_low_point_distance
+# ---------------------------------------------------------------------------
+
+
+class TestCalculateHighLowPointDistance(NewFile):
+    def test_returns_none_for_constant_gradient(self):
+        """No high/low point when g1 == g2 (constant slope)."""
+        result = subject.calculate_high_low_point_distance(0.02, 0.02, 200.0)
+        assert result is None
+
+    def test_returns_none_when_high_low_point_is_outside_curve(self):
+        """When both grades are positive (sag/crest entirely outside curve)."""
+        # g1=0.01, g2=0.03 → Δg positive, x_hl = g1*L/(g1-g2) negative → outside
+        result = subject.calculate_high_low_point_distance(0.01, 0.03, 200.0)
+        assert result is None
+
+    def test_finds_high_point_on_crest_curve(self):
+        """g1 > 0, g2 < 0 → crest curve, high point inside."""
+        g1, g2, L = 0.04, -0.02, 300.0
+        expected = g1 * L / (g1 - g2)  # 0.04*300 / 0.06 = 200
+        result = subject.calculate_high_low_point_distance(g1, g2, L)
+        assert result is not None
+        assert_close(result, expected)
+
+    def test_finds_low_point_on_sag_curve(self):
+        """g1 < 0, g2 > 0 → sag curve, low point inside."""
+        g1, g2, L = -0.03, 0.01, 200.0
+        expected = g1 * L / (g1 - g2)  # -0.03*200 / (-0.04) = 150
+        result = subject.calculate_high_low_point_distance(g1, g2, L)
+        assert result is not None
+        assert_close(result, expected)
+
+    def test_high_low_point_is_strictly_inside_curve(self):
+        """Returned distance must be 0 < x < L."""
+        g1, g2, L = 0.05, -0.03, 400.0
+        result = subject.calculate_high_low_point_distance(g1, g2, L)
+        assert result is not None
+        assert 0 < result < L
+
+
+# ---------------------------------------------------------------------------
+# calculate_bvc_evc_stations
+# ---------------------------------------------------------------------------
+
+
+class TestCalculateBvcEvcStations(NewFile):
+    def test_bvc_is_half_length_before_pvi(self):
+        bvc, _ = subject.calculate_bvc_evc_stations(pvi_station=1000.0, curve_length=200.0)
+        assert_close(bvc, 900.0)
+
+    def test_evc_is_half_length_after_pvi(self):
+        _, evc = subject.calculate_bvc_evc_stations(pvi_station=1000.0, curve_length=200.0)
+        assert_close(evc, 1100.0)
+
+    def test_zero_length_curve_places_bvc_and_evc_at_pvi(self):
+        bvc, evc = subject.calculate_bvc_evc_stations(pvi_station=500.0, curve_length=0.0)
+        assert_close(bvc, 500.0)
+        assert_close(evc, 500.0)
+
+    def test_curve_length_equals_evc_minus_bvc(self):
+        L = 300.0
+        bvc, evc = subject.calculate_bvc_evc_stations(pvi_station=2000.0, curve_length=L)
+        assert_close(evc - bvc, L)
+
+    def test_pvi_is_midpoint_of_bvc_and_evc(self):
+        pvi = 1500.0
+        bvc, evc = subject.calculate_bvc_evc_stations(pvi_station=pvi, curve_length=100.0)
+        assert_close((bvc + evc) / 2.0, pvi)
+
+
+# ---------------------------------------------------------------------------
+# calculate_pvi_geometry
+# ---------------------------------------------------------------------------
+
+
+class TestCalculatePviGeometry(NewFile):
+    def test_returns_empty_result_for_no_pvis(self):
+        result = subject.calculate_pvi_geometry([])
+        assert result.stations == []
+        assert result.total_length == 0.0
+
+    def test_returns_single_pvi_result(self):
+        result = subject.calculate_pvi_geometry([(100.0, 50.0)])
+        assert result.stations == [100.0]
+        assert result.elevations == [50.0]
+        assert result.grades == []
+        assert result.k_values == []
+        assert result.total_length == 0.0
+
+    def test_calculates_grade_between_two_pvis(self):
+        """2% uphill from station 0 to 100."""
+        result = subject.calculate_pvi_geometry([(0.0, 100.0), (100.0, 102.0)])
+        assert len(result.grades) == 1
+        assert_close(result.grades[0], 0.02)
+        assert_close(result.total_length, 100.0)
+
+    def test_calculates_two_grades_for_three_pvis(self):
+        pvis = [(0.0, 100.0), (100.0, 102.0), (300.0, 98.0)]
+        result = subject.calculate_pvi_geometry(pvis)
+        assert len(result.grades) == 2
+        assert_close(result.grades[0], 0.02)   # +2% uphill
+        assert_close(result.grades[1], -0.02)  # -2% downhill
+
+    def test_calculates_bvc_evc_for_interior_pvi(self):
+        """Single interior PVI at station 100, curve length 50 → BVC=75, EVC=125."""
+        pvis = [(0.0, 100.0), (100.0, 102.0), (300.0, 98.0)]
+        result = subject.calculate_pvi_geometry(pvis, curve_lengths=[50.0])
+        assert len(result.bvc_stations) == 1
+        assert_close(result.bvc_stations[0], 75.0)
+        assert_close(result.evc_stations[0], 125.0)
+
+    def test_k_value_is_zero_for_zero_curve_length(self):
+        pvis = [(0.0, 100.0), (100.0, 102.0), (300.0, 98.0)]
+        result = subject.calculate_pvi_geometry(pvis, curve_lengths=[0.0])
+        assert_close(result.k_values[0], 0.0)
+
+    def test_k_value_matches_expected_for_known_curve(self):
+        """g1=+2%, g2=-2%, Δg=0.04, L=200 → K=5000."""
+        pvis = [(0.0, 100.0), (1000.0, 120.0), (2000.0, 100.0)]
+        result = subject.calculate_pvi_geometry(pvis, curve_lengths=[200.0])
+        # grades: [0.02, -0.02], Δg = -0.04, K = 200/0.04 = 5000
+        assert_close(result.k_values[0], 5000.0)
+
+    def test_defaults_curve_lengths_to_zero_when_not_provided(self):
+        pvis = [(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)]
+        result = subject.calculate_pvi_geometry(pvis)
+        assert_close(result.k_values[0], 0.0)
+        assert_close(result.bvc_stations[0], result.stations[1])
+        assert_close(result.evc_stations[0], result.stations[1])
+
+    def test_total_length_equals_last_minus_first_station(self):
+        pvis = [(100.0, 50.0), (400.0, 56.0), (700.0, 50.0)]
+        result = subject.calculate_pvi_geometry(pvis)
+        assert_close(result.total_length, 600.0)
+
+    def test_two_interior_pvis_produce_two_k_values(self):
+        pvis = [
+            (0.0, 100.0),
+            (200.0, 104.0),   # interior 1: g_in=+2%, g_out varies
+            (600.0, 100.0),   # interior 2
+            (1000.0, 92.0),
+        ]
+        result = subject.calculate_pvi_geometry(pvis, curve_lengths=[100.0, 150.0])
+        assert len(result.k_values) == 2
+        assert len(result.bvc_stations) == 2
+        assert len(result.evc_stations) == 2
