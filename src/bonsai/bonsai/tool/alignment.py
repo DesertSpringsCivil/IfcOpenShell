@@ -580,6 +580,61 @@ class Alignment:
     # =========================================================================
 
     @classmethod
+    def get_vertical_layout(cls, alignment: "ifcopenshell.entity_instance"):
+        """Get the IfcAlignmentVertical layout from an alignment.
+
+        Args:
+            alignment: The IfcAlignment entity
+
+        Returns:
+            The IfcAlignmentVertical entity, or None
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        return align_api.get_vertical_layout(alignment)
+
+    @classmethod
+    def add_vertical_layout(cls, alignment: "ifcopenshell.entity_instance") -> "ifcopenshell.entity_instance":
+        """Add a new IfcAlignmentVertical layout to an alignment.
+
+        Handles IFC Concept Template 4.1.4.4.1.1 (first vertical) vs.
+        4.1.4.4.1.2 (reusing horizontal for subsequent verticals).
+
+        Args:
+            alignment: The IfcAlignment entity
+
+        Returns:
+            The newly created IfcAlignmentVertical entity
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        ifc_file = tool.Ifc.get()
+        return align_api.add_vertical_layout(ifc_file, alignment)
+
+    @classmethod
+    def layout_vertical_by_pvi_method(
+        cls,
+        layout: "ifcopenshell.entity_instance",
+        vpoints: list,
+        lengths: list,
+    ):
+        """Add segments to a vertical layout using the PVI method.
+
+        Creates CONSTANTGRADIENT and PARABOLICARC segments from a series
+        of PVI (Point of Vertical Intersection) points.
+
+        Args:
+            layout: The IfcAlignmentVertical layout
+            vpoints: List of (station, elevation) pairs — includes start and end
+            lengths: List of parabolic curve lengths for each interior PVI
+                     (must have len(vpoints) - 2 entries)
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        ifc_file = tool.Ifc.get()
+        align_api.layout_vertical_alignment_by_pi_method(ifc_file, layout, vpoints, lengths)
+
+    @classmethod
     def get_horizontal_layout(cls, alignment: "ifcopenshell.entity_instance"):
         """Get the IfcAlignmentHorizontal layout from an alignment.
 
