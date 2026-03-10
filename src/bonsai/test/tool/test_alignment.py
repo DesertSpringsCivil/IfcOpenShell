@@ -705,3 +705,124 @@ class TestCalculatePviGeometry(NewFile):
         assert len(result.k_values) == 2
         assert len(result.bvc_stations) == 2
         assert len(result.evc_stations) == 2
+
+
+# ---------------------------------------------------------------------------
+# is_crest_curve / is_sag_curve
+# ---------------------------------------------------------------------------
+
+
+class TestIsCrestCurve(NewFile):
+    def test_returns_true_when_grade_decreases(self):
+        """g1=+3%, g2=-2% → crest curve."""
+        assert subject.is_crest_curve(0.03, -0.02) is True
+
+    def test_returns_false_when_grade_increases(self):
+        """g1=-2%, g2=+3% → sag, not crest."""
+        assert subject.is_crest_curve(-0.02, 0.03) is False
+
+    def test_returns_false_for_constant_grade(self):
+        """No grade change → neither crest nor sag."""
+        assert subject.is_crest_curve(0.02, 0.02) is False
+
+    def test_returns_true_when_both_positive_but_decreasing(self):
+        """g1=+4%, g2=+1% → crest (still decreasing)."""
+        assert subject.is_crest_curve(0.04, 0.01) is True
+
+
+class TestIsSagCurve(NewFile):
+    def test_returns_true_when_grade_increases(self):
+        """g1=-2%, g2=+3% → sag curve."""
+        assert subject.is_sag_curve(-0.02, 0.03) is True
+
+    def test_returns_false_when_grade_decreases(self):
+        """g1=+3%, g2=-2% → crest, not sag."""
+        assert subject.is_sag_curve(0.03, -0.02) is False
+
+    def test_returns_false_for_constant_grade(self):
+        """No grade change → neither crest nor sag."""
+        assert subject.is_sag_curve(-0.01, -0.01) is False
+
+    def test_crest_and_sag_are_mutually_exclusive(self):
+        """For any non-constant grade, exactly one of is_crest or is_sag is True."""
+        g1, g2 = 0.03, -0.02
+        assert subject.is_crest_curve(g1, g2) != subject.is_sag_curve(g1, g2)
+
+
+# ---------------------------------------------------------------------------
+# back_calculate_pvis_from_vertical  (IFC integration — uses real ifcopenshell)
+# ---------------------------------------------------------------------------
+
+
+class TestBackCalculatePvisFromVertical(NewFile):
+    def _build_alignment_with_vertical(self, vpoints, lengths):
+        """Helper: create IfcAlignment + vertical layout via Rick's API."""
+        import ifcopenshell.api.root
+        import ifcopenshell.api.alignment
+
+        ifc = ifcopenshell.file(schema="IFC4X3_ADD2")
+        tool.Ifc.set(ifc)
+        ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
+        alignment = ifc.createIfcAlignment()
+        h_layout = ifc.createIfcAlignmentHorizontal()
+        ifc.createIfcRelNests(RelatingObject=alignment, RelatedObjects=[h_layout])
+        # Add a simple horizontal first (required for gradient curve)
+        subject.safe_layout_horizontal_by_pi_method(
+            ifc, h_layout, hpoints=[(0.0, 0.0), (vpoints[-1][0], 0.0)], radii=[]
+        )
+        v_layout = ifcopenshell.api.alignment.add_vertical_layout(ifc, alignment)
+        ifcopenshell.api.alignment.layout_vertical_alignment_by_pi_method(
+            ifc, v_layout, vpoints, lengths
+        )
+        return alignment
+
+    def test_raises_when_alignment_has_no_vertical_layout(self):
+        import ifcopenshell.api.root
+
+        ifc = ifcopenshell.file(schema="IFC4X3_ADD2")
+        tool.Ifc.set(ifc)
+        ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
+        alignment = ifc.createIfcAlignment()
+        with pytest.raises(ValueError, match="no vertical layout"):
+            subject.back_calculate_pvis_from_vertical(alignment)
+
+    def test_round_trips_two_pvis_with_no_curve(self):
+        """Simple grade line: 2 PVIs, no vertical curve."""
+        vpoints = [(0.0, 100.0), (500.0, 110.0)]
+        lengths = []
+        alignment = self._build_alignment_with_vertical(vpoints, lengths)
+        pvis = subject.back_calculate_pvis_from_vertical(alignment)
+        assert len(pvis) == 2
+        assert_close(pvis[0]["station"], 0.0)
+        assert_close(pvis[0]["elevation"], 100.0)
+        assert_close(pvis[-1]["station"], 500.0)
+        assert_close(pvis[-1]["elevation"], 110.0)
+
+    def test_round_trips_three_pvis_with_one_curve(self):
+        """Crest curve: 3 PVIs, 1 vertical curve."""
+        vpoints = [(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)]
+        lengths = [100.0]
+        alignment = self._build_alignment_with_vertical(vpoints, lengths)
+        pvis = subject.back_calculate_pvis_from_vertical(alignment)
+        assert len(pvis) == 3
+        # Interior PVI should be recovered near station 500
+        assert_close(pvis[1]["station"], 500.0, tol=1e-3)
+        assert_close(pvis[1]["curve_length"], 100.0, tol=1e-3)
+
+    def test_recovered_interior_pvi_elevation_is_tangent_intersection(self):
+        """PVI elevation = BVC + g1 * (L/2) — the tangent intersection."""
+        vpoints = [(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)]
+        lengths = [100.0]
+        alignment = self._build_alignment_with_vertical(vpoints, lengths)
+        pvis = subject.back_calculate_pvis_from_vertical(alignment)
+        # Back-calculated elevation should match the original PVI
+        assert_close(pvis[1]["elevation"], 110.0, tol=1e-3)
+
+    def test_endpoint_curve_lengths_are_zero(self):
+        """Endpoints never have a vertical curve."""
+        vpoints = [(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)]
+        lengths = [100.0]
+        alignment = self._build_alignment_with_vertical(vpoints, lengths)
+        pvis = subject.back_calculate_pvis_from_vertical(alignment)
+        assert_close(pvis[0]["curve_length"], 0.0)
+        assert_close(pvis[-1]["curve_length"], 0.0)

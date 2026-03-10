@@ -103,6 +103,174 @@ def enter_pi_edit_mode(
     return empties
 
 
+def add_vertical_to_alignment(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+):
+    """Add a vertical layout to an existing horizontal alignment.
+
+    Business rules:
+    1. Alignment must exist and be an IfcAlignment
+    2. Alignment must not already have a vertical layout
+    3. Horizontal layout must exist (vertical requires horizontal)
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment
+
+    Returns:
+        The newly created IfcAlignmentVertical entity
+
+    Raises:
+        ValueError: If alignment doesn't exist, is wrong type, already has
+                   a vertical layout, or has no horizontal layout
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    try:
+        alignment = ifc_file.by_id(alignment_id)
+    except RuntimeError:
+        raise ValueError(f"Alignment with ID {alignment_id} not found")
+
+    if not alignment.is_a("IfcAlignment"):
+        raise ValueError(f"Entity {alignment_id} is not an IfcAlignment")
+
+    if alignment_tool.get_horizontal_layout(alignment) is None:
+        raise ValueError(f"Alignment '{alignment.Name}' has no horizontal layout — add horizontal first")
+
+    if alignment_tool.get_vertical_layout(alignment) is not None:
+        raise ValueError(f"Alignment '{alignment.Name}' already has a vertical layout")
+
+    return alignment_tool.add_vertical_layout(alignment)
+
+
+def enter_pvi_edit_mode(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+) -> list:
+    """Enter PVI edit mode for vertical alignment.
+
+    Business logic:
+    1. Validates that the alignment exists and has a vertical layout
+    2. Validates that the vertical layout has real (non-terminator) segments
+    3. Back-calculates PVI positions from existing segments
+    4. Creates temporary EMPTY objects at each PVI location in profile space
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment to edit
+
+    Returns:
+        List of created PVI EMPTY objects
+
+    Raises:
+        ValueError: If validation fails
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    try:
+        alignment = ifc_file.by_id(alignment_id)
+    except RuntimeError:
+        raise ValueError(f"Alignment with ID {alignment_id} not found")
+
+    if not alignment.is_a("IfcAlignment"):
+        raise ValueError(f"Entity {alignment_id} is not an IfcAlignment")
+
+    v_layout = alignment_tool.get_vertical_layout(alignment)
+    if v_layout is None:
+        raise ValueError(f"Alignment '{alignment.Name}' has no vertical layout")
+
+    if not alignment_tool.layout_has_real_segments(v_layout):
+        raise ValueError(f"Alignment '{alignment.Name}' has no editable vertical segments")
+
+    pvis = alignment_tool.back_calculate_pvis_from_vertical(alignment)
+
+    if len(pvis) < 2:
+        raise ValueError(f"Alignment '{alignment.Name}' must have at least 2 PVIs")
+
+    return alignment_tool.create_pvi_edit_empties(alignment, pvis)
+
+
+def exit_pvi_edit_mode(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+    apply: bool,
+) -> bool:
+    """Exit PVI edit mode for vertical alignment.
+
+    Business logic:
+    1. If apply=True:
+       - Collect new PVI positions from empties
+       - Validate the new configuration
+       - Update vertical segments in-place (preserves alignment ID)
+       - Refresh Blender visualization
+    2. Always:
+       - Remove temporary EMPTY objects
+       - Return success status
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment being edited
+        apply: If True, update alignment with new PVI positions
+
+    Returns:
+        True if successful
+
+    Raises:
+        ValueError: If apply=True and validation fails
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        alignment_tool.remove_pvi_edit_empties(alignment_id)
+        return True
+
+    try:
+        alignment = ifc_file.by_id(alignment_id)
+    except RuntimeError:
+        alignment_tool.remove_pvi_edit_empties(alignment_id)
+        return True
+
+    if apply:
+        vpoints, lengths = alignment_tool.collect_pvis_from_empties_vertical(alignment_id)
+
+        if len(vpoints) < 2:
+            raise ValueError("At least 2 PVIs are required")
+
+        v_layout = alignment_tool.get_vertical_layout(alignment)
+        if v_layout is None:
+            raise ValueError("Alignment has no vertical layout")
+
+        # Remove empties before modifying segments
+        alignment_tool.remove_pvi_edit_empties(alignment_id)
+
+        # Remove Blender visualization for vertical segments
+        alignment_tool.remove_layout_segment_objects(v_layout)
+
+        # Clear existing segments and regenerate
+        alignment_tool.clear_layout_segments(v_layout)
+        alignment_tool.layout_vertical_by_pvi_method(v_layout, vpoints, lengths)
+
+        # Refresh Blender visualization
+        layout_obj = ifc_tool.get_object(v_layout)
+        if layout_obj:
+            alignment_tool.create_objects_for_layout_segments(v_layout, layout_obj)
+
+        return True
+    else:
+        alignment_tool.remove_pvi_edit_empties(alignment_id)
+        return True
+
+
 def exit_pi_edit_mode(
     ifc_tool: "type[tool.Ifc]",
     alignment_tool: "type[tool.Alignment]",

@@ -470,6 +470,239 @@ class Alignment:
             total_length=total_length,
         )
 
+    @classmethod
+    def is_crest_curve(cls, start_gradient: float, end_gradient: float) -> bool:
+        """Check if two grades form a crest (hill) curve.
+
+        A crest curve transitions from a higher to a lower grade (g1 > g2).
+        It controls stopping sight distance.
+
+        Args:
+            start_gradient: Incoming grade (decimal)
+            end_gradient: Outgoing grade (decimal)
+
+        Returns:
+            True if end_gradient < start_gradient
+        """
+        return end_gradient < start_gradient
+
+    @classmethod
+    def is_sag_curve(cls, start_gradient: float, end_gradient: float) -> bool:
+        """Check if two grades form a sag (valley) curve.
+
+        A sag curve transitions from a lower to a higher grade (g1 < g2).
+        It controls headlight sight distance and rider comfort.
+
+        Args:
+            start_gradient: Incoming grade (decimal)
+            end_gradient: Outgoing grade (decimal)
+
+        Returns:
+            True if end_gradient > start_gradient
+        """
+        return end_gradient > start_gradient
+
+    @classmethod
+    def back_calculate_pvis_from_vertical(cls, alignment: "ifcopenshell.entity_instance") -> List[dict]:
+        """Reverse-engineer PVI positions from IFC vertical alignment segments.
+
+        Reconstructs the original PVI table from CONSTANTGRADIENT and
+        PARABOLICARC IfcAlignmentVerticalSegment entities. The PVI for a
+        PARABOLICARC is at the tangent intersection: station = BVC + L/2,
+        elevation = BVC_elevation + g1 * (L/2).
+
+        Args:
+            alignment: The IfcAlignment entity
+
+        Returns:
+            List of dicts, each containing:
+            - "station": float — distance along horizontal alignment
+            - "elevation": float — elevation at PVI
+            - "curve_length": float — vertical curve length (0 for endpoints)
+
+        Raises:
+            ValueError: If alignment has no vertical layout or no real segments
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        v_layout = align_api.get_vertical_layout(alignment)
+        if v_layout is None:
+            raise ValueError(f"Alignment #{alignment.id()} has no vertical layout")
+
+        segments = align_api.get_layout_segments(v_layout)
+        if not segments:
+            raise ValueError(f"Alignment #{alignment.id()} has no vertical segments")
+
+        real_segments = [seg for seg in segments if not cls.is_zero_length_segment(seg)]
+        if not real_segments:
+            raise ValueError(f"Alignment #{alignment.id()} has no real vertical segments")
+
+        pvis = []
+
+        # First PVI: start of first real segment
+        first_dp = real_segments[0].DesignParameters
+        pvis.append({
+            "station": float(first_dp.StartDistAlong),
+            "elevation": float(first_dp.StartHeight),
+            "curve_length": 0.0,
+        })
+
+        # Interior PVIs: one per PARABOLICARC segment
+        for seg in real_segments:
+            dp = seg.DesignParameters
+            if not dp.is_a("IfcAlignmentVerticalSegment"):
+                continue
+            if dp.PredefinedType != "PARABOLICARC":
+                continue
+            horizontal_length = float(dp.HorizontalLength)
+            # PVI is at the tangent intersection: BVC + L/2
+            pvi_station = float(dp.StartDistAlong) + horizontal_length / 2.0
+            # Elevation at PVI = BVC elevation extended by back tangent grade
+            pvi_elevation = float(dp.StartHeight) + float(dp.StartGradient) * (horizontal_length / 2.0)
+            pvis.append({
+                "station": pvi_station,
+                "elevation": pvi_elevation,
+                "curve_length": horizontal_length,
+            })
+
+        # Last PVI: end of last real segment
+        last_dp = real_segments[-1].DesignParameters
+        last_station = float(last_dp.StartDistAlong) + float(last_dp.HorizontalLength)
+        # Elevation at end = StartHeight + (g1 + g2) / 2 * L (works for both types)
+        last_elevation = float(last_dp.StartHeight) + (
+            (float(last_dp.StartGradient) + float(last_dp.EndGradient)) / 2.0 * float(last_dp.HorizontalLength)
+        )
+        if abs(last_station - pvis[-1]["station"]) > 1e-6:
+            pvis.append({
+                "station": last_station,
+                "elevation": last_elevation,
+                "curve_length": 0.0,
+            })
+
+        return pvis
+
+    @classmethod
+    def create_pvi_edit_empties(
+        cls,
+        alignment: "ifcopenshell.entity_instance",
+        pvis: List[dict],
+    ) -> List[bpy.types.Object]:
+        """Create EMPTY objects at PVI locations for vertical profile editing.
+
+        Empties are placed in profile space: X=station, Y=0, Z=elevation.
+        This represents the vertical alignment as a station-elevation diagram.
+        Users should work in Front Orthographic view to move PVIs.
+
+        Args:
+            alignment: The IfcAlignment entity
+            pvis: List of PVI dicts from back_calculate_pvis_from_vertical()
+
+        Returns:
+            List of created Blender EMPTY objects, sorted by index
+        """
+        alignment_obj = tool.Ifc.get_object(alignment)
+        if alignment_obj is None:
+            return []
+
+        collection = (
+            alignment_obj.users_collection[0]
+            if alignment_obj.users_collection
+            else bpy.context.scene.collection
+        )
+        alignment_id = alignment.id()
+        empties = []
+
+        for i, pvi in enumerate(pvis):
+            station = float(pvi["station"])
+            elevation = float(pvi["elevation"])
+            curve_length = float(pvi.get("curve_length", 0.0))
+
+            name = f"PVI.{i + 1:03d}"
+            empty = bpy.data.objects.new(name, None)
+            empty.empty_display_type = "SPHERE"
+            empty.empty_display_size = 2.0
+            # Profile space: X = station, Y = 0, Z = elevation
+            empty.location = (station, 0.0, elevation)
+
+            empty["civil_is_pvi_empty"] = True
+            empty["civil_pvi_index"] = i
+            empty["civil_pvi_curve_length"] = curve_length
+            empty["civil_alignment_id"] = alignment_id
+
+            empty.parent = alignment_obj
+            collection.objects.link(empty)
+            empties.append(empty)
+
+        return empties
+
+    @classmethod
+    def get_pvi_edit_empties(cls, alignment_id: int) -> List[bpy.types.Object]:
+        """Find all PVI EMPTY objects for a given alignment.
+
+        Args:
+            alignment_id: The IFC ID of the alignment being edited
+
+        Returns:
+            List of PVI EMPTY objects, sorted by pvi_index
+        """
+        empties = [
+            obj for obj in bpy.data.objects
+            if obj.get("civil_is_pvi_empty") and obj.get("civil_alignment_id") == alignment_id
+        ]
+        empties.sort(key=lambda e: e.get("civil_pvi_index", 0))
+        return empties
+
+    @classmethod
+    def remove_pvi_edit_empties(cls, alignment_id: int) -> int:
+        """Remove all PVI EMPTY objects for a given alignment.
+
+        Args:
+            alignment_id: The IFC ID of the alignment being edited
+
+        Returns:
+            Number of objects removed
+        """
+        empties = cls.get_pvi_edit_empties(alignment_id)
+        for empty in empties:
+            bpy.data.objects.remove(empty, do_unlink=True)
+        return len(empties)
+
+    @classmethod
+    def collect_pvis_from_empties_vertical(
+        cls, alignment_id: int
+    ) -> Tuple[List[Tuple[float, float]], List[float]]:
+        """Gather current PVI positions from EMPTY objects.
+
+        Reads the profile-space positions of PVI empties (X=station, Z=elevation)
+        and assembles them for layout_vertical_by_pvi_method.
+
+        Args:
+            alignment_id: The IFC ID of the alignment being edited
+
+        Returns:
+            Tuple of:
+            - vpoints: List of (station, elevation) tuples
+            - lengths: List of curve lengths for interior PVIs only (not first/last)
+        """
+        empties = cls.get_pvi_edit_empties(alignment_id)
+
+        if len(empties) < 2:
+            return ([], [])
+
+        vpoints = []
+        lengths = []
+
+        for i, empty in enumerate(empties):
+            station = empty.location.x   # Profile space: X = station
+            elevation = empty.location.z  # Profile space: Z = elevation
+            vpoints.append((station, elevation))
+
+            if 0 < i < len(empties) - 1:
+                curve_length = float(empty.get("civil_pvi_curve_length", 0.0))
+                lengths.append(curve_length)
+
+        return (vpoints, lengths)
+
     # =========================================================================
     # PI Extraction from IFC Segments
     # =========================================================================

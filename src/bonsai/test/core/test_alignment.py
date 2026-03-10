@@ -195,3 +195,186 @@ class TestExitPiEditMode:
         alignment.create_objects_for_layout_segments("h_layout", "layout_obj").should_be_called()
         result = subject.exit_pi_edit_mode(ifc, alignment, alignment_id=1, apply=True)
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# add_vertical_to_alignment
+# ---------------------------------------------------------------------------
+
+
+class TestAddVerticalToAlignment:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.add_vertical_to_alignment(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_alignment_not_found(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        with pytest.raises(ValueError, match="not found"):
+            subject.add_vertical_to_alignment(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.add_vertical_to_alignment(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_no_horizontal_layout_exists(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_horizontal_layout(entity).should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="no horizontal layout"):
+            subject.add_vertical_to_alignment(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_vertical_layout_already_exists(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_horizontal_layout(entity).should_be_called().will_return("h_layout")
+        alignment.get_vertical_layout(entity).should_be_called().will_return("v_layout")
+        with pytest.raises(ValueError, match="already has a vertical layout"):
+            subject.add_vertical_to_alignment(ifc, alignment, alignment_id=1)
+
+    def test_creates_and_returns_vertical_layout(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_horizontal_layout(entity).should_be_called().will_return("h_layout")
+        alignment.get_vertical_layout(entity).should_be_called().will_return(None)
+        alignment.add_vertical_layout(entity).should_be_called().will_return("new_v_layout")
+        result = subject.add_vertical_to_alignment(ifc, alignment, alignment_id=1)
+        assert result == "new_v_layout"
+
+
+# ---------------------------------------------------------------------------
+# enter_pvi_edit_mode
+# ---------------------------------------------------------------------------
+
+
+class TestEnterPviEditMode:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.enter_pvi_edit_mode(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_alignment_not_found(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        with pytest.raises(ValueError, match="not found"):
+            subject.enter_pvi_edit_mode(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.enter_pvi_edit_mode(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_alignment_has_no_vertical_layout(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_vertical_layout(entity).should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="no vertical layout"):
+            subject.enter_pvi_edit_mode(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_vertical_layout_has_no_real_segments(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_vertical_layout(entity).should_be_called().will_return("v_layout")
+        alignment.layout_has_real_segments("v_layout").should_be_called().will_return(False)
+        with pytest.raises(ValueError, match="no editable vertical segments"):
+            subject.enter_pvi_edit_mode(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_fewer_than_two_pvis(self, ifc, alignment):
+        entity = make_alignment_entity()
+        pvis = [{"station": 0.0, "elevation": 100.0, "curve_length": 0.0}]
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_vertical_layout(entity).should_be_called().will_return("v_layout")
+        alignment.layout_has_real_segments("v_layout").should_be_called().will_return(True)
+        alignment.back_calculate_pvis_from_vertical(entity).should_be_called().will_return(pvis)
+        with pytest.raises(ValueError, match="at least 2 PVIs"):
+            subject.enter_pvi_edit_mode(ifc, alignment, alignment_id=1)
+
+    def test_returns_empties_for_valid_vertical_alignment(self, ifc, alignment):
+        entity = make_alignment_entity()
+        pvis = [
+            {"station": 0.0, "elevation": 100.0, "curve_length": 0.0},
+            {"station": 500.0, "elevation": 110.0, "curve_length": 0.0},
+        ]
+        empties = ["pvi_empty_0", "pvi_empty_1"]
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_vertical_layout(entity).should_be_called().will_return("v_layout")
+        alignment.layout_has_real_segments("v_layout").should_be_called().will_return(True)
+        alignment.back_calculate_pvis_from_vertical(entity).should_be_called().will_return(pvis)
+        alignment.create_pvi_edit_empties(entity, pvis).should_be_called().will_return(empties)
+        result = subject.enter_pvi_edit_mode(ifc, alignment, alignment_id=1)
+        assert result == empties
+
+
+# ---------------------------------------------------------------------------
+# exit_pvi_edit_mode
+# ---------------------------------------------------------------------------
+
+
+class TestExitPviEditMode:
+    def test_cleans_up_and_returns_true_when_no_ifc_file(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        alignment.remove_pvi_edit_empties(1).should_be_called()
+        result = subject.exit_pvi_edit_mode(ifc, alignment, alignment_id=1, apply=True)
+        assert result is True
+
+    def test_cleans_up_and_returns_true_when_alignment_deleted(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        alignment.remove_pvi_edit_empties(1).should_be_called()
+        result = subject.exit_pvi_edit_mode(ifc, alignment, alignment_id=1, apply=True)
+        assert result is True
+
+    def test_removes_empties_without_apply(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.remove_pvi_edit_empties(1).should_be_called()
+        result = subject.exit_pvi_edit_mode(ifc, alignment, alignment_id=1, apply=False)
+        assert result is True
+
+    def test_raises_when_fewer_than_two_vpoints_on_apply(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.collect_pvis_from_empties_vertical(1).should_be_called().will_return(([(0.0, 100.0)], []))
+        with pytest.raises(ValueError, match="At least 2 PVIs"):
+            subject.exit_pvi_edit_mode(ifc, alignment, alignment_id=1, apply=True)
+
+    def test_raises_when_no_vertical_layout_on_apply(self, ifc, alignment):
+        entity = make_alignment_entity()
+        vpoints = [(0.0, 100.0), (500.0, 110.0)]
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.collect_pvis_from_empties_vertical(1).should_be_called().will_return((vpoints, []))
+        alignment.get_vertical_layout(entity).should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="no vertical layout"):
+            subject.exit_pvi_edit_mode(ifc, alignment, alignment_id=1, apply=True)
+
+    def test_applies_new_pvis_without_layout_obj(self, ifc, alignment):
+        entity = make_alignment_entity()
+        vpoints = [(0.0, 100.0), (500.0, 110.0)]
+        lengths = []
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.collect_pvis_from_empties_vertical(1).should_be_called().will_return((vpoints, lengths))
+        alignment.get_vertical_layout(entity).should_be_called().will_return("v_layout")
+        alignment.remove_pvi_edit_empties(1).should_be_called()
+        alignment.remove_layout_segment_objects("v_layout").should_be_called()
+        alignment.clear_layout_segments("v_layout").should_be_called()
+        alignment.layout_vertical_by_pvi_method("v_layout", vpoints, lengths).should_be_called()
+        ifc.get_object("v_layout").should_be_called().will_return(None)
+        result = subject.exit_pvi_edit_mode(ifc, alignment, alignment_id=1, apply=True)
+        assert result is True
+
+    def test_creates_segment_objects_when_layout_obj_exists(self, ifc, alignment):
+        entity = make_alignment_entity()
+        vpoints = [(0.0, 100.0), (500.0, 110.0)]
+        lengths = []
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.collect_pvis_from_empties_vertical(1).should_be_called().will_return((vpoints, lengths))
+        alignment.get_vertical_layout(entity).should_be_called().will_return("v_layout")
+        alignment.remove_pvi_edit_empties(1).should_be_called()
+        alignment.remove_layout_segment_objects("v_layout").should_be_called()
+        alignment.clear_layout_segments("v_layout").should_be_called()
+        alignment.layout_vertical_by_pvi_method("v_layout", vpoints, lengths).should_be_called()
+        ifc.get_object("v_layout").should_be_called().will_return("layout_obj")
+        alignment.create_objects_for_layout_segments("v_layout", "layout_obj").should_be_called()
+        result = subject.exit_pvi_edit_mode(ifc, alignment, alignment_id=1, apply=True)
+        assert result is True

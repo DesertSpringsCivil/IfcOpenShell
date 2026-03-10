@@ -77,6 +77,7 @@ class Aggregate:
 
 @interface
 class Alignment:
+    # Horizontal PI edit mode
     def back_calculate_pis_from_alignment(cls, alignment): pass
     def clear_layout_segments(cls, h_layout): pass
     def collect_pis_from_empties(cls, alignment_id): pass
@@ -87,6 +88,14 @@ class Alignment:
     def layout_has_real_segments(cls, h_layout): pass
     def remove_layout_segment_objects(cls, h_layout): pass
     def remove_pi_edit_empties(cls, alignment_id): pass
+    # Vertical PVI edit mode
+    def add_vertical_layout(cls, alignment): pass
+    def back_calculate_pvis_from_vertical(cls, alignment): pass
+    def collect_pvis_from_empties_vertical(cls, alignment_id): pass
+    def create_pvi_edit_empties(cls, alignment, pvis): pass
+    def get_vertical_layout(cls, alignment): pass
+    def layout_vertical_by_pvi_method(cls, layout, vpoints, lengths): pass
+    def remove_pvi_edit_empties(cls, alignment_id): pass
 
 
 @interface
