@@ -25,9 +25,12 @@ classes = (
     # Property groups (must be registered before classes that use them)
     prop.AlignmentPI,
     prop.AlignmentDisplayRow,
+    prop.VerticalPVI,
+    prop.VerticalDisplayRow,
     prop.CivilAlignmentProperties,
     # UILists
     ui.CIVIL_UL_alignment_pis,
+    ui.CIVIL_UL_vertical_pvis,
     operator.ImportAlignmentCSV,
     # Operators - PI Management
     operator.CIVIL_OT_add_pi,
@@ -43,9 +46,19 @@ classes = (
     operator.CIVIL_OT_name_segments,
     # Operators - PI Edit Mode
     operator.CIVIL_OT_enter_pi_edit_mode,
+    # Operators - Vertical PVI Management
+    operator.CIVIL_OT_add_vertical_to_alignment,
+    operator.CIVIL_OT_add_pvi,
+    operator.CIVIL_OT_remove_pvi,
+    operator.CIVIL_OT_recalculate_pvis,
+    operator.CIVIL_OT_clear_pvis,
+    # Operators - PVI Edit Mode
+    operator.CIVIL_OT_enter_pvi_edit_mode,
     # UI Panels (appear in Properties sidebar under CIVIL tab)
     ui.CIVIL_PT_alignment_creation,
     ui.CIVIL_PT_pi_editor,
+    ui.CIVIL_PT_vertical_creation,
+    ui.CIVIL_PT_pvi_editor,
     ui.CIVIL_PT_alignment_stationing,
 )
 

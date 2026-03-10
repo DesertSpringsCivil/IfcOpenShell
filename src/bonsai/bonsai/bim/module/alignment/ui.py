@@ -118,6 +118,61 @@ class CIVIL_UL_alignment_pis(UIList):
             layout.label(text="", icon="DECORATE")
 
 
+class CIVIL_UL_vertical_pvis(UIList):
+    """UIList for displaying interleaved PVI points and grade segments (Civil 3D style)
+
+    Row types:
+    - POINT rows: End (endpoint BOM/EOM), PVI (interior PVI with optional curve)
+    - SEGMENT rows: Grade (tangent grade run between curves/endpoints)
+    """
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {"DEFAULT", "COMPACT"}:
+            row = layout.row(align=True)
+
+            if item.row_type == "POINT":
+                row.label(text="")  # No segment number for point rows
+
+                row.label(text=item.display_type, icon="DOT")
+
+                # Station and elevation — get actual PVI for editing
+                pvi = data.vertical_pvis[item.pvi_index] if item.pvi_index < len(data.vertical_pvis) else None
+                if pvi:
+                    sub = row.row(align=True)
+                    sub.prop(pvi, "station", text="")
+                    sub.prop(pvi, "elevation", text="")
+                else:
+                    row.label(text=f"{item.station:.2f}")
+                    row.label(text=f"{item.elevation:.3f}")
+
+                # Curve length — editable for interior PVIs
+                if item.display_type == "PVI" and pvi:
+                    row.prop(pvi, "curve_length", text="")
+                elif item.curve_length > 0:
+                    row.label(text=f"L={item.curve_length:.1f}")
+                else:
+                    row.label(text="")
+
+                # K value — display only
+                if item.k_value > 0:
+                    row.label(text=f"K={item.k_value:.1f}")
+                else:
+                    row.label(text="")
+
+            elif item.row_type == "SEGMENT":
+                # Grade segment row
+                row.label(text="")
+                row.label(text="Grade", icon="IPO_LINEAR")
+                row.label(text="")  # No station for segment rows
+                row.label(text="")  # No elevation for segment rows
+                row.label(text=f"{item.grade_pct:+.3f}%")
+                row.label(text=f"{item.length:.2f}")
+
+        elif self.layout_type == "GRID":
+            layout.alignment = "CENTER"
+            layout.label(text="", icon="DECORATE")
+
+
 # =============================================================================
 # Creation Sub-Panel
 # =============================================================================
@@ -234,6 +289,104 @@ class CIVIL_PT_pi_editor(Panel):
 # =============================================================================
 # Stationing Sub-Panel
 # =============================================================================
+
+
+class CIVIL_PT_vertical_creation(Panel):
+    """Sub-panel for vertical alignment creation"""
+
+    bl_label = "Vertical Alignment"
+    bl_idname = "CIVIL_PT_vertical_creation"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "scene"
+    bl_parent_id = "BIM_PT_tab_horizontal_alignment"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        return tool.Blender.should_show_panel(context, "CIVIL", cls.bl_idname) and is_ifc4x3()
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.CivilAlignmentProperties
+
+        # Show Add Vertical Layout button when no vertical exists
+        if props.active_alignment_id != 0:
+            box = layout.box()
+            box.label(text="Setup:", icon="ADD")
+            box.operator("civil.add_vertical_to_alignment", icon="CURVE_PATH")
+            layout.separator()
+
+
+class CIVIL_PT_pvi_editor(Panel):
+    """Sub-panel for PVI point table editor (Civil 3D style grid view)"""
+
+    bl_label = "PVI Editor"
+    bl_idname = "CIVIL_PT_pvi_editor"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "scene"
+    bl_parent_id = "BIM_PT_tab_horizontal_alignment"
+    bl_options = set()  # Open by default
+
+    @classmethod
+    def poll(cls, context):
+        return tool.Blender.should_show_panel(context, "CIVIL", cls.bl_idname) and is_ifc4x3()
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.CivilAlignmentProperties
+
+        # PVI Edit Mode indicator
+        if props.is_pvi_edit_mode:
+            box = layout.box()
+            box.alert = True
+            box.label(text="PVI Edit Mode Active", icon="EDITMODE_HLT")
+            col = box.column(align=True)
+            col.label(text="Move PVIs with G key")
+            col.label(text="Press Enter to apply")
+            col.label(text="Press Escape to cancel")
+            layout.separator()
+            return  # Don't show normal UI while in edit mode
+
+        # Edit existing alignment button
+        if props.active_alignment_id != 0:
+            box = layout.box()
+            box.label(text="Edit Vertical Alignment:", icon="EDITMODE_HLT")
+            box.operator("civil.enter_pvi_edit_mode", icon="PIVOT_CURSOR", text="Edit PVIs (G key)")
+            layout.separator()
+
+        # Header row with column labels
+        header = layout.row(align=True)
+        header.label(text="No.")
+        header.label(text="Type")
+        header.label(text="Station")
+        header.label(text="Elevation")
+        header.label(text="Curve L")
+        header.label(text="K")
+
+        # Combined PVI/grade list (interleaved view)
+        row = layout.row()
+        row.template_list(
+            "CIVIL_UL_vertical_pvis",
+            "",
+            props,
+            "vertical_display_rows",
+            props,
+            "active_vertical_display_row_index",
+            rows=8,
+        )
+
+        # Side buttons for list management
+        col = row.column(align=True)
+        col.operator("civil.add_pvi", icon="ADD", text="")
+        col.operator("civil.remove_pvi", icon="REMOVE", text="")
+
+        # Bottom actions
+        layout.separator()
+        row = layout.row(align=True)
+        row.operator("civil.recalculate_pvis", icon="FILE_REFRESH", text="Recalculate")
+        row.operator("civil.clear_pvis", icon="TRASH", text="Clear All")
 
 
 class CIVIL_PT_alignment_stationing(Panel):

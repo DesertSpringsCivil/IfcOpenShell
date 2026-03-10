@@ -31,6 +31,17 @@ from bpy.props import (
 )
 
 
+def _on_curve_length_update(self, context):
+    """Callback when curve_length property changes on a VerticalPVI.
+
+    Dynamically imports the operator module to call on_curve_length_changed,
+    avoiding circular imports.
+    """
+    from . import operator as ops
+
+    ops.on_curve_length_changed(self, context)
+
+
 def _on_radius_update(self, context):
     """Callback when radius property changes.
 
@@ -103,6 +114,85 @@ class AlignmentPI(PropertyGroup):
         default=0.0,
         precision=2,
     )
+
+
+class VerticalPVI(PropertyGroup):
+    """Property group for a single PVI (Point of Vertical Intersection).
+
+    In the PVI method, vertical alignments are defined by:
+    - Endpoint PVIs: Start (BOM) and End (EOM) points
+    - Interior PVIs: Points where grade tangents intersect, optionally with parabolic curves
+    """
+
+    station: FloatProperty(
+        name="Station",
+        description="Station value at this PVI",
+        default=0.0,
+        precision=2,
+    )
+
+    elevation: FloatProperty(
+        name="Elevation",
+        description="Elevation at this PVI",
+        default=0.0,
+        precision=3,
+        unit="LENGTH",
+    )
+
+    pvi_type: EnumProperty(
+        name="Type",
+        description="Type of PVI point",
+        items=[
+            ("ENDPOINT", "Endpoint", "Start or end point (no curve)"),
+            ("INTERIOR", "Interior", "Interior PVI, optionally with vertical curve"),
+        ],
+        default="INTERIOR",
+    )
+
+    curve_length: FloatProperty(
+        name="Curve Length",
+        description="Vertical parabolic curve length (0 = no curve, sharp grade break)",
+        default=0.0,
+        min=0.0,
+        precision=2,
+        unit="LENGTH",
+        update=_on_curve_length_update,
+    )
+
+
+class VerticalDisplayRow(PropertyGroup):
+    """Property group for interleaved PVI/grade display in the vertical table.
+
+    Creates the Civil 3D-style view:
+        End (BOM) - station, elevation
+          Grade segment 1 - slope %, length
+        PVI 1 - station, elevation, curve length, K
+          Grade segment 2 - slope %, length
+        ...
+        End (EOM) - station, elevation
+    """
+
+    row_type: EnumProperty(
+        name="Row Type",
+        items=[
+            ("POINT", "Point", "A PVI point row"),
+            ("SEGMENT", "Segment", "A grade segment row"),
+        ],
+        default="POINT",
+    )
+
+    pvi_index: IntProperty(name="PVI Index", default=0)
+    display_type: StringProperty(name="Type", default="")
+
+    # PVI point data (POINT rows)
+    station: FloatProperty(name="Station", default=0.0, precision=2)
+    elevation: FloatProperty(name="Elevation", default=0.0, precision=3)
+    curve_length: FloatProperty(name="Curve Length", default=0.0, precision=2)
+    k_value: FloatProperty(name="K Value", default=0.0, precision=1)
+
+    # Grade segment data (SEGMENT rows)
+    grade_pct: FloatProperty(name="Grade %", default=0.0, precision=3)
+    length: FloatProperty(name="Length", default=0.0, precision=2)
 
 
 class AlignmentDisplayRow(PropertyGroup):
@@ -196,6 +286,27 @@ class CivilAlignmentProperties(PropertyGroup):
     pi_edit_alignment_id: IntProperty(
         name="Editing Alignment ID",
         description="IFC ID of alignment being edited in PI edit mode",
+        default=0,
+    )
+
+    # Vertical PVI collection for PVI method creation
+    vertical_pvis: CollectionProperty(type=VerticalPVI)
+    active_pvi_index: IntProperty(name="Active PVI", default=0)
+
+    # Vertical display rows (interleaved PVI/grade view)
+    vertical_display_rows: CollectionProperty(type=VerticalDisplayRow)
+    active_vertical_display_row_index: IntProperty(name="Active Vertical Display Row", default=0)
+
+    # PVI Edit Mode state (for moving PVIs with G key)
+    is_pvi_edit_mode: BoolProperty(
+        name="PVI Edit Mode Active",
+        description="Whether PVI edit mode is currently active",
+        default=False,
+    )
+
+    pvi_edit_alignment_id: IntProperty(
+        name="Editing Alignment ID (Vertical)",
+        description="IFC ID of alignment being edited in PVI edit mode",
         default=0,
     )
 

@@ -307,6 +307,88 @@ def rebuild_display_rows(props):
 
 
 # =============================================================================
+# Vertical PVI Helpers
+# =============================================================================
+
+
+def on_curve_length_changed(pvi, context):
+    """Callback when PVI curve_length changes. Triggers vertical geometry recalculation."""
+    props = context.scene.CivilAlignmentProperties
+    recalculate_pvi_geometry(props)
+
+
+def recalculate_pvi_geometry(props):
+    """Recalculate vertical geometry and rebuild display rows."""
+    pvis = props.vertical_pvis
+    if len(pvis) < 2:
+        rebuild_vertical_display_rows(props)
+        return
+
+    rebuild_vertical_display_rows(props)
+
+
+def rebuild_vertical_display_rows(props):
+    """Rebuild vertical_display_rows from vertical_pvis collection.
+
+    Creates an interleaved view of PVI points and grade segments:
+        End (BOM) - station, elevation
+          Grade 1 - slope %, tangent length
+        PVI 1 - station, elevation [, curve_length, K]
+          Grade 2 - slope %, tangent length
+        ...
+        End (EOM) - station, elevation
+    """
+    props.vertical_display_rows.clear()
+    pvis = props.vertical_pvis
+    if len(pvis) == 0:
+        return
+
+    # Compute geometry if we have enough points
+    result = None
+    if len(pvis) >= 2:
+        vpoints = [(pvi.station, pvi.elevation) for pvi in pvis]
+        curve_lengths = [pvis[i].curve_length for i in range(1, len(pvis) - 1)] or None
+        try:
+            result = tool.Alignment.calculate_pvi_geometry(vpoints, curve_lengths)
+        except Exception:
+            pass
+
+    for i, pvi in enumerate(pvis):
+        is_interior = 0 < i < len(pvis) - 1
+        has_curve = is_interior and pvi.curve_length > 0
+
+        # Add PVI point row
+        row = props.vertical_display_rows.add()
+        row.row_type = "POINT"
+        row.pvi_index = i
+        row.station = pvi.station
+        row.elevation = pvi.elevation
+        row.display_type = "End" if pvi.pvi_type == "ENDPOINT" else "PVI"
+        if has_curve and result:
+            row.curve_length = pvi.curve_length
+            j = i - 1  # interior PVI index (0-based)
+            if j < len(result.k_values):
+                row.k_value = result.k_values[j]
+
+        # Add grade segment after each PVI except the last
+        if i < len(pvis) - 1:
+            seg_row = props.vertical_display_rows.add()
+            seg_row.row_type = "SEGMENT"
+            seg_row.pvi_index = i
+            seg_row.display_type = "Grade"
+            if result and i < len(result.grades):
+                seg_row.grade_pct = result.grades[i] * 100.0
+            # Tangent length = horizontal distance minus half curve lengths at each end
+            next_pvi = pvis[i + 1]
+            horiz_dist = next_pvi.station - pvi.station
+            half_curr = (pvi.curve_length / 2.0) if has_curve else 0.0
+            next_is_interior = 0 < (i + 1) < len(pvis) - 1
+            next_has_curve = next_is_interior and next_pvi.curve_length > 0
+            half_next = (next_pvi.curve_length / 2.0) if next_has_curve else 0.0
+            seg_row.length = max(0.0, horiz_dist - half_curr - half_next)
+
+
+# =============================================================================
 # PI Management Operators
 # =============================================================================
 
@@ -1068,6 +1150,354 @@ class CIVIL_OT_enter_pi_edit_mode(Operator, tool.Ifc.Operator):
 
         # Clear instance state
         self._pi_empties = []
+        self._last_positions = []
+
+        if self._area:
+            self._area.tag_redraw()
+
+        if apply:
+            return {"FINISHED"}
+        return {"CANCELLED"}
+
+
+# =============================================================================
+# Vertical Alignment Operators
+# =============================================================================
+
+
+class CIVIL_OT_add_vertical_to_alignment(Operator, tool.Ifc.Operator):
+    """Add a vertical layout to the active alignment"""
+
+    bl_idname = "civil.add_vertical_to_alignment"
+    bl_label = "Add Vertical Layout"
+    bl_description = "Add a vertical (profile) layout to the active alignment"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("No alignment selected")
+            return False
+        alignment = tool.Alignment.get_active_alignment()
+        if alignment is None:
+            cls.poll_message_set("Selected alignment no longer exists")
+            return False
+        if tool.Alignment.get_vertical_layout(alignment) is not None:
+            cls.poll_message_set("Alignment already has a vertical layout")
+            return False
+        return True
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        try:
+            core.add_vertical_to_alignment(tool.Ifc, tool.Alignment, props.active_alignment_id)
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Vertical layout added")
+
+
+class CIVIL_OT_add_pvi(Operator):
+    """Add a new PVI to the vertical alignment list"""
+
+    bl_idname = "civil.add_pvi"
+    bl_label = "Add PVI"
+    bl_description = "Add a new PVI (Point of Vertical Intersection)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return poll_ifc4x3(cls, context)
+
+    def execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+
+        pvi = props.vertical_pvis.add()
+
+        if len(props.vertical_pvis) == 1:
+            pvi.station = 0.0
+            pvi.elevation = 0.0
+            pvi.pvi_type = "ENDPOINT"
+        elif len(props.vertical_pvis) == 2:
+            prev = props.vertical_pvis[0]
+            pvi.station = prev.station + 100.0
+            pvi.elevation = prev.elevation
+            pvi.pvi_type = "ENDPOINT"
+        else:
+            prev = props.vertical_pvis[-2]
+            prev_prev = props.vertical_pvis[-3]
+            ds = prev.station - prev_prev.station
+            de = prev.elevation - prev_prev.elevation
+            pvi.station = prev.station + ds
+            pvi.elevation = prev.elevation + de
+            pvi.pvi_type = "INTERIOR"
+            props.vertical_pvis[-2].pvi_type = "INTERIOR"
+
+        props.active_pvi_index = len(props.vertical_pvis) - 1
+        recalculate_pvi_geometry(props)
+        return {"FINISHED"}
+
+
+class CIVIL_OT_remove_pvi(Operator):
+    """Remove the selected PVI from the vertical alignment list"""
+
+    bl_idname = "civil.remove_pvi"
+    bl_label = "Remove PVI"
+    bl_description = "Remove the selected PVI"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if len(props.vertical_pvis) == 0:
+            cls.poll_message_set("No PVIs to remove")
+            return False
+        if props.vertical_display_rows:
+            idx = props.active_vertical_display_row_index
+            if 0 <= idx < len(props.vertical_display_rows):
+                if props.vertical_display_rows[idx].row_type != "POINT":
+                    cls.poll_message_set("Select a PVI point row to remove")
+                    return False
+        return True
+
+    def execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+
+        pvi_index = -1
+        if props.vertical_display_rows:
+            idx = props.active_vertical_display_row_index
+            if 0 <= idx < len(props.vertical_display_rows):
+                row = props.vertical_display_rows[idx]
+                if row.row_type == "POINT":
+                    pvi_index = row.pvi_index
+
+        if pvi_index < 0:
+            pvi_index = props.active_pvi_index
+
+        if 0 <= pvi_index < len(props.vertical_pvis):
+            props.vertical_pvis.remove(pvi_index)
+            props.active_pvi_index = min(pvi_index, len(props.vertical_pvis) - 1)
+            recalculate_pvi_geometry(props)
+
+            if len(props.vertical_display_rows) > 0:
+                props.active_vertical_display_row_index = min(
+                    props.active_vertical_display_row_index, len(props.vertical_display_rows) - 1
+                )
+            else:
+                props.active_vertical_display_row_index = 0
+
+        return {"FINISHED"}
+
+
+class CIVIL_OT_recalculate_pvis(Operator, tool.Ifc.Operator):
+    """Recalculate PVI geometry and update the IFC vertical alignment"""
+
+    bl_idname = "civil.recalculate_pvis"
+    bl_label = "Recalculate PVIs"
+    bl_description = "Recalculate geometry, update IFC vertical segments, and refresh visualization"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if len(props.vertical_pvis) < 2:
+            cls.poll_message_set("Need at least 2 PVIs to recalculate")
+            return False
+        return True
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        recalculate_pvi_geometry(props)
+
+        alignment = tool.Alignment.get_active_alignment()
+        if not alignment:
+            total_len = 0.0
+            if len(props.vertical_pvis) >= 2:
+                total_len = props.vertical_pvis[-1].station - props.vertical_pvis[0].station
+            self.report({"INFO"}, f"Recalculated {len(props.vertical_pvis)} PVIs, total length: {total_len:.2f}")
+            return
+
+        v_layout = tool.Alignment.get_vertical_layout(alignment)
+        if v_layout is None:
+            self.report({"ERROR"}, "Alignment has no vertical layout — add vertical first")
+            return
+
+        vpoints = [(pvi.station, pvi.elevation) for pvi in props.vertical_pvis]
+        curve_lengths = [props.vertical_pvis[i].curve_length for i in range(1, len(props.vertical_pvis) - 1)]
+
+        tool.Alignment.remove_layout_segment_objects(v_layout)
+        tool.Alignment.clear_layout_segments(v_layout)
+        tool.Alignment.layout_vertical_by_pvi_method(v_layout, vpoints, curve_lengths)
+
+        layout_obj = tool.Ifc.get_object(v_layout)
+        if layout_obj:
+            tool.Alignment.create_objects_for_layout_segments(v_layout, layout_obj)
+
+        self.report({"INFO"}, f"Updated vertical alignment '{alignment.Name}' with {len(vpoints)} PVIs")
+
+
+class CIVIL_OT_clear_pvis(Operator, tool.Ifc.Operator):
+    """Clear all PVIs from the vertical editor"""
+
+    bl_idname = "civil.clear_pvis"
+    bl_label = "Clear All PVIs"
+    bl_description = "Remove all PVIs from the vertical editor"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if len(props.vertical_pvis) == 0:
+            cls.poll_message_set("No PVIs to clear")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        props.vertical_pvis.clear()
+        props.active_pvi_index = 0
+        props.vertical_display_rows.clear()
+        props.active_vertical_display_row_index = 0
+        self.report({"INFO"}, "Cleared all PVIs")
+
+
+class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
+    """Enter PVI editing mode - move PVIs with G key, press Enter to apply or Escape to cancel"""
+
+    bl_idname = "civil.enter_pvi_edit_mode"
+    bl_label = "Edit PVIs"
+    bl_description = (
+        "Enter PVI edit mode. Move PVI points with G key. "
+        "Press Enter to apply changes, Escape to cancel."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    _pvi_empties: list = []
+    _last_positions: list = []
+    _area = None
+    _alignment_id: int = 0
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.is_pvi_edit_mode:
+            cls.poll_message_set("Already in PVI edit mode")
+            return False
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("No alignment selected")
+            return False
+        alignment = tool.Alignment.get_active_alignment()
+        if alignment is None:
+            cls.poll_message_set("Selected alignment no longer exists")
+            return False
+        if tool.Alignment.get_vertical_layout(alignment) is None:
+            cls.poll_message_set("Alignment has no vertical layout")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        return IfcStore.execute_ifc_operator(self, context, event, method="INVOKE")
+
+    def _invoke(self, context, event):
+        props = context.scene.CivilAlignmentProperties
+        self._alignment_id = props.active_alignment_id
+
+        try:
+            empties = core.enter_pvi_edit_mode(tool.Ifc, tool.Alignment, self._alignment_id)
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        if not empties:
+            self.report({"ERROR"}, "Failed to create PVI empties")
+            return {"CANCELLED"}
+
+        self._pvi_empties = empties
+        self._last_positions = [e.location.copy() for e in empties]
+
+        self._area = None
+        for area in context.screen.areas:
+            if area.type == "VIEW_3D":
+                self._area = area
+                break
+
+        alignment_decorator.PIEditDecorator.install(context, empties)
+
+        props.is_pvi_edit_mode = True
+        props.pvi_edit_alignment_id = self._alignment_id
+
+        context.window_manager.modal_handler_add(self)
+        self.report({"INFO"}, "PVI Edit Mode: Move PVIs with G. Press Enter to apply, Escape to cancel.")
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        return IfcStore.execute_ifc_operator(self, context, event, method="MODAL")
+
+    def _modal(self, context, event):
+        props = context.scene.CivilAlignmentProperties
+
+        if not self._empties_still_exist():
+            self.report({"WARNING"}, "PVI Edit Mode cancelled - empties were removed")
+            return self._cleanup_and_finish(context, apply=False)
+
+        positions_changed = False
+        for i, empty in enumerate(self._pvi_empties):
+            if empty.location != self._last_positions[i]:
+                positions_changed = True
+                self._last_positions[i] = empty.location.copy()
+
+        if positions_changed:
+            alignment_decorator.PIEditDecorator.update_positions(self._pvi_empties)
+            if self._area:
+                self._area.tag_redraw()
+
+        if event.type in {"RET", "NUMPAD_ENTER"} and event.value == "PRESS":
+            return self._cleanup_and_finish(context, apply=True)
+
+        if event.type == "ESC" and event.value == "PRESS":
+            return self._cleanup_and_finish(context, apply=False)
+
+        return {"PASS_THROUGH"}
+
+    def _empties_still_exist(self) -> bool:
+        for empty in self._pvi_empties:
+            if empty is None or empty.name not in bpy.data.objects:
+                return False
+        return True
+
+    def _cleanup_and_finish(self, context, apply: bool):
+        props = context.scene.CivilAlignmentProperties
+
+        try:
+            if apply:
+                core.exit_pvi_edit_mode(tool.Ifc, tool.Alignment, self._alignment_id, apply=True)
+                self.report({"INFO"}, "PVI changes applied - vertical alignment updated")
+            else:
+                core.exit_pvi_edit_mode(tool.Ifc, tool.Alignment, self._alignment_id, apply=False)
+                self.report({"INFO"}, "PVI Edit Mode cancelled")
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+
+        alignment_decorator.PIEditDecorator.uninstall()
+
+        props.is_pvi_edit_mode = False
+        props.pvi_edit_alignment_id = 0
+
+        self._pvi_empties = []
         self._last_positions = []
 
         if self._area:
