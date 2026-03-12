@@ -757,24 +757,31 @@ class TestIsSagCurve(NewFile):
 
 class TestBackCalculatePvisFromVertical(NewFile):
     def _build_alignment_with_vertical(self, vpoints, lengths):
-        """Helper: create IfcAlignment + vertical layout via Rick's API."""
+        """Helper: create IfcAlignment + vertical layout via Rick's API.
+
+        Uses align_api.create() to build a complete alignment with proper
+        horizontal geometric representation (Axis/Curve2D). This is required
+        so that add_vertical_layout() can find a valid BaseCurve for the
+        IfcGradientCurve it creates.
+        """
         import ifcopenshell.api.root
-        import ifcopenshell.api.alignment
+        import ifcopenshell.api.unit
+        import ifcopenshell.api.alignment as align_api
 
         ifc = ifcopenshell.file(schema="IFC4X3_ADD2")
         tool.Ifc.set(ifc)
         ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
-        alignment = ifc.createIfcAlignment()
-        h_layout = ifc.createIfcAlignmentHorizontal()
-        ifc.createIfcRelNests(RelatingObject=alignment, RelatedObjects=[h_layout])
-        # Add a simple horizontal first (required for gradient curve)
-        subject.safe_layout_horizontal_by_pi_method(
-            ifc, h_layout, hpoints=[(0.0, 0.0), (vpoints[-1][0], 0.0)], radii=[]
+        # assign_unit is required so align_api.create() can call station_as_string
+        ifcopenshell.api.unit.assign_unit(ifc)
+        # create() sets up IfcAlignment + IfcAlignmentHorizontal + Axis/Curve2D representation
+        alignment = align_api.create(ifc, name="Test Alignment", include_vertical=False)
+        h_layout = align_api.get_horizontal_layout(alignment)
+        # Simple tangent spanning the full station range (non-collinear to avoid div-by-zero)
+        align_api.layout_horizontal_alignment_by_pi_method(
+            ifc, h_layout, hpoints=[(0.0, 0.0), (vpoints[-1][0], 200.0)], radii=[]
         )
-        v_layout = ifcopenshell.api.alignment.add_vertical_layout(ifc, alignment)
-        ifcopenshell.api.alignment.layout_vertical_alignment_by_pi_method(
-            ifc, v_layout, vpoints, lengths
-        )
+        v_layout = align_api.add_vertical_layout(ifc, alignment)
+        align_api.layout_vertical_alignment_by_pi_method(ifc, v_layout, vpoints, lengths)
         return alignment
 
     def test_raises_when_alignment_has_no_vertical_layout(self):
@@ -787,7 +794,6 @@ class TestBackCalculatePvisFromVertical(NewFile):
         with pytest.raises(ValueError, match="no vertical layout"):
             subject.back_calculate_pvis_from_vertical(alignment)
 
-    @pytest.mark.xfail(reason="Requires vertical alignment API changes not yet in upstream ifcopenshell")
     def test_round_trips_two_pvis_with_no_curve(self):
         """Simple grade line: 2 PVIs, no vertical curve."""
         vpoints = [(0.0, 100.0), (500.0, 110.0)]
@@ -800,7 +806,6 @@ class TestBackCalculatePvisFromVertical(NewFile):
         assert_close(pvis[-1]["station"], 500.0)
         assert_close(pvis[-1]["elevation"], 110.0)
 
-    @pytest.mark.xfail(reason="Requires vertical alignment API changes not yet in upstream ifcopenshell")
     def test_round_trips_three_pvis_with_one_curve(self):
         """Crest curve: 3 PVIs, 1 vertical curve."""
         vpoints = [(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)]
@@ -812,7 +817,6 @@ class TestBackCalculatePvisFromVertical(NewFile):
         assert_close(pvis[1]["station"], 500.0, tol=1e-3)
         assert_close(pvis[1]["curve_length"], 100.0, tol=1e-3)
 
-    @pytest.mark.xfail(reason="Requires vertical alignment API changes not yet in upstream ifcopenshell")
     def test_recovered_interior_pvi_elevation_is_tangent_intersection(self):
         """PVI elevation = BVC + g1 * (L/2) — the tangent intersection."""
         vpoints = [(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)]
@@ -822,7 +826,6 @@ class TestBackCalculatePvisFromVertical(NewFile):
         # Back-calculated elevation should match the original PVI
         assert_close(pvis[1]["elevation"], 110.0, tol=1e-3)
 
-    @pytest.mark.xfail(reason="Requires vertical alignment API changes not yet in upstream ifcopenshell")
     def test_endpoint_curve_lengths_are_zero(self):
         """Endpoints never have a vertical curve."""
         vpoints = [(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)]
