@@ -117,7 +117,3 @@ src/ifcopenshell-python/ifcopenshell/express/*.exp
 src/ifcopenshell-python/ifcopenshell/express/*.exp.cache.dat
 
 # Claude Code local config (managed via dotfiles repo)
-CLAUDE.md
-CLAUDE.local.md
-.mcp.json
-.claude/
