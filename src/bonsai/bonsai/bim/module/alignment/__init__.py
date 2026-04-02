@@ -18,7 +18,7 @@
 
 import bpy
 from bpy.app.handlers import persistent
-from . import ui, prop, operator, decorator
+from . import ui, prop, operator, decorator, workspace
 
 
 classes = (
@@ -68,10 +68,18 @@ def menu_func_import(self, context):
 
 
 def register():
+    if not bpy.app.background:
+        bpy.utils.register_tool(
+            workspace.AlignmentTool,
+            separator=True,
+            group=False,
+        )
     bpy.types.Scene.CivilAlignmentProperties = bpy.props.PointerProperty(type=prop.CivilAlignmentProperties)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
 
 
 def unregister():
+    if not bpy.app.background:
+        bpy.utils.unregister_tool(workspace.AlignmentTool)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     del bpy.types.Scene.CivilAlignmentProperties
