@@ -882,6 +882,70 @@ class Alignment:
         return align_api.get_horizontal_layout(alignment)
 
     @classmethod
+    def add_horizontal_layout_to_alignment(
+        cls, alignment: "ifcopenshell.entity_instance"
+    ) -> "ifcopenshell.entity_instance":
+        """Add an IfcAlignmentHorizontal layout to a bare IfcAlignment.
+
+        Creates the nested horizontal layout, zero-length terminal segment,
+        and geometric representation using the alignment API. Use this to
+        bootstrap an alignment created via Add Element (which has no layouts).
+
+        Args:
+            alignment: A bare IfcAlignment entity with no horizontal layout.
+
+        Returns:
+            The newly created IfcAlignmentHorizontal entity.
+        """
+        import ifcopenshell.api.alignment as align_api
+        import ifcopenshell.api.nest
+        import ifcopenshell.util.alignment
+        from ifcopenshell.api.alignment._add_zero_length_segment import (
+            _add_zero_length_segment,
+        )
+
+        ifc_file = tool.Ifc.get()
+
+        # Create and nest the horizontal layout
+        h_layout = ifc_file.createIfcAlignmentHorizontal(
+            GlobalId=ifcopenshell.guid.new()
+        )
+        ifcopenshell.api.nest.assign_object(
+            ifc_file, related_objects=[h_layout], relating_object=alignment
+        )
+
+        # Create geometric representation (curves) for the alignment
+        align_api._create_geometric_representation(ifc_file, alignment)
+
+        # Add stationing referent (required by segment creation API)
+        start_station = 0.0
+        station_name = ifcopenshell.util.alignment.station_as_string(ifc_file, start_station)
+        align_api.add_stationing_referent(
+            ifc_file, alignment, 0.0, start_station, station_name, alignment
+        )
+
+        # Add zero-length terminal segment
+        _add_zero_length_segment(ifc_file, h_layout)
+
+        # Add geometric representation to the zero-length segment
+        curve = align_api.get_layout_curve(h_layout)
+        axis_geom_subcontext = align_api.get_axis_subcontext(ifc_file)
+        axis_representation = ifc_file.createIfcShapeRepresentation(
+            ContextOfItems=axis_geom_subcontext,
+            RepresentationIdentifier="Axis",
+            RepresentationType="Segment",
+            Items=(curve.Segments[-1],),
+        )
+        product = ifc_file.createIfcProductDefinitionShape(
+            Representations=(axis_representation,)
+        )
+        zero_length_segment = h_layout.IsNestedBy[0].RelatedObjects[-1]
+        zero_length_segment.ObjectPlacement = alignment.ObjectPlacement
+        zero_length_segment.Representation = product
+
+        return h_layout
+
+    @classmethod
     def clear_layout_segments(cls, layout: "ifcopenshell.entity_instance"):
         """Clear all segments from a layout, preserving the layout entity.
 
@@ -1083,14 +1147,30 @@ class Alignment:
 
         mapped_segments = ifcopenshell.api.alignment.get_mapped_segments(segment)
         tool.Loader.load_settings()
+        obj = None
         for curve_segment in mapped_segments:
             if curve_segment is not None:
                 geometry = tool.Loader.create_generic_shape(curve_segment)
                 # Currently, there may be potentially two IfcCurveSegments, for Helmert
                 mesh = ifc_importer.create_mesh(curve_segment, geometry)
-                obj = bpy.data.objects.new(tool.Loader.get_name(curve_segment), mesh)
-                tool.Ifc.link(curve_segment, obj)
-                tool.Collector.assign(obj)
+                obj = bpy.data.objects.new(f"IfcAlignmentSegment/{name}", mesh)
+
+                # Parent to layout object and assign to same collection
+                if parent_obj:
+                    obj.parent = parent_obj
+                    if parent_obj.users_collection:
+                        parent_obj.users_collection[0].objects.link(obj)
+                    else:
+                        tool.Collector.assign(obj)
+                else:
+                    tool.Collector.assign(obj)
+
+        # Link the Blender object to the IfcAlignmentSegment (the IfcProduct),
+        # not the IfcCurveSegment (geometry). This follows Bonsai's convention
+        # of one Blender object per IfcProduct and ensures correct cleanup.
+        if obj:
+            tool.Ifc.link(segment, obj)
+
         return obj
 
     @classmethod
@@ -1225,7 +1305,6 @@ class Alignment:
         """
         removed_count = 0
 
-        # Get segments via IfcRelNests
         for rel in getattr(layout, "IsNestedBy", []) or []:
             for segment in rel.RelatedObjects or []:
                 if segment.is_a() == "IfcAlignmentSegment":

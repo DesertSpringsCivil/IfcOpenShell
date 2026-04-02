@@ -19,6 +19,8 @@
 import bpy
 from bpy.types import WorkSpaceTool
 
+import bonsai.tool as tool
+
 
 class AlignmentTool(WorkSpaceTool):
     bl_space_type = "VIEW_3D"
@@ -31,7 +33,7 @@ class AlignmentTool(WorkSpaceTool):
     )
     bl_icon = "CURVE_DATA"
     bl_widget = None
-    bl_keymap = ()
+    bl_keymap = tool.Blender.get_default_selection_keypmap()
 
     def draw_settings(
         context: bpy.types.Context,
@@ -58,6 +60,9 @@ def _draw_sidebar(layout):
     # -- Horizontal Alignment --
     col = layout.column(align=True)
     col.label(text="Horizontal Alignment", icon="CURVE_DATA")
+    op = col.operator("bim.add_element", text="Add Alignment", icon="ADD")
+    op.ifc_product = "IfcAlignment"
+    op.ifc_class = "IfcAlignment"
     col.operator("civil.import_alignment_csv", icon="IMPORT")
     col.separator()
     col.operator("civil.pick_pi_from_viewport", icon="EYEDROPPER")

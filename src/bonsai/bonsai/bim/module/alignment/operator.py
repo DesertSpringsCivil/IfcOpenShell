@@ -693,41 +693,51 @@ class CIVIL_OT_recalculate_pis(Operator, tool.Ifc.Operator):
         # Recalculate geometry in UI properties
         recalculate_pi_geometry(props)
 
-        # If there's an active alignment, update it in-place
-        if alignment := tool.Alignment.get_active_alignment():
-            # Get horizontal layout for in-place editing
-            h_layout = align_api.get_horizontal_layout(alignment)
-            if h_layout is None:
-                self.report({"ERROR"}, "Alignment has no horizontal layout")
-                return
-
-            # Convert global E/N coords (stored in props.pis) -> local IFC coords for the IfcOpenShell API
-            hpoints = [[float(o) for o in tool.Georeference.enh2xyz((float(pi.e), float(pi.n), 0.), to_blender=False)[:2]] for pi in props.pis]
-            radii = [pi.radius for pi in props.pis[1:-1]]
-
-            # Remove Blender visualization for segments (not the whole hierarchy)
-            tool.Alignment.remove_layout_segment_objects(h_layout)
-
-            # Clear existing IFC segments (preserves layout and zero-length terminator)
-            align_api.clear_layout_segments(ifc, h_layout)
-
-            # Add new segments with updated PI positions
-            align_api.layout_horizontal_alignment_by_pi_method(
-                ifc, h_layout, hpoints, radii
-            )
-
-            # Refresh Blender visualization for new segments
-            layout_obj = tool.Ifc.get_object(h_layout)
-            if layout_obj:
-                tool.Alignment.create_objects_for_layout_segments(h_layout, layout_obj)
-
-            # Alignment ID stays the same - no need to update props.active_alignment_id
-            self.report({"INFO"}, f"Updated alignment '{alignment.Name}' with {len(hpoints)} PIs")
+        # Get the selected IfcAlignment from the outliner
+        alignment = tool.Alignment.get_active_alignment()
+        if not alignment:
+            total_length = sum(pi.length_to_next for pi in props.pis)
+            self.report({"WARNING"}, f"Select an IfcAlignment in the outliner first. (Recalculated {len(props.pis)} PIs, total length: {total_length:.2f})")
             return
 
-        # No active alignment - just report geometry recalculation
-        total_length = sum(pi.length_to_next for pi in props.pis)
-        self.report({"INFO"}, f"Recalculated {len(props.pis)} PIs, total length: {total_length:.2f}")
+        props.active_alignment_id = alignment.id()
+
+        # Bootstrap horizontal layout if the alignment is bare (e.g. from Add Element)
+        h_layout = align_api.get_horizontal_layout(alignment)
+        if h_layout is None:
+            h_layout = tool.Alignment.add_horizontal_layout_to_alignment(alignment)
+
+        # Ensure Blender objects exist for the alignment hierarchy
+        alignment_obj = tool.Ifc.get_object(alignment)
+        if not alignment_obj:
+            alignment_obj = tool.Alignment.create_hierarchy_for_alignment(alignment)
+
+        # Convert global E/N coords -> local IFC coords
+        hpoints = [[float(o) for o in tool.Georeference.enh2xyz((float(pi.e), float(pi.n), 0.), to_blender=False)[:2]] for pi in props.pis]
+        radii = [pi.radius for pi in props.pis[1:-1]]
+
+        # Remove existing Blender segment objects
+        tool.Alignment.remove_layout_segment_objects(h_layout)
+
+        # Clear existing IFC segments (preserves layout and zero-length terminator)
+        align_api.clear_layout_segments(ifc, h_layout)
+
+        # Add new segments with updated PI positions
+        align_api.layout_horizontal_alignment_by_pi_method(
+            ifc, h_layout, hpoints, radii
+        )
+
+        # Create Blender objects for the new segments
+        layout_obj = tool.Ifc.get_object(h_layout)
+        if not layout_obj:
+            layout_obj = tool.Alignment.create_object_for_layout(h_layout, alignment_obj)
+
+        if layout_obj:
+            tool.Alignment.create_objects_for_layout_segments(h_layout, layout_obj)
+
+        tool.Blender.update_viewport()
+
+        self.report({"INFO"}, f"Updated alignment '{alignment.Name}' with {len(hpoints)} PIs")
 
 
 class CIVIL_OT_clear_pis(Operator, tool.Ifc.Operator):
