@@ -543,3 +543,177 @@ class TestCreateEarthworksCut:
         rels = reopened.by_type("IfcRelAssociatesClassification")
         matching = [r for r in rels if cut in r.RelatedObjects]
         assert matching[0].RelatingClassification.Identification == "22-07 31 53"
+
+
+class TestCreateEarthworksFill:
+    """Tests for ``ifcopenshell.api.earthwork.create_earthworks_fill``."""
+
+    def test_happy_path(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_fill
+
+        points, faces = _cube_solid_geometry()
+        fill = create_earthworks_fill(
+            empty_project_file,
+            name="Embankment",
+            points=points,
+            faces=faces,
+        )
+
+        assert fill.is_a("IfcEarthworksFill")
+        assert fill.Name == "Embankment"
+        assert fill.PredefinedType == "EMBANKMENT"
+
+    def test_solid_body_representation_attached(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_fill
+
+        points, faces = _cube_solid_geometry()
+        fill = create_earthworks_fill(
+            empty_project_file, name="X", points=points, faces=faces
+        )
+        rep = fill.Representation.Representations[0]
+        assert rep.RepresentationIdentifier == "Body"
+        assert rep.RepresentationType == "Tessellation"
+        assert rep.Items[0].is_a("IfcPolygonalFaceSet")
+        assert rep.Items[0].Closed is True
+
+    def test_contained_in_site(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_fill
+
+        points, faces = _cube_solid_geometry()
+        fill = create_earthworks_fill(
+            empty_project_file, name="X", points=points, faces=faces
+        )
+        rel = (fill.ContainedInStructure or [None])[0]
+        assert rel is not None
+        assert rel.RelatingStructure.id() == _site(empty_project_file).id()
+
+    def test_standard_pset_attached(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_fill
+
+        points, faces = _tetrahedron_solid_geometry()
+        fill = create_earthworks_fill(
+            empty_project_file, name="X", points=points, faces=faces
+        )
+        common = _read_pset(fill, "Pset_EarthworksFillCommon")
+        assert common.get("Status") == "NEW"
+
+    def test_omniclass_default(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_fill
+
+        points, faces = _tetrahedron_solid_geometry()
+        fill = create_earthworks_fill(
+            empty_project_file, name="X", points=points, faces=faces
+        )
+        rels = empty_project_file.by_type("IfcRelAssociatesClassification")
+        matching = [r for r in rels if fill in r.RelatedObjects]
+        assert matching[0].RelatingClassification.Identification == "22-07 31 23"
+        assert matching[0].RelatingClassification.Name == "Fill"
+
+    def test_omniclass_override_for_backfill(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """Per the docstring: backfill gets the more specific code."""
+        from ifcopenshell.api.earthwork import create_earthworks_fill
+
+        points, faces = _tetrahedron_solid_geometry()
+        fill = create_earthworks_fill(
+            empty_project_file,
+            name="Trench backfill",
+            points=points,
+            faces=faces,
+            predefined_type="BACKFILL",
+            omniclass_code="22-07 31 23 16",
+            omniclass_title="Backfill",
+        )
+        rels = empty_project_file.by_type("IfcRelAssociatesClassification")
+        matching = [r for r in rels if fill in r.RelatedObjects]
+        assert matching[0].RelatingClassification.Identification == "22-07 31 23 16"
+
+    def test_predefined_type_options(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_fill
+
+        for pt in ("BACKFILL", "COUNTERWEIGHT", "EMBANKMENT", "TRANSITIONSECTION"):
+            points, faces = _tetrahedron_solid_geometry()
+            fill = create_earthworks_fill(
+                empty_project_file,
+                name=f"Fill-{pt}",
+                points=points,
+                faces=faces,
+                predefined_type=pt,
+            )
+            assert fill.PredefinedType == pt
+
+    def test_warns_on_phase2_reserved_predefined_type(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """SLOPEFILL/SUBGRADE are valid IFC values but warn the caller."""
+        from ifcopenshell.api.earthwork import create_earthworks_fill
+
+        points, faces = _tetrahedron_solid_geometry()
+        with pytest.warns(UserWarning, match="reserved by ifcopenshell.api.grading"):
+            fill = create_earthworks_fill(
+                empty_project_file,
+                name="Mistaken slope fill",
+                points=points,
+                faces=faces,
+                predefined_type="SLOPEFILL",
+            )
+        assert fill.PredefinedType == "SLOPEFILL"  # still authored
+
+    def test_invalid_predefined_type_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_fill
+
+        points, faces = _tetrahedron_solid_geometry()
+        with pytest.raises(ValueError, match="must be a valid IfcEarthworksFillTypeEnum"):
+            create_earthworks_fill(
+                empty_project_file,
+                name="X",
+                points=points,
+                faces=faces,
+                predefined_type="invented",
+            )
+
+    def test_raises_when_no_site(self) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_fill
+
+        file = _empty_project_file_no_site()
+        points, faces = _tetrahedron_solid_geometry()
+        with pytest.raises(ValueError, match="no IfcSite"):
+            create_earthworks_fill(file, name="X", points=points, faces=faces)
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_fill
+
+        points, faces = _cube_solid_geometry()
+        create_earthworks_fill(
+            empty_project_file,
+            name="RTFill",
+            points=points,
+            faces=faces,
+            predefined_type="EMBANKMENT",
+            omniclass_code="22-07 31 23 13",
+            omniclass_title="Embankment",
+        )
+
+        path = tmp_path / "rt_fill.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        fills = [f for f in reopened.by_type("IfcEarthworksFill") if f.Name == "RTFill"]
+        assert len(fills) == 1
+        fill = fills[0]
+        assert fill.PredefinedType == "EMBANKMENT"
+        rep = fill.Representation.Representations[0]
+        assert rep.RepresentationIdentifier == "Body"
+        face_set = rep.Items[0]
+        assert face_set.Closed is True
+        common = _read_pset(fill, "Pset_EarthworksFillCommon")
+        assert common.get("Status") == "NEW"
+        rels = reopened.by_type("IfcRelAssociatesClassification")
+        matching = [r for r in rels if fill in r.RelatedObjects]
+        assert matching[0].RelatingClassification.Identification == "22-07 31 23 13"
