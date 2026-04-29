@@ -717,3 +717,134 @@ class TestCreateEarthworksFill:
         rels = reopened.by_type("IfcRelAssociatesClassification")
         matching = [r for r in rels if fill in r.RelatedObjects]
         assert matching[0].RelatingClassification.Identification == "22-07 31 23 13"
+
+
+def _make_terrain(
+    file: ifcopenshell.file, name: str = "Existing Ground"
+) -> ifcopenshell.entity_instance:
+    return file.create_entity(
+        "IfcGeographicElement",
+        GlobalId=ifcopenshell.guid.new(),
+        Name=name,
+        PredefinedType="TERRAIN",
+    )
+
+
+class TestVoidTerrain:
+    """Tests for ``ifcopenshell.api.earthwork.void_terrain``."""
+
+    def test_happy_path(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import (
+            create_earthworks_cut,
+            void_terrain,
+        )
+
+        terrain = _make_terrain(empty_project_file)
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="Excavation", points=points, faces=faces
+        )
+
+        rel = void_terrain(empty_project_file, cut, terrain)
+
+        assert rel.is_a("IfcRelVoidsElement")
+        assert rel.RelatingBuildingElement.id() == terrain.id()
+        assert rel.RelatedOpeningElement.id() == cut.id()
+
+    def test_idempotent_for_same_pair(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """Calling twice with the same cut/terrain returns the existing rel."""
+        from ifcopenshell.api.earthwork import create_earthworks_cut, void_terrain
+
+        terrain = _make_terrain(empty_project_file)
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="X", points=points, faces=faces
+        )
+        first = void_terrain(empty_project_file, cut, terrain)
+        second = void_terrain(empty_project_file, cut, terrain)
+        assert first.id() == second.id()
+        rels = empty_project_file.by_type("IfcRelVoidsElement")
+        assert len(rels) == 1
+
+    def test_retargeting_to_different_terrain_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """Cut->terrain is 1:1 by IFC schema; retargeting requires explicit removal first."""
+        from ifcopenshell.api.earthwork import create_earthworks_cut, void_terrain
+
+        terrain_a = _make_terrain(empty_project_file, name="EG-A")
+        terrain_b = _make_terrain(empty_project_file, name="EG-B")
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="X", points=points, faces=faces
+        )
+        void_terrain(empty_project_file, cut, terrain_a)
+        with pytest.raises(ValueError, match="already voids"):
+            void_terrain(empty_project_file, cut, terrain_b)
+
+    def test_one_terrain_voided_by_many_cuts(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """The terrain side has no cardinality limit — multiple cuts can void the same terrain."""
+        from ifcopenshell.api.earthwork import create_earthworks_cut, void_terrain
+
+        terrain = _make_terrain(empty_project_file)
+        points, faces = _cube_solid_geometry()
+        cut_a = create_earthworks_cut(
+            empty_project_file, name="A", points=points, faces=faces
+        )
+        cut_b = create_earthworks_cut(
+            empty_project_file, name="B", points=points, faces=faces
+        )
+        void_terrain(empty_project_file, cut_a, terrain)
+        void_terrain(empty_project_file, cut_b, terrain)
+
+        rels = empty_project_file.by_type("IfcRelVoidsElement")
+        assert len(rels) == 2
+        host_ids = {r.RelatingBuildingElement.id() for r in rels}
+        assert host_ids == {terrain.id()}
+
+    def test_wrong_cut_type_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import void_terrain
+
+        terrain = _make_terrain(empty_project_file)
+        not_a_cut = _make_fill(empty_project_file)  # IfcEarthworksFill, not Cut
+        with pytest.raises(ValueError, match="must be an IfcFeatureElementSubtraction"):
+            void_terrain(empty_project_file, not_a_cut, terrain)
+
+    def test_wrong_terrain_type_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_cut, void_terrain
+
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="X", points=points, faces=faces
+        )
+        not_a_terrain = empty_project_file.create_entity(
+            "IfcCartesianPoint", Coordinates=(0.0, 0.0, 0.0)
+        )
+        with pytest.raises(ValueError, match="must be an IfcElement"):
+            void_terrain(empty_project_file, cut, not_a_terrain)
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_cut, void_terrain
+
+        terrain = _make_terrain(empty_project_file, name="RTGround")
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="RTCut", points=points, faces=faces
+        )
+        void_terrain(empty_project_file, cut, terrain)
+
+        path = tmp_path / "rt_void.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        rels = reopened.by_type("IfcRelVoidsElement")
+        assert len(rels) == 1
+        assert rels[0].RelatingBuildingElement.Name == "RTGround"
+        assert rels[0].RelatedOpeningElement.Name == "RTCut"

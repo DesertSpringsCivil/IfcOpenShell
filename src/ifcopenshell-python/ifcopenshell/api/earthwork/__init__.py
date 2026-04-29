@@ -37,9 +37,11 @@ Public functions are re-exported here so callers do
 from .add_volume_solid_representation import add_volume_solid_representation
 from .create_earthworks_cut import create_earthworks_cut
 from .create_earthworks_fill import create_earthworks_fill
+from .void_terrain import void_terrain
 
 __all__ = [
     "add_volume_solid_representation",
     "create_earthworks_cut",
     "create_earthworks_fill",
+    "void_terrain",
 ]
