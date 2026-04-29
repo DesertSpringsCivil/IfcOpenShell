@@ -19,13 +19,14 @@
 """Internal: resolve or create the geometric representation subcontexts the
 surface API authors into.
 
-Surfaces use three subcontexts under the project's "Model" context:
+Surfaces use four subcontexts under the project's "Model" context:
 
-- ``Body`` (MODEL_VIEW) — fallback identifier for arbitrary 3D geometry such
-  as breakline polylines.
+- ``Body`` (MODEL_VIEW) — fallback identifier for arbitrary 3D geometry.
 - ``SurfaceModel`` (MODEL_VIEW) — identifier for IfcTriangulatedIrregularNetwork
   TIN geometry.
 - ``Box`` (MODEL_VIEW) — identifier for the bounding-box LOD representation.
+- ``Annotation`` (MODEL_VIEW) — identifier for 3D annotations such as breakline
+  polylines.
 
 The lookup mirrors the ``ifcopenshell.api.alignment.get_axis_subcontext``
 pattern: find an existing subcontext via ``ifcopenshell.util.representation``
@@ -80,3 +81,12 @@ def get_surface_model_subcontext(file: ifcopenshell.file) -> ifcopenshell.entity
 def get_box_subcontext(file: ifcopenshell.file) -> ifcopenshell.entity_instance:
     """Return the Model/Box/MODEL_VIEW subcontext, creating it if absent."""
     return _get_or_create_subcontext(file, "Box", "MODEL_VIEW")
+
+
+def get_annotation_subcontext(file: ifcopenshell.file) -> ifcopenshell.entity_instance:
+    """Return the Model/Annotation/MODEL_VIEW subcontext, creating it if absent.
+
+    Used by 3D annotations such as breakline polylines that must persist in the
+    spatial model (not the 2D plan) so they coexist with TIN representations.
+    """
+    return _get_or_create_subcontext(file, "Annotation", "MODEL_VIEW")

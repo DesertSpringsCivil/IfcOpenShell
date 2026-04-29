@@ -753,3 +753,130 @@ class TestCreateProposedSurface:
         assert saikei["TriangulationTolerance"] == 0.003
         assert saikei["BreaklineCount"] == 2
         assert saikei["VertexCount"] == 5
+
+
+class TestAddBreaklineAnnotation:
+    """Tests for ``ifcopenshell.api.surface.add_breakline_annotation``."""
+
+    def _read_pset(
+        self, product: ifcopenshell.entity_instance, pset_name: str
+    ) -> dict[str, object]:
+        for rel in product.IsDefinedBy or []:
+            if not rel.is_a("IfcRelDefinesByProperties"):
+                continue
+            pset = rel.RelatingPropertyDefinition
+            if pset.is_a("IfcPropertySet") and pset.Name == pset_name:
+                return {
+                    p.Name: p.NominalValue.wrappedValue
+                    for p in pset.HasProperties or []
+                    if p.is_a("IfcPropertySingleValue") and p.NominalValue is not None
+                }
+        return {}
+
+    def test_happy_path(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import add_breakline_annotation
+
+        site = _site(empty_project_file)
+        polyline = [(0.0, 0.0, 0.0), (10.0, 0.0, 1.0), (20.0, 5.0, 2.0)]
+        breakline = add_breakline_annotation(
+            empty_project_file, site=site, polyline=polyline, name="Top of curb"
+        )
+
+        assert breakline.is_a("IfcAnnotation")
+        assert breakline.Name == "Top of curb"
+        assert breakline.ObjectType == "BREAKLINE"
+        assert breakline.PredefinedType == "USERDEFINED"
+
+        rep = breakline.Representation.Representations[0]
+        assert rep.RepresentationIdentifier == "Annotation"
+        assert rep.RepresentationType == "Curve3D"
+        polyline_entity = rep.Items[0]
+        assert polyline_entity.is_a("IfcPolyline")
+        assert len(polyline_entity.Points) == 3
+        assert tuple(polyline_entity.Points[0].Coordinates) == (0.0, 0.0, 0.0)
+
+        rel = (breakline.ContainedInStructure or [None])[0]
+        assert rel is not None and rel.RelatingStructure.id() == site.id()
+
+        properties = self._read_pset(breakline, "Pset_SaikeiBreaklineCommon")
+        assert properties["Kind"] == "standard"
+        assert properties["Source"] == "manual"
+        assert "GradingGroupGuid" not in properties
+
+    def test_kind_and_source_persist(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import add_breakline_annotation
+
+        site = _site(empty_project_file)
+        breakline = add_breakline_annotation(
+            empty_project_file,
+            site=site,
+            polyline=[(0.0, 0.0, 0.0), (1.0, 1.0, 1.0)],
+            name="Wall break",
+            kind="wall",
+            source="csv import",
+            grading_group_guid="3VxJzKQwT9XwJZ8RbZkH7E",
+        )
+
+        properties = self._read_pset(breakline, "Pset_SaikeiBreaklineCommon")
+        assert properties["Kind"] == "wall"
+        assert properties["Source"] == "csv import"
+        assert properties["GradingGroupGuid"] == "3VxJzKQwT9XwJZ8RbZkH7E"
+
+    def test_short_polyline_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import add_breakline_annotation
+
+        site = _site(empty_project_file)
+        with pytest.raises(ValueError, match="at least two points"):
+            add_breakline_annotation(
+                empty_project_file, site=site, polyline=[(0.0, 0.0, 0.0)], name="Solo"
+            )
+
+    def test_invalid_kind_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import add_breakline_annotation
+
+        site = _site(empty_project_file)
+        with pytest.raises(ValueError, match="kind must be one of"):
+            add_breakline_annotation(
+                empty_project_file,
+                site=site,
+                polyline=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
+                name="Bad",
+                kind="explosive",
+            )
+
+    def test_round_trip_through_disk(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        from ifcopenshell.api.surface import add_breakline_annotation
+
+        site = _site(empty_project_file)
+        polyline = [(0.0, 0.0, 0.0), (5.0, 5.0, 1.0), (10.0, 0.0, 0.5)]
+        add_breakline_annotation(
+            empty_project_file,
+            site=site,
+            polyline=polyline,
+            name="RTBreak",
+            kind="non_destructive",
+            source="survey",
+        )
+
+        path = tmp_path / "rt_breakline.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        breaklines = [
+            a for a in reopened.by_type("IfcAnnotation") if a.Name == "RTBreak"
+        ]
+        assert len(breaklines) == 1
+        breakline = breaklines[0]
+        rep = breakline.Representation.Representations[0]
+        assert rep.RepresentationIdentifier == "Annotation"
+        assert len(rep.Items[0].Points) == 3
+        # Coords preserved through serialization
+        round_trip_coords = [
+            tuple(point.Coordinates) for point in rep.Items[0].Points
+        ]
+        assert round_trip_coords == polyline
+
+        properties = self._read_pset(breakline, "Pset_SaikeiBreaklineCommon")
+        assert properties["Kind"] == "non_destructive"
+        assert properties["Source"] == "survey"

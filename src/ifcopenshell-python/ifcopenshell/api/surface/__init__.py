@@ -33,6 +33,7 @@ Public functions are re-exported here so callers do
 """
 
 from .add_bounding_box_representation import add_bounding_box_representation
+from .add_breakline_annotation import add_breakline_annotation
 from .add_tin_representation import add_tin_representation
 from .apply_saikei_pset import apply_saikei_pset
 from .create_proposed_surface import create_proposed_surface
@@ -40,6 +41,7 @@ from .create_terrain import create_terrain
 
 __all__ = [
     "add_bounding_box_representation",
+    "add_breakline_annotation",
     "add_tin_representation",
     "apply_saikei_pset",
     "create_proposed_surface",
