@@ -1573,3 +1573,183 @@ class TestAddInteriorFillToGroup:
         assert floor.PredefinedType == "SUBGRADE"
         identifiers = {r.RepresentationIdentifier for r in floor.Representation.Representations}
         assert identifiers == {"SurfaceModel", "Box"}
+
+
+class TestLinkAlignmentToGroup:
+    """Tests for ``ifcopenshell.api.grading.link_alignment_to_group``."""
+
+    def _make_corridor_alignment(
+        self, file: ifcopenshell.file, name: str = "Corridor"
+    ) -> ifcopenshell.entity_instance:
+        from ifcopenshell.api.grading import create_feature_line
+
+        return create_feature_line(
+            file,
+            name=name,
+            vertices=[(0.0, 0.0, 0.0), (100.0, 0.0, 0.0)],
+        )
+
+    def test_happy_path_on_group(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import (
+            create_grading_group,
+            link_alignment_to_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        alignment = self._make_corridor_alignment(empty_project_file)
+        pset = link_alignment_to_group(
+            empty_project_file,
+            result.group,
+            alignment,
+            start_station=10.0,
+            end_station=85.0,
+        )
+
+        assert pset.is_a("IfcPropertySet")
+        assert pset.Name == "Pset_SaikeiGradingAlignment"
+        properties = _read_pset(result.group, "Pset_SaikeiGradingAlignment")
+        assert properties["AlignmentGuid"] == alignment.GlobalId
+        assert properties["StartStation"] == 10.0
+        assert properties["EndStation"] == 85.0
+
+    def test_happy_path_on_fill(self, empty_project_file: ifcopenshell.file) -> None:
+        """Pset_SaikeiGradingAlignment can attach to IfcEarthworksFill too (per spec §3.3)."""
+        from ifcopenshell.api.grading import (
+            create_grading_group,
+            link_alignment_to_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        alignment = self._make_corridor_alignment(empty_project_file)
+        link_alignment_to_group(
+            empty_project_file,
+            result.composite_fill,
+            alignment,
+            start_station=0.0,
+            end_station=50.0,
+        )
+
+        properties = _read_pset(result.composite_fill, "Pset_SaikeiGradingAlignment")
+        assert properties["AlignmentGuid"] == alignment.GlobalId
+
+    def test_optional_stations_omitted(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import (
+            create_grading_group,
+            link_alignment_to_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        alignment = self._make_corridor_alignment(empty_project_file)
+        link_alignment_to_group(empty_project_file, result.group, alignment)
+
+        properties = _read_pset(result.group, "Pset_SaikeiGradingAlignment")
+        assert properties["AlignmentGuid"] == alignment.GlobalId
+        assert "StartStation" not in properties
+        assert "EndStation" not in properties
+
+    def test_re_link_updates_in_place(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            create_grading_group,
+            link_alignment_to_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        alignment = self._make_corridor_alignment(empty_project_file)
+        first = link_alignment_to_group(
+            empty_project_file, result.group, alignment, start_station=10.0
+        )
+        second = link_alignment_to_group(
+            empty_project_file,
+            result.group,
+            alignment,
+            start_station=20.0,
+            end_station=75.0,
+        )
+
+        assert first.id() == second.id()
+        properties = _read_pset(result.group, "Pset_SaikeiGradingAlignment")
+        assert properties["StartStation"] == 20.0
+        assert properties["EndStation"] == 75.0
+
+        # No duplicate psets.
+        rels = [
+            r
+            for r in result.group.IsDefinedBy or []
+            if r.is_a("IfcRelDefinesByProperties")
+            and r.RelatingPropertyDefinition.Name == "Pset_SaikeiGradingAlignment"
+        ]
+        assert len(rels) == 1
+
+    def test_wrong_target_type_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import link_alignment_to_group
+
+        not_allowed = empty_project_file.create_entity(
+            "IfcGeographicElement",
+            GlobalId=ifcopenshell.guid.new(),
+            Name="Terrain",
+            PredefinedType="TERRAIN",
+        )
+        alignment = self._make_corridor_alignment(empty_project_file)
+        with pytest.raises(ValueError, match="must be IfcGroup or IfcEarthworksFill"):
+            link_alignment_to_group(empty_project_file, not_allowed, alignment)
+
+    def test_non_alignment_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import (
+            create_grading_group,
+            link_alignment_to_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        not_an_alignment = result.composite_fill
+        with pytest.raises(ValueError, match="alignment must be an IfcAlignment"):
+            link_alignment_to_group(empty_project_file, result.group, not_an_alignment)
+
+    def test_inverted_stations_raise(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import (
+            create_grading_group,
+            link_alignment_to_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        alignment = self._make_corridor_alignment(empty_project_file)
+        with pytest.raises(ValueError, match="must be greater than start_station"):
+            link_alignment_to_group(
+                empty_project_file,
+                result.group,
+                alignment,
+                start_station=50.0,
+                end_station=10.0,
+            )
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.grading import (
+            create_grading_group,
+            link_alignment_to_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="RTPad")
+        alignment = self._make_corridor_alignment(empty_project_file, name="RTAlign")
+        link_alignment_to_group(
+            empty_project_file,
+            result.group,
+            alignment,
+            start_station=12.5,
+            end_station=87.5,
+        )
+
+        path = tmp_path / "rt_link.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        groups = [
+            g for g in reopened.by_type("IfcGroup")
+            if g.Name == "RTPad" and g.ObjectType == "GradingGroup"
+        ]
+        assert len(groups) == 1
+        properties = _read_pset(groups[0], "Pset_SaikeiGradingAlignment")
+        assert properties["StartStation"] == 12.5
+        assert properties["EndStation"] == 87.5
+        assert properties["AlignmentGuid"] == alignment.GlobalId

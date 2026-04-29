@@ -35,6 +35,7 @@ from .assign_grading_criteria import assign_grading_criteria
 from .create_feature_line import create_feature_line
 from .create_grading_criteria_template import create_grading_criteria_template
 from .create_grading_group import GradingGroupAuthoring, create_grading_group
+from .link_alignment_to_group import link_alignment_to_group
 
 __all__ = [
     "GradingGroupAuthoring",
@@ -45,4 +46,5 @@ __all__ = [
     "create_feature_line",
     "create_grading_criteria_template",
     "create_grading_group",
+    "link_alignment_to_group",
 ]
