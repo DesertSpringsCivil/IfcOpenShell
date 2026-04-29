@@ -1193,3 +1193,94 @@ class TestWriteFillQuantities:
             "CompactedVolume": 360.0,
             "LooseVolume": 420.0,
         }
+
+
+class TestApplyShrinkSwellPset:
+    """Tests for ``ifcopenshell.api.earthwork.apply_shrink_swell_pset``."""
+
+    def test_happy_path_on_fill(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import apply_shrink_swell_pset
+
+        fill = _make_fill(empty_project_file)
+        pset = apply_shrink_swell_pset(
+            empty_project_file, fill, shrink_factor=0.92, swell_factor=1.18
+        )
+
+        assert pset.is_a("IfcPropertySet")
+        assert pset.Name == "Pset_SaikeiGradingShrinkSwell"
+        properties = _read_pset(fill, "Pset_SaikeiGradingShrinkSwell")
+        assert properties == {"ShrinkFactor": 0.92, "SwellFactor": 1.18}
+
+    def test_happy_path_on_cut(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import apply_shrink_swell_pset
+
+        cut = _make_cut(empty_project_file)
+        apply_shrink_swell_pset(
+            empty_project_file, cut, shrink_factor=0.85, swell_factor=1.25
+        )
+        properties = _read_pset(cut, "Pset_SaikeiGradingShrinkSwell")
+        assert properties == {"ShrinkFactor": 0.85, "SwellFactor": 1.25}
+
+    def test_default_factors(self, empty_project_file: ifcopenshell.file) -> None:
+        """Default 1.0/1.0 — caller hasn't supplied geotechnical data yet."""
+        from ifcopenshell.api.earthwork import apply_shrink_swell_pset
+
+        fill = _make_fill(empty_project_file)
+        apply_shrink_swell_pset(empty_project_file, fill)
+        properties = _read_pset(fill, "Pset_SaikeiGradingShrinkSwell")
+        assert properties == {"ShrinkFactor": 1.0, "SwellFactor": 1.0}
+
+    def test_idempotent_in_place_update(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import apply_shrink_swell_pset
+
+        fill = _make_fill(empty_project_file)
+        first = apply_shrink_swell_pset(
+            empty_project_file, fill, shrink_factor=0.92, swell_factor=1.18
+        )
+        second = apply_shrink_swell_pset(
+            empty_project_file, fill, shrink_factor=0.88, swell_factor=1.22
+        )
+
+        assert first.id() == second.id()
+        properties = _read_pset(fill, "Pset_SaikeiGradingShrinkSwell")
+        assert properties == {"ShrinkFactor": 0.88, "SwellFactor": 1.22}
+
+        rels = [
+            r
+            for r in fill.IsDefinedBy or []
+            if r.is_a("IfcRelDefinesByProperties")
+            and r.RelatingPropertyDefinition.Name == "Pset_SaikeiGradingShrinkSwell"
+        ]
+        assert len(rels) == 1
+
+    def test_wrong_target_type_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import apply_shrink_swell_pset
+
+        not_an_earthwork = empty_project_file.create_entity(
+            "IfcGeographicElement",
+            GlobalId=ifcopenshell.guid.new(),
+            Name="Terrain",
+            PredefinedType="TERRAIN",
+        )
+        with pytest.raises(ValueError, match="must be IfcEarthworksFill or IfcEarthworksCut"):
+            apply_shrink_swell_pset(empty_project_file, not_an_earthwork)
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.earthwork import apply_shrink_swell_pset
+
+        fill = _make_fill(empty_project_file, name="RTSwell")
+        apply_shrink_swell_pset(
+            empty_project_file, fill, shrink_factor=0.93, swell_factor=1.20
+        )
+
+        path = tmp_path / "rt_shrink_swell.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        fills = [f for f in reopened.by_type("IfcEarthworksFill") if f.Name == "RTSwell"]
+        assert len(fills) == 1
+        properties = _read_pset(fills[0], "Pset_SaikeiGradingShrinkSwell")
+        assert properties == {"ShrinkFactor": 0.93, "SwellFactor": 1.20}
