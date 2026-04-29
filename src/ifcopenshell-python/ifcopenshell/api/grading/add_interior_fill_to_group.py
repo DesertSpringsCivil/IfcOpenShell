@@ -23,21 +23,18 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import ifcopenshell
-import ifcopenshell.api.pset
 import ifcopenshell.api.surface
 import ifcopenshell.guid
 
 from ._shared import (
     aggregate_under,
     apply_omniclass_classification,
+    attach_earthworks_fill_common,
     compute_bounding_box,
+    identity_placement,
+    to_point_list,
 )
 from .add_member_to_group import add_member_to_group
-from .add_slope_fill_to_group import (
-    _attach_earthworks_fill_common,
-    _identity_placement,
-    _to_point_list,
-)
 
 if TYPE_CHECKING:
     from ifcopenshell.api.surface.add_tin_representation import (
@@ -127,7 +124,7 @@ def add_interior_fill_to_group(
             f"({existing.is_a()} #{existing.id()}); only one is permitted per group"
         )
 
-    point_list = _to_point_list(points)
+    point_list = to_point_list(points)
     if not point_list:
         raise ValueError("points must not be empty")
 
@@ -136,7 +133,7 @@ def add_interior_fill_to_group(
         GlobalId=ifcopenshell.guid.new(),
         Name=name,
         PredefinedType="SUBGRADE",
-        ObjectPlacement=_identity_placement(file),
+        ObjectPlacement=identity_placement(file),
     )
 
     ifcopenshell.api.surface.add_tin_representation(
@@ -147,7 +144,7 @@ def add_interior_fill_to_group(
         file, interior_fill, min_xyz=min_xyz, max_xyz=max_xyz
     )
 
-    _attach_earthworks_fill_common(file, interior_fill)
+    attach_earthworks_fill_common(file, interior_fill)
     apply_omniclass_classification(
         file,
         interior_fill,

@@ -28,7 +28,12 @@ import ifcopenshell.api.pset
 import ifcopenshell.api.spatial
 import ifcopenshell.guid
 
-from ._shared import _resolve_site, apply_omniclass_classification
+from ._shared import (
+    _resolve_site,
+    apply_omniclass_classification,
+    attach_earthworks_fill_common,
+    identity_placement,
+)
 from .add_member_to_group import add_member_to_group
 
 GROUP_OBJECT_TYPE = "GradingGroup"
@@ -47,14 +52,6 @@ class GradingGroupAuthoring(NamedTuple):
     """The :class:`IfcGroup` with ``ObjectType="GradingGroup"``."""
     composite_fill: ifcopenshell.entity_instance
     """The per-group composite :class:`IfcEarthworksFill` that aggregates child fills."""
-
-
-def _attach_earthworks_fill_common(
-    file: ifcopenshell.file, fill: ifcopenshell.entity_instance
-) -> None:
-    """Attach Pset_EarthworksFillCommon with Status="NEW" so the pset is schema-valid."""
-    pset = ifcopenshell.api.pset.add_pset(file, product=fill, name="Pset_EarthworksFillCommon")
-    ifcopenshell.api.pset.edit_pset(file, pset=pset, properties={"Status": "NEW"})
 
 
 def _attach_grading_source_pset(
@@ -77,16 +74,6 @@ def _attach_grading_source_pset(
         properties["Author"] = author
     pset = ifcopenshell.api.pset.add_pset(file, product=group, name=SOURCE_PSET_NAME)
     ifcopenshell.api.pset.edit_pset(file, pset=pset, properties=properties)
-
-
-def _identity_placement(file: ifcopenshell.file) -> ifcopenshell.entity_instance:
-    return file.create_entity(
-        "IfcLocalPlacement",
-        RelativePlacement=file.create_entity(
-            "IfcAxis2Placement3D",
-            Location=file.create_entity("IfcCartesianPoint", Coordinates=(0.0, 0.0, 0.0)),
-        ),
-    )
 
 
 def create_grading_group(
@@ -179,12 +166,12 @@ def create_grading_group(
         GlobalId=ifcopenshell.guid.new(),
         Name=name,
         PredefinedType="SUBGRADE",
-        ObjectPlacement=_identity_placement(file),
+        ObjectPlacement=identity_placement(file),
     )
     ifcopenshell.api.spatial.assign_container(
         file, products=[composite_fill], relating_structure=target_site
     )
-    _attach_earthworks_fill_common(file, composite_fill)
+    attach_earthworks_fill_common(file, composite_fill)
     apply_omniclass_classification(
         file, composite_fill, COMPOSITE_FILL_OMNICLASS_CODE, COMPOSITE_FILL_OMNICLASS_TITLE
     )

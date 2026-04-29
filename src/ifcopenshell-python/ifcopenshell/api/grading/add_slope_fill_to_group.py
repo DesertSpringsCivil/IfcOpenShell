@@ -23,14 +23,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 import ifcopenshell
-import ifcopenshell.api.pset
 import ifcopenshell.api.surface
 import ifcopenshell.guid
 
 from ._shared import (
     aggregate_under,
     apply_omniclass_classification,
+    attach_earthworks_fill_common,
     compute_bounding_box,
+    identity_placement,
+    to_point_list,
 )
 from .add_member_to_group import add_member_to_group
 
@@ -43,29 +45,6 @@ if TYPE_CHECKING:
 
 SLOPE_FILL_OMNICLASS_CODE = "22-07 31 23"
 SLOPE_FILL_OMNICLASS_TITLE = "Fill"
-
-
-def _identity_placement(file: ifcopenshell.file) -> ifcopenshell.entity_instance:
-    return file.create_entity(
-        "IfcLocalPlacement",
-        RelativePlacement=file.create_entity(
-            "IfcAxis2Placement3D",
-            Location=file.create_entity("IfcCartesianPoint", Coordinates=(0.0, 0.0, 0.0)),
-        ),
-    )
-
-
-def _attach_earthworks_fill_common(
-    file: ifcopenshell.file, fill: ifcopenshell.entity_instance
-) -> None:
-    pset = ifcopenshell.api.pset.add_pset(file, product=fill, name="Pset_EarthworksFillCommon")
-    ifcopenshell.api.pset.edit_pset(file, pset=pset, properties={"Status": "NEW"})
-
-
-def _to_point_list(
-    points: "PointArray",
-) -> list[tuple[float, float, float]]:
-    return [(float(p[0]), float(p[1]), float(p[2])) for p in points]
 
 
 def add_slope_fill_to_group(
@@ -145,7 +124,7 @@ def add_slope_fill_to_group(
             f"{composite_fill.is_a()} #{composite_fill.id()}"
         )
 
-    point_list = _to_point_list(points)
+    point_list = to_point_list(points)
     if not point_list:
         raise ValueError("points must not be empty")
 
@@ -154,7 +133,7 @@ def add_slope_fill_to_group(
         GlobalId=ifcopenshell.guid.new(),
         Name=name,
         PredefinedType="SLOPEFILL",
-        ObjectPlacement=_identity_placement(file),
+        ObjectPlacement=identity_placement(file),
     )
 
     ifcopenshell.api.surface.add_tin_representation(
@@ -165,7 +144,7 @@ def add_slope_fill_to_group(
         file, slope_fill, min_xyz=min_xyz, max_xyz=max_xyz
     )
 
-    _attach_earthworks_fill_common(file, slope_fill)
+    attach_earthworks_fill_common(file, slope_fill)
     apply_omniclass_classification(
         file, slope_fill, SLOPE_FILL_OMNICLASS_CODE, SLOPE_FILL_OMNICLASS_TITLE
     )

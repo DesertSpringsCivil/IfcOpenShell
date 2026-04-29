@@ -18,20 +18,31 @@
 
 """Internal helpers shared across the grading API.
 
-Currently provides:
+Provides:
 
-- ``_resolve_site`` — auto-resolve an IfcSite when callers leave the ``site``
-  arg as None. Raises ValueError if no IfcSite exists in the project.
-- ``apply_omniclass_classification`` — author OmniClass Table 22
-  classification on a product. Idempotent: the IfcClassification and
-  IfcClassificationReference are reused across calls in the same file.
+- :func:`_resolve_site` — auto-resolve an IfcSite when callers leave the
+  ``site`` arg as None. Raises ValueError if no IfcSite exists.
+- :func:`identity_placement` — build an IfcLocalPlacement at the project
+  origin. Used by every IfcEarthworksFill / IfcEarthworksCut authored by
+  the API.
+- :func:`attach_earthworks_fill_common` — author Pset_EarthworksFillCommon
+  with ``Status="NEW"`` so the pset is schema-valid (HasProperties [1:?]).
+- :func:`to_point_list` — coerce a numpy array or list-of-tuples to a
+  list of ``(x, y, z)`` float tuples.
+- :func:`compute_bounding_box` — derive ``(min_xyz, max_xyz)`` from a
+  point cloud, nudging zero-length axes upward to satisfy
+  IfcPositiveLengthMeasure.
+- :func:`aggregate_under` — idempotent IfcRelAggregates author/extend.
+- :func:`apply_omniclass_classification` — idempotent OmniClass Table 22
+  classification author/extend.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import ifcopenshell
+import ifcopenshell.api.pset
 import ifcopenshell.guid
 
 OMNICLASS_TABLE_22_NAME = "OmniClass Table 22"
@@ -50,6 +61,52 @@ def _resolve_site(
             "no IfcSite present in project; pass site= explicitly or add an IfcSite first"
         )
     return sites[0]
+
+
+def identity_placement(file: ifcopenshell.file) -> ifcopenshell.entity_instance:
+    """Build an :class:`IfcLocalPlacement` at the project origin (0, 0, 0).
+
+    Earthwork products use identity placement per spec §2.8 — absolute world
+    positioning is handled by :class:`IfcMapConversion` at the project level,
+    not by per-product local transforms. Every :class:`IfcEarthworksFill`,
+    :class:`IfcEarthworksCut`, and :class:`IfcGeographicElement` authored by
+    the Saikei APIs uses a fresh identity placement.
+    """
+    return file.create_entity(
+        "IfcLocalPlacement",
+        RelativePlacement=file.create_entity(
+            "IfcAxis2Placement3D",
+            Location=file.create_entity("IfcCartesianPoint", Coordinates=(0.0, 0.0, 0.0)),
+        ),
+    )
+
+
+def attach_earthworks_fill_common(
+    file: ifcopenshell.file, fill: ifcopenshell.entity_instance
+) -> ifcopenshell.entity_instance:
+    """Attach ``Pset_EarthworksFillCommon`` with ``Status="NEW"`` to ``fill``.
+
+    The minimum-property write is intentional: IFC's
+    ``IfcPropertySet.HasProperties`` cardinality is ``[1:?]``, so an empty
+    pset is schema-invalid. ``Status="NEW"`` is the lightest legal default;
+    callers can override or extend via ``ifcopenshell.api.pset.edit_pset``.
+
+    :returns: the created :class:`IfcPropertySet`.
+    """
+    pset = ifcopenshell.api.pset.add_pset(file, product=fill, name="Pset_EarthworksFillCommon")
+    ifcopenshell.api.pset.edit_pset(file, pset=pset, properties={"Status": "NEW"})
+    return pset
+
+
+def to_point_list(
+    points: Sequence[Sequence[float]],
+) -> list[tuple[float, float, float]]:
+    """Coerce a ``(N, 3)`` numpy array or sequence of triples to a list of float tuples.
+
+    Numpy is a soft dependency: this helper accepts either array-like input
+    and emits the plain-Python form IFC entity authoring expects.
+    """
+    return [(float(p[0]), float(p[1]), float(p[2])) for p in points]
 
 
 def _get_or_create_omniclass_table_22(file: ifcopenshell.file) -> ifcopenshell.entity_instance:
