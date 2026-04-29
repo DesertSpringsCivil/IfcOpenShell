@@ -314,3 +314,161 @@ class TestAddMemberToGroup:
         assert len(groups) == 1
         member_names = {p.Name for p in groups[0].IsGroupedBy[0].RelatedObjects}
         assert member_names == {"RT_A", "RT_B"}
+
+
+def _site(file: ifcopenshell.file) -> ifcopenshell.entity_instance:
+    return file.by_type("IfcSite")[0]
+
+
+def _read_pset(
+    product: ifcopenshell.entity_instance, pset_name: str
+) -> dict[str, object]:
+    for rel in product.IsDefinedBy or []:
+        if not rel.is_a("IfcRelDefinesByProperties"):
+            continue
+        pset = rel.RelatingPropertyDefinition
+        if pset.is_a("IfcPropertySet") and pset.Name == pset_name:
+            return {
+                p.Name: p.NominalValue.wrappedValue
+                for p in pset.HasProperties or []
+                if p.is_a("IfcPropertySingleValue") and p.NominalValue is not None
+            }
+    return {}
+
+
+class TestCreateFeatureLine:
+    """Tests for ``ifcopenshell.api.grading.create_feature_line``."""
+
+    def test_happy_path(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import create_feature_line
+
+        vertices = [(0.0, 0.0, 100.0), (10.0, 0.0, 100.5), (10.0, 10.0, 101.0), (0.0, 10.0, 100.5)]
+        feature_line = create_feature_line(
+            empty_project_file,
+            name="Pad perimeter",
+            vertices=vertices,
+            closed=True,
+            source="manual",
+            elevation_source="drape",
+        )
+
+        assert feature_line.is_a("IfcAlignment")
+        assert feature_line.Name == "Pad perimeter"
+
+        rep = feature_line.Representation.Representations[0]
+        assert rep.RepresentationIdentifier == "Axis"
+        assert rep.RepresentationType == "Curve3D"
+        curve = rep.Items[0]
+        assert curve.is_a("IfcIndexedPolyCurve")
+        # closed=True means first vertex appended to close the loop
+        assert len(curve.Points.CoordList) == 5
+        assert tuple(curve.Points.CoordList[0]) == (0.0, 0.0, 100.0)
+        assert tuple(curve.Points.CoordList[-1]) == (0.0, 0.0, 100.0)
+
+        rel = (feature_line.ContainedInStructure or [None])[0]
+        assert rel is not None and rel.RelatingStructure.is_a("IfcSite")
+
+        properties = _read_pset(feature_line, "Pset_SaikeiFeatureLineCommon")
+        assert properties["IsClosed"] is True
+        assert properties["Source"] == "manual"
+        assert properties["ElevationSource"] == "drape"
+        assert "GradingGroupGuid" not in properties
+
+    def test_open_polyline_no_repeated_endpoint(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import create_feature_line
+
+        vertices = [(0.0, 0.0, 100.0), (50.0, 0.0, 99.5), (100.0, 0.0, 99.0)]
+        feature_line = create_feature_line(
+            empty_project_file, name="Curb line", vertices=vertices, closed=False
+        )
+
+        curve = feature_line.Representation.Representations[0].Items[0]
+        assert len(curve.Points.CoordList) == 3
+        properties = _read_pset(feature_line, "Pset_SaikeiFeatureLineCommon")
+        assert properties["IsClosed"] is False
+
+    def test_grading_group_guid_optional_property(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import create_feature_line
+
+        feature_line = create_feature_line(
+            empty_project_file,
+            name="Linked",
+            vertices=[(0.0, 0.0, 0.0), (1.0, 1.0, 1.0)],
+            grading_group_guid="3VxJzKQwT9XwJZ8RbZkH7E",
+        )
+        properties = _read_pset(feature_line, "Pset_SaikeiFeatureLineCommon")
+        assert properties["GradingGroupGuid"] == "3VxJzKQwT9XwJZ8RbZkH7E"
+
+    def test_too_few_vertices_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import create_feature_line
+
+        with pytest.raises(ValueError, match="at least two points"):
+            create_feature_line(
+                empty_project_file, name="Solo", vertices=[(0.0, 0.0, 0.0)]
+            )
+
+    def test_invalid_source_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import create_feature_line
+
+        with pytest.raises(ValueError, match="source must be one of"):
+            create_feature_line(
+                empty_project_file,
+                name="Bad",
+                vertices=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
+                source="invented",
+            )
+
+    def test_raises_when_no_site(self) -> None:
+        from ifcopenshell.api.grading import create_feature_line
+
+        file = _empty_project_file_no_site()
+        with pytest.raises(ValueError, match="no IfcSite"):
+            create_feature_line(
+                file, name="A", vertices=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
+            )
+
+    def test_explicit_site_overrides_auto(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import create_feature_line
+
+        second_site = empty_project_file.create_entity(
+            "IfcSite", GlobalId=ifcopenshell.guid.new(), Name="Second"
+        )
+        feature_line = create_feature_line(
+            empty_project_file,
+            name="On second",
+            vertices=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
+            site=second_site,
+        )
+        rel = (feature_line.ContainedInStructure or [None])[0]
+        assert rel.RelatingStructure.id() == second_site.id()
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.grading import create_feature_line
+
+        vertices = [(0.0, 0.0, 100.0), (10.0, 0.0, 100.5), (10.0, 10.0, 101.0), (0.0, 10.0, 100.5)]
+        create_feature_line(
+            empty_project_file,
+            name="RTPad",
+            vertices=vertices,
+            closed=True,
+            source="csv_import",
+            elevation_source="csv",
+            grading_group_guid="abc",
+        )
+
+        path = tmp_path / "rt_feature.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        feature_lines = [a for a in reopened.by_type("IfcAlignment") if a.Name == "RTPad"]
+        assert len(feature_lines) == 1
+        feature_line = feature_lines[0]
+        curve = feature_line.Representation.Representations[0].Items[0]
+        assert len(curve.Points.CoordList) == 5  # 4 + 1 repeated for closure
+        properties = _read_pset(feature_line, "Pset_SaikeiFeatureLineCommon")
+        assert properties["IsClosed"] is True
+        assert properties["Source"] == "csv_import"
+        assert properties["GradingGroupGuid"] == "abc"

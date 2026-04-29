@@ -29,7 +29,9 @@ Public functions are re-exported here so callers do
 """
 
 from .add_member_to_group import add_member_to_group
+from .create_feature_line import create_feature_line
 
 __all__ = [
     "add_member_to_group",
+    "create_feature_line",
 ]
