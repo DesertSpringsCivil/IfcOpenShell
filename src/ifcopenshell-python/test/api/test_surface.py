@@ -880,3 +880,117 @@ class TestAddBreaklineAnnotation:
         properties = self._read_pset(breakline, "Pset_SaikeiBreaklineCommon")
         assert properties["Kind"] == "non_destructive"
         assert properties["Source"] == "survey"
+
+
+class TestUpdateTinRepresentation:
+    """Tests for ``ifcopenshell.api.surface.update_tin_representation``."""
+
+    def test_happy_path_replaces_in_place(self, empty_project_file: ifcopenshell.file) -> None:
+        """The new TIN replaces the old; the IfcShapeRepresentation entity is preserved."""
+        from ifcopenshell.api.surface import add_tin_representation, update_tin_representation
+
+        host = _make_geographic_element(empty_project_file)
+        points, triangles = _flat_pad_geometry()
+        add_tin_representation(empty_project_file, host, points, triangles)
+        old_rep_id = host.Representation.Representations[0].id()
+
+        new_points, new_triangles = _pyramid_geometry()
+        new_tin = update_tin_representation(
+            empty_project_file, host, new_points, new_triangles
+        )
+
+        # Same shape representation, new items.
+        assert host.Representation.Representations[0].id() == old_rep_id
+        assert host.Representation.Representations[0].Items[0].id() == new_tin.id()
+        assert new_tin.is_a("IfcTriangulatedIrregularNetwork")
+        assert len(new_tin.Coordinates.CoordList) == len(new_points)
+        assert len(new_tin.CoordIndex) == len(new_triangles)
+
+    def test_old_entities_garbage_collected_when_orphaned(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.surface import add_tin_representation, update_tin_representation
+
+        host = _make_geographic_element(empty_project_file)
+        points, triangles = _flat_pad_geometry()
+        add_tin_representation(empty_project_file, host, points, triangles)
+
+        tins_before = len(empty_project_file.by_type("IfcTriangulatedIrregularNetwork"))
+        coord_lists_before = len(empty_project_file.by_type("IfcCartesianPointList3D"))
+        assert tins_before == 1
+        assert coord_lists_before == 1
+
+        update_tin_representation(empty_project_file, host, points, triangles)
+
+        # Counts unchanged: old gc'd, new created.
+        assert len(empty_project_file.by_type("IfcTriangulatedIrregularNetwork")) == 1
+        assert len(empty_project_file.by_type("IfcCartesianPointList3D")) == 1
+
+    def test_old_entities_kept_when_still_referenced(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """If something else holds a reference to the old TIN, gc must not remove it."""
+        from ifcopenshell.api.surface import add_tin_representation, update_tin_representation
+
+        host = _make_geographic_element(empty_project_file)
+        points, triangles = _flat_pad_geometry()
+        old_tin = add_tin_representation(empty_project_file, host, points, triangles)
+
+        # Park the old TIN inside a second (unrelated) shape representation so it has another inverse.
+        from ifcopenshell.api.surface._representation_context import (
+            get_surface_model_subcontext,
+        )
+
+        unrelated_rep = empty_project_file.create_entity(
+            "IfcShapeRepresentation",
+            ContextOfItems=get_surface_model_subcontext(empty_project_file),
+            RepresentationIdentifier="SurfaceModel",
+            RepresentationType="Tessellation",
+            Items=[old_tin],
+        )
+        assert unrelated_rep is not None
+
+        update_tin_representation(empty_project_file, host, points, triangles)
+
+        # Old TIN still alive because unrelated_rep references it.
+        assert len(empty_project_file.by_type("IfcTriangulatedIrregularNetwork")) == 2
+
+    def test_raises_when_no_existing_surface_model(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.surface import update_tin_representation
+
+        host = _make_geographic_element(empty_project_file)
+        points, triangles = _flat_pad_geometry()
+        with pytest.raises(ValueError, match="no SurfaceModel"):
+            update_tin_representation(empty_project_file, host, points, triangles)
+
+    def test_round_trip_through_disk(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        from ifcopenshell.api.surface import add_tin_representation, update_tin_representation
+
+        host = _make_geographic_element(empty_project_file, name="Mutable")
+        points, triangles = _flat_pad_geometry()
+        add_tin_representation(empty_project_file, host, points, triangles)
+
+        new_points, new_triangles = _pyramid_geometry()
+        new_flags = [9, 8, 7, 6, 5, 4]
+        update_tin_representation(
+            empty_project_file, host, new_points, new_triangles, triangle_flags=new_flags
+        )
+
+        path = tmp_path / "updated.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        host_again = [
+            e for e in reopened.by_type("IfcGeographicElement") if e.Name == "Mutable"
+        ][0]
+        rep = [
+            r
+            for r in host_again.Representation.Representations
+            if r.RepresentationIdentifier == "SurfaceModel"
+        ][0]
+        tin = rep.Items[0]
+        assert len(tin.Coordinates.CoordList) == len(new_points)
+        assert list(tin.Flags) == new_flags

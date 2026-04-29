@@ -38,6 +38,7 @@ from .add_tin_representation import add_tin_representation
 from .apply_saikei_pset import apply_saikei_pset
 from .create_proposed_surface import create_proposed_surface
 from .create_terrain import create_terrain
+from .update_tin_representation import update_tin_representation
 
 __all__ = [
     "add_bounding_box_representation",
@@ -46,4 +47,5 @@ __all__ = [
     "apply_saikei_pset",
     "create_proposed_surface",
     "create_terrain",
+    "update_tin_representation",
 ]
