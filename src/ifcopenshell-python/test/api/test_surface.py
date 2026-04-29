@@ -994,3 +994,95 @@ class TestUpdateTinRepresentation:
         tin = rep.Items[0]
         assert len(tin.Coordinates.CoordList) == len(new_points)
         assert list(tin.Flags) == new_flags
+
+
+class TestSchemaValidation:
+    """Validator integration: every authored entity tree must be schema-valid.
+
+    The inline check runs ``ifcopenshell.validate.validate`` against a
+    flat-pad demo file every time. The external bSI reference validator
+    binary check is opt-in: set the ``BSI_VALIDATOR_PATH`` environment
+    variable to an executable that takes one IFC path and returns 0 on
+    success. CI is expected to provide that env var; local runs skip.
+    """
+
+    def _build_flat_pad_demo(
+        self, file: ifcopenshell.file
+    ) -> ifcopenshell.entity_instance:
+        from ifcopenshell.api.surface import (
+            add_breakline_annotation,
+            create_terrain,
+        )
+
+        points, triangles = _flat_pad_geometry()
+        terrain = create_terrain(
+            file,
+            name="Validator Pad",
+            points=points,
+            triangles=triangles,
+            triangulation_tolerance=0.005,
+            breakline_count=1,
+        )
+        add_breakline_annotation(
+            file,
+            site=_site(file),
+            polyline=[(0.0, 50.0, 100.0), (100.0, 50.0, 100.0)],
+            name="Centerline break",
+            kind="standard",
+            source="hand",
+        )
+        return terrain
+
+    def test_inline_ifcopenshell_validate(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        """Run ifcopenshell.validate over a fully-authored flat-pad demo file."""
+        import logging
+
+        import ifcopenshell.validate
+
+        self._build_flat_pad_demo(empty_project_file)
+
+        path = tmp_path / "validator_demo.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+
+        records: list[logging.LogRecord] = []
+
+        class _CollectingHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.Logger("surface-validate")
+        logger.addHandler(_CollectingHandler(level=logging.DEBUG))
+
+        ifcopenshell.validate.validate(reopened, logger)
+
+        errors = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+        assert errors == [], f"validate() reported issues: {errors}"
+
+    def test_external_bsi_validator_if_present(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        """Optional: run an external bSI validator binary on the demo file."""
+        import os
+        import shutil
+        import subprocess
+
+        validator_path = os.environ.get("BSI_VALIDATOR_PATH")
+        if validator_path is None:
+            pytest.skip("BSI_VALIDATOR_PATH not set; skipping external validator test")
+        if not shutil.which(validator_path) and not os.path.isfile(validator_path):
+            pytest.skip(f"validator at {validator_path!r} not executable; skipping")
+
+        self._build_flat_pad_demo(empty_project_file)
+        path = tmp_path / "validator_demo.ifc"
+        empty_project_file.write(str(path))
+
+        result = subprocess.run(
+            [validator_path, str(path)], capture_output=True, text=True, timeout=120
+        )
+        assert result.returncode == 0, (
+            f"bSI validator returned {result.returncode}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
