@@ -1,0 +1,82 @@
+# IfcOpenShell - IFC toolkit and geometry engine
+# Copyright (C) 2026 Desert Springs Civil Engineering PLLC
+#
+# This file is part of IfcOpenShell.
+#
+# IfcOpenShell is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# IfcOpenShell is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with IfcOpenShell.  If not, see <http://www.gnu.org/licenses/>.
+
+"""Internal: resolve or create the geometric representation subcontexts the
+surface API authors into.
+
+Surfaces use three subcontexts under the project's "Model" context:
+
+- ``Body`` (MODEL_VIEW) — fallback identifier for arbitrary 3D geometry such
+  as breakline polylines.
+- ``SurfaceModel`` (MODEL_VIEW) — identifier for IfcTriangulatedIrregularNetwork
+  TIN geometry.
+- ``Box`` (MODEL_VIEW) — identifier for the bounding-box LOD representation.
+
+The lookup mirrors the ``ifcopenshell.api.alignment.get_axis_subcontext``
+pattern: find an existing subcontext via ``ifcopenshell.util.representation``
+or call ``ifcopenshell.api.context.add_context`` to create one. The parent
+"Model" context is auto-created if missing.
+"""
+
+from __future__ import annotations
+
+import ifcopenshell
+import ifcopenshell.api.context
+import ifcopenshell.util.representation
+
+
+def _get_or_create_model_context(file: ifcopenshell.file) -> ifcopenshell.entity_instance:
+    """Return the project's 3D "Model" IfcGeometricRepresentationContext, creating it if absent."""
+    model_context = ifcopenshell.util.representation.get_context(file, "Model")
+    if model_context is None:
+        model_context = ifcopenshell.api.context.add_context(file, context_type="Model")
+    return model_context
+
+
+def _get_or_create_subcontext(
+    file: ifcopenshell.file,
+    context_identifier: str,
+    target_view: str = "MODEL_VIEW",
+) -> ifcopenshell.entity_instance:
+    """Return the named Model subcontext, creating both it and the parent Model context if absent."""
+    subcontext = ifcopenshell.util.representation.get_context(file, "Model", context_identifier, target_view)
+    if subcontext is not None:
+        return subcontext
+    parent = _get_or_create_model_context(file)
+    return ifcopenshell.api.context.add_context(
+        file,
+        context_type="Model",
+        context_identifier=context_identifier,
+        target_view=target_view,
+        parent=parent,
+    )
+
+
+def get_body_subcontext(file: ifcopenshell.file) -> ifcopenshell.entity_instance:
+    """Return the Model/Body/MODEL_VIEW subcontext, creating it if absent."""
+    return _get_or_create_subcontext(file, "Body", "MODEL_VIEW")
+
+
+def get_surface_model_subcontext(file: ifcopenshell.file) -> ifcopenshell.entity_instance:
+    """Return the Model/SurfaceModel/MODEL_VIEW subcontext, creating it if absent."""
+    return _get_or_create_subcontext(file, "SurfaceModel", "MODEL_VIEW")
+
+
+def get_box_subcontext(file: ifcopenshell.file) -> ifcopenshell.entity_instance:
+    """Return the Model/Box/MODEL_VIEW subcontext, creating it if absent."""
+    return _get_or_create_subcontext(file, "Box", "MODEL_VIEW")
