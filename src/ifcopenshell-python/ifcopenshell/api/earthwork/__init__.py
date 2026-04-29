@@ -34,4 +34,8 @@ Public functions are re-exported here so callers do
 ``ifcopenshell.api.earthwork.create_earthworks_cut(...)``.
 """
 
-__all__: list[str] = []
+from .add_volume_solid_representation import add_volume_solid_representation
+
+__all__ = [
+    "add_volume_solid_representation",
+]

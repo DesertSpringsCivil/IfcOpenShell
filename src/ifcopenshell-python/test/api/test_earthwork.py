@@ -147,3 +147,227 @@ class TestSharedHelpers:
 
         with pytest.raises(ValueError, match="must be a valid IfcEarthworksFillTypeEnum"):
             validate_fill_predefined_type("invented")
+
+
+def _make_fill(file: ifcopenshell.file, name: str = "Test Fill") -> ifcopenshell.entity_instance:
+    return file.create_entity(
+        "IfcEarthworksFill",
+        GlobalId=ifcopenshell.guid.new(),
+        Name=name,
+        PredefinedType="EMBANKMENT",
+    )
+
+
+def _tetrahedron_solid_geometry() -> tuple[
+    list[tuple[float, float, float]], list[list[int]]
+]:
+    """4 vertices + 4 triangular faces forming a closed tetrahedron (signed volume = 1/6)."""
+    points = [
+        (0.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+    ]
+    # Counterclockwise from outside.
+    faces = [
+        [0, 2, 1],  # base z=0
+        [0, 1, 3],  # y=0 face
+        [1, 2, 3],  # diagonal face
+        [0, 3, 2],  # x=0 face
+    ]
+    return points, faces
+
+
+def _cube_solid_geometry() -> tuple[
+    list[tuple[float, float, float]], list[list[int]]
+]:
+    """8 vertices + 6 quad faces forming a closed unit cube. Volume = 1."""
+    points = [
+        (0.0, 0.0, 0.0),  # 0
+        (1.0, 0.0, 0.0),  # 1
+        (1.0, 1.0, 0.0),  # 2
+        (0.0, 1.0, 0.0),  # 3
+        (0.0, 0.0, 1.0),  # 4
+        (1.0, 0.0, 1.0),  # 5
+        (1.0, 1.0, 1.0),  # 6
+        (0.0, 1.0, 1.0),  # 7
+    ]
+    faces = [
+        [0, 3, 2, 1],  # bottom z=0 (CCW from below)
+        [4, 5, 6, 7],  # top z=1
+        [0, 1, 5, 4],  # y=0
+        [2, 3, 7, 6],  # y=1
+        [1, 2, 6, 5],  # x=1
+        [0, 4, 7, 3],  # x=0
+    ]
+    return points, faces
+
+
+def _mixed_arity_solid_geometry() -> tuple[
+    list[tuple[float, float, float]], list[list[int]]
+]:
+    """A 5-vertex pyramid: 4-vertex square base + 4 triangular sides. Mixed face arity."""
+    points = [
+        (0.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (1.0, 1.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.5, 0.5, 1.0),  # apex
+    ]
+    faces = [
+        [0, 3, 2, 1],  # square base (4 vertices)
+        [0, 1, 4],     # 4 triangular sides
+        [1, 2, 4],
+        [2, 3, 4],
+        [3, 0, 4],
+    ]
+    return points, faces
+
+
+class TestAddVolumeSolidRepresentation:
+    """Tests for ``ifcopenshell.api.earthwork.add_volume_solid_representation``."""
+
+    def test_happy_path_on_cube(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import add_volume_solid_representation
+
+        cut = _make_cut(empty_project_file)
+        points, faces = _cube_solid_geometry()
+
+        face_set = add_volume_solid_representation(
+            empty_project_file, cut, points, faces
+        )
+
+        assert face_set.is_a("IfcPolygonalFaceSet")
+        assert face_set.Closed is True
+        assert face_set.Coordinates.is_a("IfcCartesianPointList3D")
+        assert len(face_set.Coordinates.CoordList) == 8
+        assert len(face_set.Faces) == 6
+        # All face indices must be 1-based and in the valid range.
+        for face in face_set.Faces:
+            for index in face.CoordIndex:
+                assert 1 <= index <= 8
+
+        rep = cut.Representation.Representations[0]
+        assert rep.RepresentationIdentifier == "Body"
+        assert rep.RepresentationType == "Tessellation"
+        assert rep.Items[0].id() == face_set.id()
+
+    def test_one_based_index_conversion(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """0-based input becomes 1-based in IFC."""
+        from ifcopenshell.api.earthwork import add_volume_solid_representation
+
+        cut = _make_cut(empty_project_file)
+        points, faces = _tetrahedron_solid_geometry()
+
+        face_set = add_volume_solid_representation(empty_project_file, cut, points, faces)
+        assert list(face_set.Faces[0].CoordIndex) == [1, 3, 2]
+
+    def test_mixed_face_arity(self, empty_project_file: ifcopenshell.file) -> None:
+        """Triangles and quads can coexist in the same face set."""
+        from ifcopenshell.api.earthwork import add_volume_solid_representation
+
+        cut = _make_cut(empty_project_file)
+        points, faces = _mixed_arity_solid_geometry()
+
+        face_set = add_volume_solid_representation(empty_project_file, cut, points, faces)
+        face_arities = [len(face.CoordIndex) for face in face_set.Faces]
+        assert sorted(face_arities) == [3, 3, 3, 3, 4]
+
+    def test_closed_kwarg_persists(self, empty_project_file: ifcopenshell.file) -> None:
+        """Open meshes (Closed=False) are also valid for IfcPolygonalFaceSet."""
+        from ifcopenshell.api.earthwork import add_volume_solid_representation
+
+        cut = _make_cut(empty_project_file)
+        points, faces = _tetrahedron_solid_geometry()
+        face_set = add_volume_solid_representation(
+            empty_project_file, cut, points, faces, closed=False
+        )
+        assert face_set.Closed is False
+
+    def test_works_on_fill_too(self, empty_project_file: ifcopenshell.file) -> None:
+        """The function takes any IfcProduct, not just IfcEarthworksCut."""
+        from ifcopenshell.api.earthwork import add_volume_solid_representation
+
+        fill = _make_fill(empty_project_file)
+        points, faces = _cube_solid_geometry()
+        face_set = add_volume_solid_representation(
+            empty_project_file, fill, points, faces
+        )
+        assert fill.Representation.Representations[0].Items[0].id() == face_set.id()
+
+    def test_double_add_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import add_volume_solid_representation
+
+        cut = _make_cut(empty_project_file)
+        points, faces = _tetrahedron_solid_geometry()
+        add_volume_solid_representation(empty_project_file, cut, points, faces)
+
+        with pytest.raises(ValueError, match="already has a Body representation"):
+            add_volume_solid_representation(empty_project_file, cut, points, faces)
+
+    def test_empty_points_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import add_volume_solid_representation
+
+        cut = _make_cut(empty_project_file)
+        with pytest.raises(ValueError, match="points must not be empty"):
+            add_volume_solid_representation(empty_project_file, cut, [], [])
+
+    def test_empty_faces_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import add_volume_solid_representation
+
+        cut = _make_cut(empty_project_file)
+        with pytest.raises(ValueError, match="faces must not be empty"):
+            add_volume_solid_representation(
+                empty_project_file, cut, [(0.0, 0.0, 0.0)], []
+            )
+
+    def test_face_with_too_few_vertices_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import add_volume_solid_representation
+
+        cut = _make_cut(empty_project_file)
+        with pytest.raises(ValueError, match="requires at least 3"):
+            add_volume_solid_representation(
+                empty_project_file,
+                cut,
+                [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+                [[0, 1]],  # only 2 vertices
+            )
+
+    def test_out_of_range_face_index_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import add_volume_solid_representation
+
+        cut = _make_cut(empty_project_file)
+        with pytest.raises(ValueError, match="outside the points array"):
+            add_volume_solid_representation(
+                empty_project_file,
+                cut,
+                [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+                [[0, 1, 5]],
+            )
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.earthwork import add_volume_solid_representation
+
+        cut = _make_cut(empty_project_file, name="RT")
+        points, faces = _cube_solid_geometry()
+        add_volume_solid_representation(empty_project_file, cut, points, faces)
+
+        path = tmp_path / "rt_solid.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        cuts = [c for c in reopened.by_type("IfcEarthworksCut") if c.Name == "RT"]
+        assert len(cuts) == 1
+        face_set = cuts[0].Representation.Representations[0].Items[0]
+        assert face_set.is_a("IfcPolygonalFaceSet")
+        assert face_set.Closed is True
+        assert len(face_set.Coordinates.CoordList) == 8
+        assert len(face_set.Faces) == 6
+        for face in face_set.Faces:
+            for index in face.CoordIndex:
+                assert 1 <= index <= 8
