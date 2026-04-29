@@ -297,3 +297,87 @@ class TestAddTinRepresentation:
         for triangle in tin.CoordIndex:
             for index in triangle:
                 assert 1 <= index <= 5
+
+
+class TestAddBoundingBoxRepresentation:
+    """Tests for ``ifcopenshell.api.surface.add_bounding_box_representation``."""
+
+    def test_happy_path(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import add_bounding_box_representation
+
+        host = _make_geographic_element(empty_project_file)
+        box = add_bounding_box_representation(
+            empty_project_file, host, min_xyz=(0.0, 0.0, 0.0), max_xyz=(10.0, 20.0, 5.0)
+        )
+
+        assert box.is_a("IfcBoundingBox")
+        assert tuple(box.Corner.Coordinates) == (0.0, 0.0, 0.0)
+        assert box.XDim == 10.0
+        assert box.YDim == 20.0
+        assert box.ZDim == 5.0
+
+        rep = host.Representation.Representations[0]
+        assert rep.RepresentationIdentifier == "Box"
+        assert rep.RepresentationType == "BoundingBox"
+
+    def test_negative_min_corner(self, empty_project_file: ifcopenshell.file) -> None:
+        """A box with negative min coordinates is fine as long as max > min on every axis."""
+        from ifcopenshell.api.surface import add_bounding_box_representation
+
+        host = _make_geographic_element(empty_project_file)
+        box = add_bounding_box_representation(
+            empty_project_file, host, min_xyz=(-5.0, -5.0, -1.0), max_xyz=(5.0, 5.0, 1.0)
+        )
+        assert tuple(box.Corner.Coordinates) == (-5.0, -5.0, -1.0)
+        assert box.XDim == 10.0
+
+    def test_zero_dimension_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        """IFC requires IfcPositiveLengthMeasure — zero dim is invalid."""
+        from ifcopenshell.api.surface import add_bounding_box_representation
+
+        host = _make_geographic_element(empty_project_file)
+        with pytest.raises(ValueError, match="strictly greater"):
+            add_bounding_box_representation(
+                empty_project_file, host, min_xyz=(0.0, 0.0, 0.0), max_xyz=(10.0, 0.0, 5.0)
+            )
+
+    def test_inverted_corner_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import add_bounding_box_representation
+
+        host = _make_geographic_element(empty_project_file)
+        with pytest.raises(ValueError, match="strictly greater"):
+            add_bounding_box_representation(
+                empty_project_file, host, min_xyz=(10.0, 0.0, 0.0), max_xyz=(0.0, 10.0, 5.0)
+            )
+
+    def test_double_add_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import add_bounding_box_representation
+
+        host = _make_geographic_element(empty_project_file)
+        add_bounding_box_representation(
+            empty_project_file, host, min_xyz=(0.0, 0.0, 0.0), max_xyz=(1.0, 1.0, 1.0)
+        )
+        with pytest.raises(ValueError, match="Box representation"):
+            add_bounding_box_representation(
+                empty_project_file, host, min_xyz=(0.0, 0.0, 0.0), max_xyz=(1.0, 1.0, 1.0)
+            )
+
+    def test_round_trip_through_disk(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        from ifcopenshell.api.surface import add_bounding_box_representation
+
+        host = _make_geographic_element(empty_project_file, name="WithBox")
+        add_bounding_box_representation(
+            empty_project_file, host, min_xyz=(1.0, 2.0, 3.0), max_xyz=(4.0, 6.0, 9.0)
+        )
+
+        path = tmp_path / "with_box.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        host_again = [e for e in reopened.by_type("IfcGeographicElement") if e.Name == "WithBox"][0]
+        rep = host_again.Representation.Representations[0]
+        assert rep.RepresentationIdentifier == "Box"
+        box = rep.Items[0]
+        assert tuple(box.Corner.Coordinates) == (1.0, 2.0, 3.0)
+        assert (box.XDim, box.YDim, box.ZDim) == (3.0, 4.0, 6.0)
