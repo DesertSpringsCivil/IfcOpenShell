@@ -381,3 +381,117 @@ class TestAddBoundingBoxRepresentation:
         box = rep.Items[0]
         assert tuple(box.Corner.Coordinates) == (1.0, 2.0, 3.0)
         assert (box.XDim, box.YDim, box.ZDim) == (3.0, 4.0, 6.0)
+
+
+class TestApplySaikeiPset:
+    """Tests for ``ifcopenshell.api.surface.apply_saikei_pset``."""
+
+    def _read_back_properties(self, pset: ifcopenshell.entity_instance) -> dict[str, object]:
+        """Translate IfcPropertySet.HasProperties into a flat name→value dict."""
+        out: dict[str, object] = {}
+        for prop in pset.HasProperties or []:
+            if prop.is_a("IfcPropertySingleValue") and prop.NominalValue is not None:
+                out[prop.Name] = prop.NominalValue.wrappedValue
+        return out
+
+    def test_creates_pset_with_defaults(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import apply_saikei_pset
+
+        host = _make_geographic_element(empty_project_file)
+        pset = apply_saikei_pset(empty_project_file, host)
+
+        assert pset.is_a("IfcPropertySet")
+        assert pset.Name == "Pset_SaikeiGradingSurface"
+        properties = self._read_back_properties(pset)
+        assert properties["TriangulationTolerance"] == 0.0
+        assert properties["BreaklineCount"] == 0
+        # VertexCount is omitted when no SurfaceModel rep exists.
+        assert "VertexCount" not in properties
+        assert "BoundaryPolygonReference" not in properties
+
+    def test_explicit_values_persist(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import apply_saikei_pset
+
+        host = _make_geographic_element(empty_project_file)
+        pset = apply_saikei_pset(
+            empty_project_file,
+            host,
+            triangulation_tolerance=0.005,
+            breakline_count=4,
+            vertex_count=1234,
+            boundary_polygon_reference="3VxJzKQwT9XwJZ8RbZkH7E",
+        )
+
+        properties = self._read_back_properties(pset)
+        assert properties["TriangulationTolerance"] == 0.005
+        assert properties["BreaklineCount"] == 4
+        assert properties["VertexCount"] == 1234
+        assert properties["BoundaryPolygonReference"] == "3VxJzKQwT9XwJZ8RbZkH7E"
+
+    def test_vertex_count_inferred_from_existing_tin(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """If vertex_count is None, the function reads the SurfaceModel TIN's point count."""
+        from ifcopenshell.api.surface import add_tin_representation, apply_saikei_pset
+
+        host = _make_geographic_element(empty_project_file)
+        points, triangles = _flat_pad_geometry()
+        add_tin_representation(empty_project_file, host, points, triangles)
+
+        pset = apply_saikei_pset(empty_project_file, host)
+        properties = self._read_back_properties(pset)
+        assert properties["VertexCount"] == len(points)
+
+    def test_second_call_updates_in_place(self, empty_project_file: ifcopenshell.file) -> None:
+        """Re-applying must update the pset rather than creating a duplicate."""
+        from ifcopenshell.api.surface import apply_saikei_pset
+
+        host = _make_geographic_element(empty_project_file)
+        first = apply_saikei_pset(empty_project_file, host, triangulation_tolerance=0.001)
+        second = apply_saikei_pset(empty_project_file, host, triangulation_tolerance=0.005, breakline_count=7)
+
+        assert first.id() == second.id()
+        properties = self._read_back_properties(second)
+        assert properties["TriangulationTolerance"] == 0.005
+        assert properties["BreaklineCount"] == 7
+
+        # Exactly one IfcRelDefinesByProperties for this pset.
+        rels = [
+            r
+            for r in host.IsDefinedBy or []
+            if r.is_a("IfcRelDefinesByProperties")
+            and r.RelatingPropertyDefinition.Name == "Pset_SaikeiGradingSurface"
+        ]
+        assert len(rels) == 1
+
+    def test_round_trip_through_disk(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        from ifcopenshell.api.surface import apply_saikei_pset
+
+        host = _make_geographic_element(empty_project_file, name="WithPset")
+        apply_saikei_pset(
+            empty_project_file,
+            host,
+            triangulation_tolerance=0.01,
+            breakline_count=2,
+            vertex_count=42,
+            boundary_polygon_reference="abc123",
+        )
+
+        path = tmp_path / "with_pset.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        host_again = [e for e in reopened.by_type("IfcGeographicElement") if e.Name == "WithPset"][0]
+        psets = [
+            r.RelatingPropertyDefinition
+            for r in host_again.IsDefinedBy or []
+            if r.is_a("IfcRelDefinesByProperties")
+            and r.RelatingPropertyDefinition.Name == "Pset_SaikeiGradingSurface"
+        ]
+        assert len(psets) == 1
+        properties = self._read_back_properties(psets[0])
+        assert properties["TriangulationTolerance"] == 0.01
+        assert properties["BreaklineCount"] == 2
+        assert properties["VertexCount"] == 42
+        assert properties["BoundaryPolygonReference"] == "abc123"

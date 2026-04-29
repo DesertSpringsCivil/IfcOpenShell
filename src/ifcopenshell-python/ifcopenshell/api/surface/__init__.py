@@ -34,8 +34,10 @@ Public functions are re-exported here so callers do
 
 from .add_bounding_box_representation import add_bounding_box_representation
 from .add_tin_representation import add_tin_representation
+from .apply_saikei_pset import apply_saikei_pset
 
 __all__ = [
     "add_bounding_box_representation",
     "add_tin_representation",
+    "apply_saikei_pset",
 ]
