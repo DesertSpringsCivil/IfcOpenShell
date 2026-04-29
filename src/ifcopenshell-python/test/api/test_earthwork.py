@@ -848,3 +848,213 @@ class TestVoidTerrain:
         assert len(rels) == 1
         assert rels[0].RelatingBuildingElement.Name == "RTGround"
         assert rels[0].RelatedOpeningElement.Name == "RTCut"
+
+
+def _read_qto(
+    product: ifcopenshell.entity_instance, qto_name: str
+) -> dict[str, float]:
+    """Translate the named IfcElementQuantity's children into a name→value dict."""
+    for rel in product.IsDefinedBy or []:
+        if not rel.is_a("IfcRelDefinesByProperties"):
+            continue
+        qto = rel.RelatingPropertyDefinition
+        if not (qto.is_a("IfcElementQuantity") and qto.Name == qto_name):
+            continue
+        out: dict[str, float] = {}
+        for q in qto.Quantities or []:
+            if q.is_a("IfcQuantityLength"):
+                out[q.Name] = q.LengthValue
+            elif q.is_a("IfcQuantityVolume"):
+                out[q.Name] = q.VolumeValue
+            elif q.is_a("IfcQuantityWeight"):
+                out[q.Name] = q.WeightValue
+        return out
+    return {}
+
+
+class TestWriteCutQuantities:
+    """Tests for ``ifcopenshell.api.earthwork.write_cut_quantities``."""
+
+    def _make_cube_cut(self, file: ifcopenshell.file) -> ifcopenshell.entity_instance:
+        from ifcopenshell.api.earthwork import create_earthworks_cut
+
+        points, faces = _cube_solid_geometry()
+        return create_earthworks_cut(file, name="X", points=points, faces=faces)
+
+    def test_happy_path_writes_all_six_quantities(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import write_cut_quantities
+
+        cut = self._make_cube_cut(empty_project_file)
+        qto = write_cut_quantities(
+            empty_project_file,
+            cut,
+            length=10.0,
+            width=5.0,
+            depth=2.0,
+            undisturbed_volume=100.0,
+            loose_volume=125.0,
+            weight=180000.0,
+        )
+
+        assert qto.is_a("IfcElementQuantity")
+        assert qto.Name == "Qto_EarthworksCutBaseQuantities"
+        assert len(qto.Quantities) == 6
+        values = _read_qto(cut, "Qto_EarthworksCutBaseQuantities")
+        assert values == {
+            "Length": 10.0,
+            "Width": 5.0,
+            "Depth": 2.0,
+            "UndisturbedVolume": 100.0,
+            "LooseVolume": 125.0,
+            "Weight": 180000.0,
+        }
+
+    def test_partial_write_omits_none_quantities(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """None-valued args are omitted from the Qto entirely."""
+        from ifcopenshell.api.earthwork import write_cut_quantities
+
+        cut = self._make_cube_cut(empty_project_file)
+        write_cut_quantities(
+            empty_project_file, cut, undisturbed_volume=42.0
+        )
+        values = _read_qto(cut, "Qto_EarthworksCutBaseQuantities")
+        assert values == {"UndisturbedVolume": 42.0}
+
+    def test_idempotent_in_place_update(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """Per Phase 3 idempotency contract: second call updates same IfcElementQuantity."""
+        from ifcopenshell.api.earthwork import write_cut_quantities
+
+        cut = self._make_cube_cut(empty_project_file)
+        first = write_cut_quantities(
+            empty_project_file, cut, undisturbed_volume=100.0, loose_volume=125.0
+        )
+        second = write_cut_quantities(
+            empty_project_file,
+            cut,
+            length=10.0,
+            undisturbed_volume=120.0,
+            loose_volume=150.0,
+            weight=200000.0,
+        )
+
+        assert first.id() == second.id()
+        # Final values reflect the LAST call's args.
+        values = _read_qto(cut, "Qto_EarthworksCutBaseQuantities")
+        assert values == {
+            "Length": 10.0,
+            "UndisturbedVolume": 120.0,
+            "LooseVolume": 150.0,
+            "Weight": 200000.0,
+        }
+        # Exactly one Qto on the cut.
+        qtos = [
+            r.RelatingPropertyDefinition
+            for r in cut.IsDefinedBy or []
+            if r.is_a("IfcRelDefinesByProperties")
+            and r.RelatingPropertyDefinition.Name == "Qto_EarthworksCutBaseQuantities"
+        ]
+        assert len(qtos) == 1
+
+    def test_idempotent_burst_no_duplicates(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """Five calls in a row leave one Qto, with the last-supplied values."""
+        from ifcopenshell.api.earthwork import write_cut_quantities
+
+        cut = self._make_cube_cut(empty_project_file)
+        for i in range(5):
+            write_cut_quantities(
+                empty_project_file,
+                cut,
+                undisturbed_volume=100.0 + i,
+                loose_volume=125.0 + i,
+            )
+        qtos = [
+            r.RelatingPropertyDefinition
+            for r in cut.IsDefinedBy or []
+            if r.is_a("IfcRelDefinesByProperties")
+            and r.RelatingPropertyDefinition.Name == "Qto_EarthworksCutBaseQuantities"
+        ]
+        assert len(qtos) == 1
+        values = _read_qto(cut, "Qto_EarthworksCutBaseQuantities")
+        assert values == {"UndisturbedVolume": 104.0, "LooseVolume": 129.0}
+
+    def test_no_quantities_supplied_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import write_cut_quantities
+
+        cut = self._make_cube_cut(empty_project_file)
+        with pytest.raises(ValueError, match="at least one quantity"):
+            write_cut_quantities(empty_project_file, cut)
+
+    def test_wrong_target_type_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import write_cut_quantities
+
+        not_a_cut = _make_fill(empty_project_file)
+        with pytest.raises(ValueError, match="must be an IfcEarthworksCut"):
+            write_cut_quantities(empty_project_file, not_a_cut, undisturbed_volume=10.0)
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.earthwork import write_cut_quantities
+
+        cut = self._make_cube_cut(empty_project_file)
+        cut.Name = "RTQto"
+        write_cut_quantities(
+            empty_project_file,
+            cut,
+            length=15.0,
+            width=8.0,
+            depth=3.0,
+            undisturbed_volume=360.0,
+            loose_volume=450.0,
+        )
+
+        path = tmp_path / "rt_cut_qto.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        cuts = [c for c in reopened.by_type("IfcEarthworksCut") if c.Name == "RTQto"]
+        assert len(cuts) == 1
+        values = _read_qto(cuts[0], "Qto_EarthworksCutBaseQuantities")
+        assert values == {
+            "Length": 15.0,
+            "Width": 8.0,
+            "Depth": 3.0,
+            "UndisturbedVolume": 360.0,
+            "LooseVolume": 450.0,
+        }
+
+    def test_idempotent_persists_through_reopen(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        """Reopening + calling again is also idempotent (file-state, not just memory-state)."""
+        from ifcopenshell.api.earthwork import write_cut_quantities
+
+        cut = self._make_cube_cut(empty_project_file)
+        cut.Name = "RTPersist"
+        write_cut_quantities(empty_project_file, cut, undisturbed_volume=50.0)
+
+        path = tmp_path / "persist.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        reopened_cut = [c for c in reopened.by_type("IfcEarthworksCut") if c.Name == "RTPersist"][0]
+
+        write_cut_quantities(reopened, reopened_cut, undisturbed_volume=75.0, loose_volume=90.0)
+
+        qtos = [
+            r.RelatingPropertyDefinition
+            for r in reopened_cut.IsDefinedBy or []
+            if r.is_a("IfcRelDefinesByProperties")
+            and r.RelatingPropertyDefinition.Name == "Qto_EarthworksCutBaseQuantities"
+        ]
+        assert len(qtos) == 1
+        values = _read_qto(reopened_cut, "Qto_EarthworksCutBaseQuantities")
+        assert values == {"UndisturbedVolume": 75.0, "LooseVolume": 90.0}
