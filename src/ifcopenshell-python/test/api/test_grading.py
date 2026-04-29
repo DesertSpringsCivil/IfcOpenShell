@@ -750,3 +750,323 @@ class TestCreateGradingGroup:
         source = _read_pset(group, "Pset_SaikeiGradingSource")
         assert source["Author"] == "Tester"
         assert source["TargetSurfaceGuid"] == terrain.GlobalId
+
+
+class TestAssignGradingCriteria:
+    """Tests for ``ifcopenshell.api.grading.assign_grading_criteria``."""
+
+    def _read_criteria_pset(
+        self, group: ifcopenshell.entity_instance
+    ) -> dict[str, object]:
+        """Translate the bound IfcPropertySet into a name→value dict for assertions."""
+        for rel in group.IsDefinedBy or []:
+            if not rel.is_a("IfcRelDefinesByProperties"):
+                continue
+            pset = rel.RelatingPropertyDefinition
+            if not (pset.is_a("IfcPropertySet") and pset.Name == "Pset_SaikeiGradingCriteria"):
+                continue
+            out: dict[str, object] = {}
+            for prop in pset.HasProperties:
+                if prop.is_a("IfcPropertyEnumeratedValue"):
+                    out[prop.Name] = [v.wrappedValue for v in prop.EnumerationValues]
+                elif prop.is_a("IfcPropertySingleValue") and prop.NominalValue is not None:
+                    out[prop.Name] = prop.NominalValue.wrappedValue
+            return out
+        return {}
+
+    def test_happy_path(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import (
+            assign_grading_criteria,
+            create_grading_criteria_template,
+            create_grading_group,
+        )
+
+        template = create_grading_criteria_template(empty_project_file)
+        result = create_grading_group(empty_project_file, name="Pad")
+
+        pset = assign_grading_criteria(
+            empty_project_file,
+            result.group,
+            template,
+            target_kind="surface",
+            target_reference="3VxJzKQwT9XwJZ8RbZkH7E",
+            cut_slope=2.0,
+            fill_slope=3.0,
+            max_distance=15.0,
+            retaining_wall_at_limit=True,
+        )
+
+        assert pset.is_a("IfcPropertySet")
+        assert pset.Name == "Pset_SaikeiGradingCriteria"
+
+        properties = self._read_criteria_pset(result.group)
+        assert properties["TargetKind"] == ["surface"]
+        assert properties["TargetReference"] == "3VxJzKQwT9XwJZ8RbZkH7E"
+        assert properties["CutSlope"] == 2.0
+        assert properties["FillSlope"] == 3.0
+        assert properties["MaxDistance"] == 15.0
+        assert properties["RetainingWallAtLimit"] is True
+
+    def test_template_binding_via_rel_defines_by_template(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """The pset is linked back to its template via IfcRelDefinesByTemplate."""
+        from ifcopenshell.api.grading import (
+            assign_grading_criteria,
+            create_grading_criteria_template,
+            create_grading_group,
+        )
+
+        template = create_grading_criteria_template(empty_project_file)
+        result = create_grading_group(empty_project_file, name="Pad")
+        pset = assign_grading_criteria(
+            empty_project_file,
+            result.group,
+            template,
+            target_kind="elevation",
+            cut_slope=2.0,
+            fill_slope=3.0,
+        )
+
+        rels = empty_project_file.by_type("IfcRelDefinesByTemplate")
+        matching = [r for r in rels if r.RelatingTemplate.id() == template.id()]
+        assert len(matching) == 1
+        assert pset in matching[0].RelatedPropertySets
+
+    def test_optional_properties_omitted_when_none(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            assign_grading_criteria,
+            create_grading_criteria_template,
+            create_grading_group,
+        )
+
+        template = create_grading_criteria_template(empty_project_file)
+        result = create_grading_group(empty_project_file, name="Pad")
+        assign_grading_criteria(
+            empty_project_file,
+            result.group,
+            template,
+            target_kind="distance",
+            cut_slope=2.5,
+            fill_slope=3.0,
+        )
+
+        properties = self._read_criteria_pset(result.group)
+        assert "TargetReference" not in properties
+        assert "MaxDistance" not in properties
+        # Required ones still there
+        assert properties["TargetKind"] == ["distance"]
+        assert properties["RetainingWallAtLimit"] is False
+
+    def test_re_assign_updates_in_place(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """A second call updates the same IfcPropertySet — no duplicate pset."""
+        from ifcopenshell.api.grading import (
+            assign_grading_criteria,
+            create_grading_criteria_template,
+            create_grading_group,
+        )
+
+        template = create_grading_criteria_template(empty_project_file)
+        result = create_grading_group(empty_project_file, name="Pad")
+        first = assign_grading_criteria(
+            empty_project_file,
+            result.group,
+            template,
+            target_kind="surface",
+            cut_slope=2.0,
+            fill_slope=3.0,
+        )
+        second = assign_grading_criteria(
+            empty_project_file,
+            result.group,
+            template,
+            target_kind="elevation",
+            cut_slope=1.5,
+            fill_slope=4.0,
+            max_distance=10.0,
+        )
+
+        assert first.id() == second.id()
+        properties = self._read_criteria_pset(result.group)
+        assert properties["TargetKind"] == ["elevation"]
+        assert properties["CutSlope"] == 1.5
+        assert properties["FillSlope"] == 4.0
+        assert properties["MaxDistance"] == 10.0
+
+        # Exactly one criteria pset on the group.
+        criteria_psets = [
+            r.RelatingPropertyDefinition
+            for r in result.group.IsDefinedBy or []
+            if r.is_a("IfcRelDefinesByProperties")
+            and r.RelatingPropertyDefinition.Name == "Pset_SaikeiGradingCriteria"
+        ]
+        assert len(criteria_psets) == 1
+
+    def test_custom_name_override(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import (
+            assign_grading_criteria,
+            create_grading_criteria_template,
+            create_grading_group,
+        )
+
+        template = create_grading_criteria_template(empty_project_file)
+        result = create_grading_group(empty_project_file, name="Pad")
+        pset = assign_grading_criteria(
+            empty_project_file,
+            result.group,
+            template,
+            target_kind="surface",
+            cut_slope=2.0,
+            fill_slope=3.0,
+            name="3:1 fill / 2:1 cut",
+        )
+        # IfcPropertySet.Name is the override, but the bound template still
+        # discoverable via IfcRelDefinesByTemplate (so pset Name is purely
+        # display-side).
+        assert pset.Name == "3:1 fill / 2:1 cut"
+
+    def test_invalid_target_kind_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import (
+            assign_grading_criteria,
+            create_grading_criteria_template,
+            create_grading_group,
+        )
+
+        template = create_grading_criteria_template(empty_project_file)
+        result = create_grading_group(empty_project_file, name="Pad")
+        with pytest.raises(ValueError, match="target_kind must be one of"):
+            assign_grading_criteria(
+                empty_project_file,
+                result.group,
+                template,
+                target_kind="not_allowed",
+                cut_slope=2.0,
+                fill_slope=3.0,
+            )
+
+    def test_non_positive_slope_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import (
+            assign_grading_criteria,
+            create_grading_criteria_template,
+            create_grading_group,
+        )
+
+        template = create_grading_criteria_template(empty_project_file)
+        result = create_grading_group(empty_project_file, name="Pad")
+        with pytest.raises(ValueError, match="cut_slope must be > 0"):
+            assign_grading_criteria(
+                empty_project_file,
+                result.group,
+                template,
+                target_kind="surface",
+                cut_slope=0.0,
+                fill_slope=3.0,
+            )
+        with pytest.raises(ValueError, match="fill_slope must be > 0"):
+            assign_grading_criteria(
+                empty_project_file,
+                result.group,
+                template,
+                target_kind="surface",
+                cut_slope=2.0,
+                fill_slope=-1.0,
+            )
+
+    def test_non_positive_max_distance_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            assign_grading_criteria,
+            create_grading_criteria_template,
+            create_grading_group,
+        )
+
+        template = create_grading_criteria_template(empty_project_file)
+        result = create_grading_group(empty_project_file, name="Pad")
+        with pytest.raises(ValueError, match="max_distance must be > 0"):
+            assign_grading_criteria(
+                empty_project_file,
+                result.group,
+                template,
+                target_kind="surface",
+                cut_slope=2.0,
+                fill_slope=3.0,
+                max_distance=0.0,
+            )
+
+    def test_wrong_template_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        """Passing an arbitrary IfcPropertySetTemplate is rejected."""
+        from ifcopenshell.api.grading import (
+            assign_grading_criteria,
+            create_grading_group,
+        )
+
+        bogus_template = empty_project_file.create_entity(
+            "IfcPropertySetTemplate",
+            GlobalId=ifcopenshell.guid.new(),
+            Name="Pset_NotOurs",
+            TemplateType="PSET_OCCURRENCEDRIVEN",
+            HasPropertyTemplates=[
+                empty_project_file.create_entity(
+                    "IfcSimplePropertyTemplate",
+                    GlobalId=ifcopenshell.guid.new(),
+                    Name="Bogus",
+                    TemplateType="P_SINGLEVALUE",
+                    PrimaryMeasureType="IfcLabel",
+                )
+            ],
+        )
+        result = create_grading_group(empty_project_file, name="Pad")
+        with pytest.raises(ValueError, match="Pset_SaikeiGradingCriteria"):
+            assign_grading_criteria(
+                empty_project_file,
+                result.group,
+                bogus_template,
+                target_kind="surface",
+                cut_slope=2.0,
+                fill_slope=3.0,
+            )
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.grading import (
+            assign_grading_criteria,
+            create_grading_criteria_template,
+            create_grading_group,
+        )
+
+        template = create_grading_criteria_template(empty_project_file)
+        result = create_grading_group(empty_project_file, name="RTPad")
+        assign_grading_criteria(
+            empty_project_file,
+            result.group,
+            template,
+            target_kind="elevation",
+            target_reference="100.5",
+            cut_slope=2.0,
+            fill_slope=3.0,
+            max_distance=12.0,
+            retaining_wall_at_limit=True,
+        )
+
+        path = tmp_path / "rt_criteria.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        groups = [
+            g for g in reopened.by_type("IfcGroup")
+            if g.Name == "RTPad" and g.ObjectType == "GradingGroup"
+        ]
+        assert len(groups) == 1
+        properties = self._read_criteria_pset(groups[0])
+        assert properties["TargetKind"] == ["elevation"]
+        assert properties["TargetReference"] == "100.5"
+        assert properties["MaxDistance"] == 12.0
+        assert properties["RetainingWallAtLimit"] is True
+
+        # Template binding survives round-trip.
+        rels = reopened.by_type("IfcRelDefinesByTemplate")
+        assert len(rels) == 1
+        assert rels[0].RelatingTemplate.Name == "Pset_SaikeiGradingCriteria"
