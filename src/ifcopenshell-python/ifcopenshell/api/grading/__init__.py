@@ -29,6 +29,7 @@ Public functions are re-exported here so callers do
 """
 
 from .add_member_to_group import add_member_to_group
+from .add_slope_fill_to_group import add_slope_fill_to_group
 from .assign_grading_criteria import assign_grading_criteria
 from .create_feature_line import create_feature_line
 from .create_grading_criteria_template import create_grading_criteria_template
@@ -37,6 +38,7 @@ from .create_grading_group import GradingGroupAuthoring, create_grading_group
 __all__ = [
     "GradingGroupAuthoring",
     "add_member_to_group",
+    "add_slope_fill_to_group",
     "assign_grading_criteria",
     "create_feature_line",
     "create_grading_criteria_template",

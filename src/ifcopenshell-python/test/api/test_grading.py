@@ -1070,3 +1070,314 @@ class TestAssignGradingCriteria:
         rels = reopened.by_type("IfcRelDefinesByTemplate")
         assert len(rels) == 1
         assert rels[0].RelatingTemplate.Name == "Pset_SaikeiGradingCriteria"
+
+
+def _slope_ribbon_geometry() -> tuple[
+    list[tuple[float, float, float]], list[tuple[int, int, int]]
+]:
+    """8 triangles forming a slope ribbon around a 10×10 m square pad.
+
+    Inner ring: square at z=100 (the feature line elevation).
+    Outer ring: square 5 m wider in each direction at z=99 (the daylight line).
+    """
+    inner = [
+        (0.0, 0.0, 100.0),
+        (10.0, 0.0, 100.0),
+        (10.0, 10.0, 100.0),
+        (0.0, 10.0, 100.0),
+    ]
+    outer = [
+        (-5.0, -5.0, 99.0),
+        (15.0, -5.0, 99.0),
+        (15.0, 15.0, 99.0),
+        (-5.0, 15.0, 99.0),
+    ]
+    points = inner + outer
+    # Two triangles per side (4 sides) = 8 triangles.
+    triangles = []
+    for i in range(4):
+        j = (i + 1) % 4
+        a = i  # inner i
+        b = j  # inner i+1
+        c = 4 + i  # outer i
+        d = 4 + j  # outer i+1
+        triangles.append((a, c, d))
+        triangles.append((a, d, b))
+    return points, triangles
+
+
+class TestAddSlopeFillToGroup:
+    """Tests for ``ifcopenshell.api.grading.add_slope_fill_to_group``."""
+
+    def test_happy_path(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import (
+            add_slope_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        points, triangles = _slope_ribbon_geometry()
+
+        slope = add_slope_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="North slope",
+            points=points,
+            triangles=triangles,
+        )
+
+        assert slope.is_a("IfcEarthworksFill")
+        assert slope.PredefinedType == "SLOPEFILL"
+        assert slope.Name == "North slope"
+
+    def test_tin_and_box_representations_attached(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            add_slope_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        points, triangles = _slope_ribbon_geometry()
+        slope = add_slope_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="S",
+            points=points,
+            triangles=triangles,
+        )
+
+        identifiers = {r.RepresentationIdentifier for r in slope.Representation.Representations}
+        assert identifiers == {"SurfaceModel", "Box"}
+
+    def test_added_to_group_as_member(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            add_slope_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        points, triangles = _slope_ribbon_geometry()
+        slope = add_slope_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="S",
+            points=points,
+            triangles=triangles,
+        )
+
+        rels = result.group.IsGroupedBy
+        assert len(rels) == 1
+        members = rels[0].RelatedObjects
+        assert slope in members
+        # Composite fill is also still a member.
+        assert result.composite_fill in members
+
+    def test_aggregated_under_composite(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            add_slope_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        points, triangles = _slope_ribbon_geometry()
+        slope = add_slope_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="S",
+            points=points,
+            triangles=triangles,
+        )
+
+        # The composite has IsDecomposedBy[*] linking it to slope as RelatedObject
+        decomposed = result.composite_fill.IsDecomposedBy
+        assert len(decomposed) == 1
+        assert slope in decomposed[0].RelatedObjects
+
+    def test_multiple_slopes_share_one_aggregation_rel(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """Adding two slope fills under the same composite results in one IfcRelAggregates."""
+        from ifcopenshell.api.grading import (
+            add_slope_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        points, triangles = _slope_ribbon_geometry()
+
+        slope_a = add_slope_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="A",
+            points=points,
+            triangles=triangles,
+        )
+        slope_b = add_slope_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="B",
+            points=points,
+            triangles=triangles,
+        )
+
+        decomposed = result.composite_fill.IsDecomposedBy
+        assert len(decomposed) == 1
+        children = decomposed[0].RelatedObjects
+        assert {slope_a.id(), slope_b.id()} <= {c.id() for c in children}
+
+    def test_omniclass_classified_under_22_07_31_23(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            add_slope_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        points, triangles = _slope_ribbon_geometry()
+        slope = add_slope_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="S",
+            points=points,
+            triangles=triangles,
+        )
+
+        rels = empty_project_file.by_type("IfcRelAssociatesClassification")
+        slope_rels = [r for r in rels if slope in r.RelatedObjects]
+        assert len(slope_rels) == 1
+        assert slope_rels[0].RelatingClassification.Identification == "22-07 31 23"
+
+    def test_feature_line_added_to_group_when_supplied(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            add_slope_fill_to_group,
+            create_feature_line,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        feature_line = create_feature_line(
+            empty_project_file,
+            name="FL",
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+        )
+        points, triangles = _slope_ribbon_geometry()
+        slope = add_slope_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="S",
+            points=points,
+            triangles=triangles,
+            feature_line=feature_line,
+        )
+        assert slope is not None  # use the value to satisfy linters
+
+        members = result.group.IsGroupedBy[0].RelatedObjects
+        assert feature_line in members
+
+    def test_standard_pset_attached(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import (
+            add_slope_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        points, triangles = _slope_ribbon_geometry()
+        slope = add_slope_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="S",
+            points=points,
+            triangles=triangles,
+        )
+        common = _read_pset(slope, "Pset_EarthworksFillCommon")
+        assert common.get("Status") == "NEW"
+
+    def test_wrong_group_type_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            add_slope_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        not_a_group = result.composite_fill  # a fill, not a group
+        with pytest.raises(ValueError, match="group must be an IfcGroup"):
+            add_slope_fill_to_group(
+                empty_project_file,
+                not_a_group,
+                result.composite_fill,
+                name="S",
+                points=[(0.0, 0.0, 0.0)],
+                triangles=[],
+            )
+
+    def test_wrong_composite_type_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            add_slope_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        with pytest.raises(ValueError, match="composite_fill must be an IfcEarthworksFill"):
+            add_slope_fill_to_group(
+                empty_project_file,
+                result.group,
+                result.group,  # wrong type
+                name="S",
+                points=[(0.0, 0.0, 0.0)],
+                triangles=[],
+            )
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.grading import (
+            add_slope_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="RTPad")
+        points, triangles = _slope_ribbon_geometry()
+        add_slope_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="RT_Slope",
+            points=points,
+            triangles=triangles,
+        )
+
+        path = tmp_path / "rt_slope.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        slopes = [
+            f for f in reopened.by_type("IfcEarthworksFill")
+            if f.Name == "RT_Slope" and f.PredefinedType == "SLOPEFILL"
+        ]
+        assert len(slopes) == 1
+        slope = slopes[0]
+        identifiers = {r.RepresentationIdentifier for r in slope.Representation.Representations}
+        assert identifiers == {"SurfaceModel", "Box"}
+        # Aggregated under the composite (which is named "RTPad").
+        composite = slope.Decomposes[0].RelatingObject
+        assert composite.Name == "RTPad"
+        assert composite.PredefinedType == "SUBGRADE"

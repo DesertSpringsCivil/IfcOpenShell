@@ -85,6 +85,54 @@ def _get_or_create_classification_reference(
     )
 
 
+def aggregate_under(
+    file: ifcopenshell.file,
+    parent: ifcopenshell.entity_instance,
+    child: ifcopenshell.entity_instance,
+) -> ifcopenshell.entity_instance:
+    """Make ``child`` an aggregation child of ``parent`` via :class:`IfcRelAggregates`.
+
+    Idempotent: if ``parent`` already has an :class:`IfcRelAggregates` with
+    ``RelatingObject == parent``, ``child`` is appended (de-duplicated)
+    rather than creating a new rel. Returns the rel (existing or newly
+    created).
+    """
+    for rel in parent.IsDecomposedBy or []:
+        if rel.is_a("IfcRelAggregates") and rel.RelatingObject.id() == parent.id():
+            if child.id() not in {c.id() for c in rel.RelatedObjects}:
+                rel.RelatedObjects = list(rel.RelatedObjects) + [child]
+            return rel
+    return file.create_entity(
+        "IfcRelAggregates",
+        GlobalId=ifcopenshell.guid.new(),
+        RelatingObject=parent,
+        RelatedObjects=[child],
+    )
+
+
+def compute_bounding_box(
+    points: list[tuple[float, float, float]],
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Return ``(min_xyz, max_xyz)`` for ``points``, nudging zero-length axes upward.
+
+    IFC's :class:`IfcBoundingBox` requires :class:`IfcPositiveLengthMeasure`
+    for ``XDim``/``YDim``/``ZDim``, so any axis where ``max == min`` is
+    bumped by a small epsilon.
+    """
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    zs = [p[2] for p in points]
+    min_xyz = (min(xs), min(ys), min(zs))
+    max_xyz = (max(xs), max(ys), max(zs))
+    epsilon = 1e-6
+    max_xyz = (
+        max_xyz[0] if max_xyz[0] > min_xyz[0] else min_xyz[0] + epsilon,
+        max_xyz[1] if max_xyz[1] > min_xyz[1] else min_xyz[1] + epsilon,
+        max_xyz[2] if max_xyz[2] > min_xyz[2] else min_xyz[2] + epsilon,
+    )
+    return min_xyz, max_xyz
+
+
 def apply_omniclass_classification(
     file: ifcopenshell.file,
     product: ifcopenshell.entity_instance,
