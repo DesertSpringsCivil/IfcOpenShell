@@ -657,3 +657,99 @@ class TestCreateTerrain:
         assert saikei_pset["TriangulationTolerance"] == 0.01
         assert saikei_pset["BreaklineCount"] == 3
         assert saikei_pset["VertexCount"] == 5
+
+
+class TestCreateProposedSurface:
+    """Tests for ``ifcopenshell.api.surface.create_proposed_surface``."""
+
+    def _read_pset(
+        self, product: ifcopenshell.entity_instance, pset_name: str
+    ) -> dict[str, object]:
+        for rel in product.IsDefinedBy or []:
+            if not rel.is_a("IfcRelDefinesByProperties"):
+                continue
+            pset = rel.RelatingPropertyDefinition
+            if pset.is_a("IfcPropertySet") and pset.Name == pset_name:
+                return {
+                    p.Name: p.NominalValue.wrappedValue
+                    for p in pset.HasProperties or []
+                    if p.is_a("IfcPropertySingleValue") and p.NominalValue is not None
+                }
+        return {}
+
+    def test_happy_path(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import create_proposed_surface
+
+        points, triangles = _flat_pad_geometry()
+        proposed = create_proposed_surface(
+            empty_project_file,
+            name="Proposed Subgrade",
+            points=points,
+            triangles=triangles,
+            triangulation_tolerance=0.002,
+            breakline_count=1,
+        )
+
+        assert proposed.is_a("IfcEarthworksFill")
+        assert proposed.PredefinedType == "SUBGRADE"
+        assert proposed.Name == "Proposed Subgrade"
+
+        rep_identifiers = {
+            r.RepresentationIdentifier for r in proposed.Representation.Representations
+        }
+        assert rep_identifiers == {"SurfaceModel", "Box"}
+
+        rel = (proposed.ContainedInStructure or [None])[0]
+        assert rel is not None and rel.RelatingStructure.is_a("IfcSite")
+
+        common = self._read_pset(proposed, "Pset_EarthworksFillCommon")
+        assert common.get("Status") == "NEW"
+        # Geographic-element pset must NOT be attached to a fill.
+        assert self._read_pset(proposed, "Pset_GeographicElementCommon") == {}
+
+        saikei = self._read_pset(proposed, "Pset_SaikeiGradingSurface")
+        assert saikei["TriangulationTolerance"] == 0.002
+        assert saikei["BreaklineCount"] == 1
+        assert saikei["VertexCount"] == len(points)
+
+    def test_raises_when_no_site(self) -> None:
+        from ifcopenshell.api.surface import create_proposed_surface
+
+        file = _empty_project_file_no_site()
+        points, triangles = _flat_pad_geometry()
+        with pytest.raises(ValueError, match="no IfcSite"):
+            create_proposed_surface(file, name="A", points=points, triangles=triangles)
+
+    def test_empty_points_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import create_proposed_surface
+
+        with pytest.raises(ValueError, match="points must not be empty"):
+            create_proposed_surface(empty_project_file, name="A", points=[], triangles=[])
+
+    def test_round_trip_through_disk(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        from ifcopenshell.api.surface import create_proposed_surface
+
+        points, triangles = _pyramid_geometry()
+        create_proposed_surface(
+            empty_project_file,
+            name="RTSubgrade",
+            points=points,
+            triangles=triangles,
+            triangulation_tolerance=0.003,
+            breakline_count=2,
+        )
+
+        path = tmp_path / "rt_proposed.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        proposed = [
+            e for e in reopened.by_type("IfcEarthworksFill") if e.Name == "RTSubgrade"
+        ]
+        assert len(proposed) == 1
+        assert proposed[0].PredefinedType == "SUBGRADE"
+        saikei = self._read_pset(proposed[0], "Pset_SaikeiGradingSurface")
+        assert saikei["TriangulationTolerance"] == 0.003
+        assert saikei["BreaklineCount"] == 2
+        assert saikei["VertexCount"] == 5
