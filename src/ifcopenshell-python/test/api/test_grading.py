@@ -472,3 +472,90 @@ class TestCreateFeatureLine:
         assert properties["IsClosed"] is True
         assert properties["Source"] == "csv_import"
         assert properties["GradingGroupGuid"] == "abc"
+
+
+class TestCreateGradingCriteriaTemplate:
+    """Tests for ``ifcopenshell.api.grading.create_grading_criteria_template``."""
+
+    def test_creates_six_property_templates(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import create_grading_criteria_template
+
+        template = create_grading_criteria_template(empty_project_file)
+
+        assert template.is_a("IfcPropertySetTemplate")
+        assert template.Name == "Pset_SaikeiGradingCriteria"
+        assert template.TemplateType == "PSET_OCCURRENCEDRIVEN"
+        assert template.ApplicableEntity == "IfcGroup"
+        property_templates = list(template.HasPropertyTemplates)
+        assert len(property_templates) == 6
+        names_to_specs = {t.Name: t for t in property_templates}
+        assert set(names_to_specs) == {
+            "TargetKind",
+            "TargetReference",
+            "CutSlope",
+            "FillSlope",
+            "MaxDistance",
+            "RetainingWallAtLimit",
+        }
+
+    def test_target_kind_is_enumerated_with_four_values(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import create_grading_criteria_template
+
+        template = create_grading_criteria_template(empty_project_file)
+        target_kind = next(t for t in template.HasPropertyTemplates if t.Name == "TargetKind")
+        assert target_kind.TemplateType == "P_ENUMERATEDVALUE"
+        assert target_kind.PrimaryMeasureType is None
+        enumeration = target_kind.Enumerators
+        assert enumeration.is_a("IfcPropertyEnumeration")
+        assert enumeration.Name == "SaikeiGradingTargetKind"
+        values = [v.wrappedValue for v in enumeration.EnumerationValues]
+        assert values == ["surface", "elevation", "relative_elevation", "distance"]
+
+    def test_measure_types_are_canonical(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """Each non-enum property template has the right PrimaryMeasureType."""
+        from ifcopenshell.api.grading import create_grading_criteria_template
+
+        template = create_grading_criteria_template(empty_project_file)
+        names_to_specs = {t.Name: t for t in template.HasPropertyTemplates}
+
+        assert names_to_specs["TargetReference"].PrimaryMeasureType == "IfcLabel"
+        assert names_to_specs["CutSlope"].PrimaryMeasureType == "IfcPositiveRatioMeasure"
+        assert names_to_specs["FillSlope"].PrimaryMeasureType == "IfcPositiveRatioMeasure"
+        assert names_to_specs["MaxDistance"].PrimaryMeasureType == "IfcPositiveLengthMeasure"
+        assert names_to_specs["RetainingWallAtLimit"].PrimaryMeasureType == "IfcBoolean"
+
+    def test_idempotent(self, empty_project_file: ifcopenshell.file) -> None:
+        """A second call returns the same template, no duplicates."""
+        from ifcopenshell.api.grading import create_grading_criteria_template
+
+        first = create_grading_criteria_template(empty_project_file)
+        second = create_grading_criteria_template(empty_project_file)
+        assert first.id() == second.id()
+        templates = empty_project_file.by_type("IfcPropertySetTemplate")
+        assert len(templates) == 1
+        enumerations = empty_project_file.by_type("IfcPropertyEnumeration")
+        assert len(enumerations) == 1
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.grading import create_grading_criteria_template
+
+        create_grading_criteria_template(empty_project_file)
+
+        path = tmp_path / "rt_template.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        templates = [
+            t for t in reopened.by_type("IfcPropertySetTemplate")
+            if t.Name == "Pset_SaikeiGradingCriteria"
+        ]
+        assert len(templates) == 1
+        template = templates[0]
+        assert template.ApplicableEntity == "IfcGroup"
+        assert len(template.HasPropertyTemplates) == 6
+        target_kind = next(t for t in template.HasPropertyTemplates if t.Name == "TargetKind")
+        values = [v.wrappedValue for v in target_kind.Enumerators.EnumerationValues]
+        assert values == ["surface", "elevation", "relative_elevation", "distance"]
