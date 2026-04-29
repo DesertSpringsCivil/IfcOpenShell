@@ -882,6 +882,28 @@ class Alignment:
         return align_api.get_horizontal_layout(alignment)
 
     @classmethod
+    def create_alignment(cls, name: str, start_station: float = 0.0) -> "ifcopenshell.entity_instance":
+        """Create a full IfcAlignment with horizontal layout via the alignment API.
+
+        Creates the complete IFC structure: IfcAlignment, IfcAlignmentHorizontal,
+        stationing referent, geometric representation, and zero-length terminal.
+        Also creates the Blender object hierarchy.
+
+        Args:
+            name: The alignment name
+            start_station: Starting station value (default 0.0)
+
+        Returns:
+            The created IfcAlignment entity
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name=name, start_station=start_station)
+        cls.create_hierarchy_for_alignment(alignment)
+        return alignment
+
+    @classmethod
     def add_horizontal_layout_to_alignment(
         cls, alignment: "ifcopenshell.entity_instance"
     ) -> "ifcopenshell.entity_instance":

@@ -60,9 +60,7 @@ def _draw_sidebar(layout):
     # -- Horizontal Alignment --
     col = layout.column(align=True)
     col.label(text="Horizontal Alignment", icon="CURVE_DATA")
-    op = col.operator("bim.add_element", text="Add Alignment", icon="ADD")
-    op.ifc_product = "IfcAlignment"
-    op.ifc_class = "IfcAlignment"
+    col.operator("civil.create_alignment_by_pis", icon="ADD")
     col.operator("civil.import_alignment_csv", icon="IMPORT")
     col.separator()
     col.operator("civil.pick_pi_from_viewport", icon="EYEDROPPER")

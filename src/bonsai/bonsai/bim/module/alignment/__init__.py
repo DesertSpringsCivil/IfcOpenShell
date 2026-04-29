@@ -39,6 +39,7 @@ classes = (
     operator.CIVIL_OT_recalculate_pis,
     operator.CIVIL_OT_clear_pis,
     # Operators - Creation
+    operator.CIVIL_OT_create_alignment_by_pis,
     operator.CIVIL_OT_create_alignment_by_pi,
     operator.CIVIL_OT_import_alignment_csv,
     # Operators - Stationing

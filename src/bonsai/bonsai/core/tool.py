@@ -77,6 +77,8 @@ class Aggregate:
 
 @interface
 class Alignment:
+    # Alignment creation
+    def create_alignment(cls, name, start_station=0.0): pass
     # Horizontal PI edit mode
     def back_calculate_pis_from_alignment(cls, alignment): pass
     def clear_layout_segments(cls, h_layout): pass

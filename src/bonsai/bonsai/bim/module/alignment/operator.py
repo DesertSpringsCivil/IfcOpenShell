@@ -795,6 +795,52 @@ class CIVIL_OT_clear_pis(Operator, tool.Ifc.Operator):
 # =============================================================================
 
 
+class CIVIL_OT_create_alignment_by_pis(Operator, tool.Ifc.Operator):
+    """Create a new alignment and immediately start picking PI points"""
+
+    bl_idname = "civil.create_alignment_by_pis"
+    bl_label = "New Alignment (PI Method)"
+    bl_description = "Create a new alignment and pick PI points from the viewport"
+    bl_options = {"REGISTER", "UNDO"}
+
+    alignment_name: StringProperty(name="Name", default="Alignment")
+
+    @classmethod
+    def poll(cls, context):
+        return poll_ifc4x3(cls, context)
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+
+        # Create full alignment via core → tool → API
+        try:
+            alignment = core.create_alignment(
+                tool.Ifc, tool.Alignment, self.alignment_name
+            )
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        props.active_alignment_id = alignment.id()
+        props.active_alignment_name = alignment.Name or self.alignment_name
+
+        # Clear any existing PIs from previous work
+        props.pis.clear()
+        props.active_pi_index = 0
+        props.display_rows.clear()
+        props.active_display_row_index = 0
+
+        self.report({"INFO"}, f"Created alignment '{alignment.Name}' — pick PI points now")
+
+        # Chain into PI picker (runs as separate modal with its own undo)
+        bpy.ops.civil.pick_pi_from_viewport("INVOKE_DEFAULT")
+
+        return {"FINISHED"}
+
+
 class CIVIL_OT_create_alignment_by_pi(Operator, tool.Ifc.Operator):
     """Create alignment using the PI (Point of Intersection) method"""
 

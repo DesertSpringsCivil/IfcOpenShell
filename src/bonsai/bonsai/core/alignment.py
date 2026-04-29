@@ -40,6 +40,45 @@ if TYPE_CHECKING:
 
 
 # =============================================================================
+# Alignment Creation
+# =============================================================================
+
+
+def create_alignment(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    name: str,
+    start_station: float = 0.0,
+) -> "ifcopenshell.entity_instance":
+    """Create a new alignment with full IFC structure.
+
+    Business rules:
+    1. An IFC file must be loaded
+    2. Name must not be empty
+    3. Delegates to tool layer for IFC creation and Blender hierarchy
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        name: The alignment name
+        start_station: Starting station value
+
+    Returns:
+        The created IfcAlignment entity
+
+    Raises:
+        ValueError: If no IFC file is loaded or name is empty
+    """
+    if ifc_tool.get() is None:
+        raise ValueError("No IFC file loaded")
+
+    if not name or not name.strip():
+        raise ValueError("Alignment name cannot be empty")
+
+    return alignment_tool.create_alignment(name.strip(), start_station)
+
+
+# =============================================================================
 # PI Edit Mode Functions
 # =============================================================================
 
