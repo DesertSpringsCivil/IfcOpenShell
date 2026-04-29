@@ -73,8 +73,12 @@ def void_terrain(
 
     existing_rels = list(cut.VoidsElements or [])
     for rel in existing_rels:
+        # IFC 4.3 schema: IfcRelVoidsElement.RelatingBuildingElement is
+        # required, so host is guaranteed non-None on a well-formed file.
+        # If a malformed file ever has None here, the AttributeError below
+        # is more diagnostic than a silent fallthrough.
         host = rel.RelatingBuildingElement
-        if host is not None and host.id() == terrain.id():
+        if host.id() == terrain.id():
             return rel
         raise ValueError(
             f"cut {cut.is_a()} #{cut.id()} already voids "

@@ -67,6 +67,15 @@ def create_earthworks_cut(
     relationship), call :func:`void_terrain` separately after the cut is
     authored. See spec §2.4 for the cut/void semantics.
 
+    **Schema-completeness note.** The cut authored by this function is
+    schema-incomplete until :func:`void_terrain` is called — IFC 4.3 mandates
+    :class:`IfcFeatureElementSubtraction.VoidsElements` cardinality ``[1:1]``,
+    so every cut must void exactly one host element. Always pair
+    :func:`create_earthworks_cut` with a :func:`void_terrain` call before
+    saving or running ``ifcopenshell.validate`` on the file; a partial file
+    between the two calls will fail validation with a missing-VoidsElements
+    error.
+
     :param file: the IFC file to author into
     :param name: human-readable name
     :param points: ``(N, 3)`` array of XYZ coordinates for the closed solid
