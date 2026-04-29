@@ -1,5 +1,5 @@
 # IfcOpenShell - IFC toolkit and geometry engine
-# Copyright (C) 2026 Desert Springs Civil Engineering PLLC
+# Copyright (C) 2026 Michael Yoder <myoder@desertspringscivil.com>
 #
 # This file is part of IfcOpenShell.
 #
