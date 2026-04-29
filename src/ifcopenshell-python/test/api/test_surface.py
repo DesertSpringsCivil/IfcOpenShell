@@ -495,3 +495,165 @@ class TestApplySaikeiPset:
         assert properties["BreaklineCount"] == 2
         assert properties["VertexCount"] == 42
         assert properties["BoundaryPolygonReference"] == "abc123"
+
+
+def _empty_project_file_no_site() -> ifcopenshell.file:
+    """Build a minimal IFC4X3_ADD2 file with an IfcProject + unit, but no IfcSite."""
+    file = ifcopenshell.file(schema="IFC4X3_ADD2")
+    file.create_entity("IfcProject", GlobalId=ifcopenshell.guid.new(), Name="Test Project")
+    length_unit = ifcopenshell.api.unit.add_si_unit(file, unit_type="LENGTHUNIT")
+    ifcopenshell.api.unit.assign_unit(file, units=[length_unit])
+    return file
+
+
+class TestCreateTerrain:
+    """Tests for ``ifcopenshell.api.surface.create_terrain``."""
+
+    def _read_pset(
+        self, product: ifcopenshell.entity_instance, pset_name: str
+    ) -> dict[str, object]:
+        for rel in product.IsDefinedBy or []:
+            if not rel.is_a("IfcRelDefinesByProperties"):
+                continue
+            pset = rel.RelatingPropertyDefinition
+            if pset.is_a("IfcPropertySet") and pset.Name == pset_name:
+                return {
+                    p.Name: p.NominalValue.wrappedValue
+                    for p in pset.HasProperties or []
+                    if p.is_a("IfcPropertySingleValue") and p.NominalValue is not None
+                }
+        return {}
+
+    def test_happy_path(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import create_terrain
+
+        points, triangles = _flat_pad_geometry()
+        terrain = create_terrain(
+            empty_project_file,
+            name="Existing Ground",
+            points=points,
+            triangles=triangles,
+            triangulation_tolerance=0.005,
+            breakline_count=0,
+        )
+
+        assert terrain.is_a("IfcGeographicElement")
+        assert terrain.PredefinedType == "TERRAIN"
+        assert terrain.Name == "Existing Ground"
+
+        # Has both SurfaceModel and Box reps.
+        rep_identifiers = {
+            r.RepresentationIdentifier for r in terrain.Representation.Representations
+        }
+        assert rep_identifiers == {"SurfaceModel", "Box"}
+
+        # Contained in the site.
+        containers = [
+            r
+            for r in terrain.ContainedInStructure or []
+            if r.is_a("IfcRelContainedInSpatialStructure")
+        ]
+        assert len(containers) == 1
+        assert containers[0].RelatingStructure.is_a("IfcSite")
+
+        # Standard pset present.
+        common = self._read_pset(terrain, "Pset_GeographicElementCommon")
+        assert common.get("Status") == "NEW"
+
+        # Saikei pset present and populated.
+        saikei = self._read_pset(terrain, "Pset_SaikeiGradingSurface")
+        assert saikei["TriangulationTolerance"] == 0.005
+        assert saikei["BreaklineCount"] == 0
+        assert saikei["VertexCount"] == len(points)
+
+    def test_site_auto_resolution(self, empty_project_file: ifcopenshell.file) -> None:
+        """When site=None, the project's first IfcSite is used."""
+        from ifcopenshell.api.surface import create_terrain
+
+        points, triangles = _flat_pad_geometry()
+        terrain = create_terrain(
+            empty_project_file, name="A", points=points, triangles=triangles
+        )
+
+        rel = (terrain.ContainedInStructure or [None])[0]
+        assert rel is not None
+        assert rel.RelatingStructure.id() == _site(empty_project_file).id()
+
+    def test_explicit_site_overrides_auto(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import create_terrain
+
+        # Add a second site and pass it explicitly.
+        second_site = empty_project_file.create_entity(
+            "IfcSite", GlobalId=ifcopenshell.guid.new(), Name="Second Site"
+        )
+        empty_project_file.create_entity(
+            "IfcRelAggregates",
+            GlobalId=ifcopenshell.guid.new(),
+            RelatingObject=empty_project_file.by_type("IfcProject")[0],
+            RelatedObjects=[second_site],
+        )
+        points, triangles = _flat_pad_geometry()
+        terrain = create_terrain(
+            empty_project_file, name="A", points=points, triangles=triangles, site=second_site
+        )
+
+        rel = (terrain.ContainedInStructure or [None])[0]
+        assert rel.RelatingStructure.id() == second_site.id()
+
+    def test_raises_when_no_site(self) -> None:
+        from ifcopenshell.api.surface import create_terrain
+
+        file = _empty_project_file_no_site()
+        points, triangles = _flat_pad_geometry()
+        with pytest.raises(ValueError, match="no IfcSite"):
+            create_terrain(file, name="A", points=points, triangles=triangles)
+
+    def test_empty_points_raises(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.surface import create_terrain
+
+        with pytest.raises(ValueError, match="points must not be empty"):
+            create_terrain(empty_project_file, name="A", points=[], triangles=[])
+
+    def test_out_of_range_triangle_index_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.surface import create_terrain
+
+        points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+        with pytest.raises(ValueError, match="out of range"):
+            create_terrain(
+                empty_project_file, name="A", points=points, triangles=[(0, 1, 7)]
+            )
+
+    def test_round_trip_through_disk(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        from ifcopenshell.api.surface import create_terrain
+
+        points, triangles = _pyramid_geometry()
+        create_terrain(
+            empty_project_file,
+            name="RTPyramid",
+            points=points,
+            triangles=triangles,
+            triangulation_tolerance=0.01,
+            breakline_count=3,
+        )
+
+        path = tmp_path / "rt.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        terrains = [
+            e for e in reopened.by_type("IfcGeographicElement") if e.Name == "RTPyramid"
+        ]
+        assert len(terrains) == 1
+        terrain = terrains[0]
+        assert terrain.PredefinedType == "TERRAIN"
+        rep_identifiers = {
+            r.RepresentationIdentifier for r in terrain.Representation.Representations
+        }
+        assert rep_identifiers == {"SurfaceModel", "Box"}
+        saikei_pset = self._read_pset(terrain, "Pset_SaikeiGradingSurface")
+        assert saikei_pset["TriangulationTolerance"] == 0.01
+        assert saikei_pset["BreaklineCount"] == 3
+        assert saikei_pset["VertexCount"] == 5
