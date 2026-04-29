@@ -1284,3 +1284,152 @@ class TestApplyShrinkSwellPset:
         assert len(fills) == 1
         properties = _read_pset(fills[0], "Pset_SaikeiGradingShrinkSwell")
         assert properties == {"ShrinkFactor": 0.93, "SwellFactor": 1.20}
+
+
+class TestSchemaValidation:
+    """Validator integration: every authored entity tree must be schema-valid.
+
+    Inline check runs ``ifcopenshell.validate.validate`` against a complete
+    earthwork-scenario demo file every time. External bSI binary check is
+    opt-in via ``BSI_VALIDATOR_PATH``.
+    """
+
+    def _build_full_earthwork_scenario(
+        self, file: ifcopenshell.file
+    ) -> tuple[ifcopenshell.entity_instance, ifcopenshell.entity_instance, ifcopenshell.entity_instance]:
+        """Author terrain + cut (voiding terrain) + fill, with Qtos and shrink/swell.
+
+        Returns (terrain, cut, fill) for caller assertions if needed.
+        """
+        import ifcopenshell.api.surface
+        from ifcopenshell.api.earthwork import (
+            apply_shrink_swell_pset,
+            create_earthworks_cut,
+            create_earthworks_fill,
+            void_terrain,
+            write_cut_quantities,
+            write_fill_quantities,
+        )
+
+        # Existing-ground terrain (Phase 1).
+        eg_points: list[tuple[float, float, float]] = []
+        for j in range(3):
+            for i in range(3):
+                eg_points.append((float(i * 50), float(j * 50), 99.0))
+        eg_triangles: list[tuple[int, int, int]] = []
+        for j in range(2):
+            for i in range(2):
+                a = j * 3 + i
+                b = a + 1
+                c = a + 3
+                d = a + 4
+                eg_triangles.append((a, b, d))
+                eg_triangles.append((a, d, c))
+        terrain = ifcopenshell.api.surface.create_terrain(
+            file,
+            name="Existing Ground",
+            points=eg_points,
+            triangles=eg_triangles,
+        )
+
+        # Cut volume — bulk excavation that voids the terrain.
+        cut_points, cut_faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            file,
+            name="Bulk Excavation",
+            points=cut_points,
+            faces=cut_faces,
+            predefined_type="EXCAVATION",
+        )
+        void_terrain(file, cut, terrain)
+        write_cut_quantities(
+            file,
+            cut,
+            length=10.0,
+            width=10.0,
+            depth=10.0,
+            undisturbed_volume=1000.0,
+            loose_volume=1250.0,
+            weight=1800000.0,
+        )
+        apply_shrink_swell_pset(
+            file, cut, shrink_factor=0.92, swell_factor=1.25
+        )
+
+        # Fill volume — embankment, distinct from the cut.
+        fill_points, fill_faces = _tetrahedron_solid_geometry()
+        fill = create_earthworks_fill(
+            file,
+            name="Embankment",
+            points=fill_points,
+            faces=fill_faces,
+            predefined_type="EMBANKMENT",
+        )
+        write_fill_quantities(
+            file,
+            fill,
+            length=15.0,
+            width=8.0,
+            depth=3.0,
+            compacted_volume=360.0,
+            loose_volume=432.0,
+        )
+        apply_shrink_swell_pset(
+            file, fill, shrink_factor=0.95, swell_factor=1.20
+        )
+
+        return terrain, cut, fill
+
+    def test_inline_ifcopenshell_validate(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        """Run ifcopenshell.validate over a full earthwork-scenario demo file."""
+        import logging
+
+        import ifcopenshell.validate
+
+        self._build_full_earthwork_scenario(empty_project_file)
+
+        path = tmp_path / "earthwork_scenario.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+
+        records: list[logging.LogRecord] = []
+
+        class _CollectingHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.Logger("earthwork-validate")
+        logger.addHandler(_CollectingHandler(level=logging.DEBUG))
+
+        ifcopenshell.validate.validate(reopened, logger)
+
+        errors = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+        assert errors == [], f"validate() reported issues: {errors}"
+
+    def test_external_bsi_validator_if_present(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        """Optional: run an external bSI validator binary on the demo file."""
+        import os
+        import shutil
+        import subprocess
+
+        validator_path = os.environ.get("BSI_VALIDATOR_PATH")
+        if validator_path is None:
+            pytest.skip("BSI_VALIDATOR_PATH not set; skipping external validator test")
+        if not shutil.which(validator_path) and not os.path.isfile(validator_path):
+            pytest.skip(f"validator at {validator_path!r} not executable; skipping")
+
+        self._build_full_earthwork_scenario(empty_project_file)
+        path = tmp_path / "earthwork_scenario.ifc"
+        empty_project_file.write(str(path))
+
+        result = subprocess.run(
+            [validator_path, str(path)], capture_output=True, text=True, timeout=120
+        )
+        assert result.returncode == 0, (
+            f"bSI validator returned {result.returncode}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
