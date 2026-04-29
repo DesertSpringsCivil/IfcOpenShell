@@ -32,4 +32,8 @@ Public functions are re-exported here so callers do
 ``ifcopenshell.api.surface.create_terrain(...)``.
 """
 
-__all__: list[str] = []
+from .add_tin_representation import add_tin_representation
+
+__all__ = [
+    "add_tin_representation",
+]
