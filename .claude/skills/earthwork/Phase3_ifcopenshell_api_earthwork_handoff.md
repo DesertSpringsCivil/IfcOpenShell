@@ -154,6 +154,19 @@ def create_earthworks_cut(
     Optional: IfcRelVoidsElement from this cut to a host terrain
     (typically the IfcGeographicElement[TERRAIN] from Phase 1).
 
+    Args:
+        ...
+        omniclass_code: OmniClass Table 22 code. Default ``22-07 31 16``
+            (Excavation and Fill — the umbrella code for earth-moving).
+            Override with a more specific code (e.g., ``22-07 31 26``
+            Trench Excavation, ``22-07 31 53`` Rock Removal,
+            ``22-07 31 14`` Site Clearing for topsoil stripping) when
+            the project warrants it.
+        omniclass_title: Human-readable title paired with the code; the
+            default matches the default code. Pair updates with
+            ``omniclass_code`` so the IfcClassificationReference shows the
+            right title.
+
     Returns:
         The created IfcEarthworksCut.
     """
@@ -182,6 +195,19 @@ def create_earthworks_fill(
 
     Same wiring as create_earthworks_cut otherwise: spatial containment,
     standard pset, OmniClass classification.
+
+    Args:
+        ...
+        omniclass_code: OmniClass Table 22 code. Default ``22-07 31 23``
+            (Fill — the umbrella code for placed earth material). Override
+            with a more specific code (e.g., ``22-07 31 23 13`` Embankment,
+            ``22-07 31 23 16`` Backfill, ``22-07 31 16`` Excavation and
+            Fill when the fill comes from on-site cut/fill matching) when
+            the project warrants it.
+        omniclass_title: Human-readable title paired with the code; the
+            default matches the default code. Pair updates with
+            ``omniclass_code`` so the IfcClassificationReference shows the
+            right title.
 
     Returns:
         The created IfcEarthworksFill.
