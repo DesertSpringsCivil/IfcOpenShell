@@ -28,6 +28,7 @@ Public functions are re-exported here so callers do
 ``ifcopenshell.api.grading.create_grading_group(...)``.
 """
 
+from .add_interior_fill_to_group import add_interior_fill_to_group
 from .add_member_to_group import add_member_to_group
 from .add_slope_fill_to_group import add_slope_fill_to_group
 from .assign_grading_criteria import assign_grading_criteria
@@ -37,6 +38,7 @@ from .create_grading_group import GradingGroupAuthoring, create_grading_group
 
 __all__ = [
     "GradingGroupAuthoring",
+    "add_interior_fill_to_group",
     "add_member_to_group",
     "add_slope_fill_to_group",
     "assign_grading_criteria",

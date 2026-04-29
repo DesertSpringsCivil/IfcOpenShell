@@ -1381,3 +1381,195 @@ class TestAddSlopeFillToGroup:
         composite = slope.Decomposes[0].RelatingObject
         assert composite.Name == "RTPad"
         assert composite.PredefinedType == "SUBGRADE"
+
+
+def _flat_pad_floor_geometry() -> tuple[
+    list[tuple[float, float, float]], list[tuple[int, int, int]]
+]:
+    """Two triangles forming the floor of a 10×10 m pad at z=100 — the interior fill."""
+    points = [
+        (0.0, 0.0, 100.0),
+        (10.0, 0.0, 100.0),
+        (10.0, 10.0, 100.0),
+        (0.0, 10.0, 100.0),
+    ]
+    triangles = [(0, 1, 2), (0, 2, 3)]
+    return points, triangles
+
+
+class TestAddInteriorFillToGroup:
+    """Tests for ``ifcopenshell.api.grading.add_interior_fill_to_group``."""
+
+    def test_happy_path(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import (
+            add_interior_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        points, triangles = _flat_pad_floor_geometry()
+        interior = add_interior_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="Pad floor",
+            points=points,
+            triangles=triangles,
+        )
+
+        assert interior.is_a("IfcEarthworksFill")
+        assert interior.PredefinedType == "SUBGRADE"
+        assert interior.Name == "Pad floor"
+
+    def test_aggregated_under_composite(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            add_interior_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        points, triangles = _flat_pad_floor_geometry()
+        interior = add_interior_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="F",
+            points=points,
+            triangles=triangles,
+        )
+        assert interior.Decomposes[0].RelatingObject.id() == result.composite_fill.id()
+
+    def test_added_to_group_as_member(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            add_interior_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        points, triangles = _flat_pad_floor_geometry()
+        interior = add_interior_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="F",
+            points=points,
+            triangles=triangles,
+        )
+        members = result.group.IsGroupedBy[0].RelatedObjects
+        assert interior in members
+
+    def test_omniclass_classified_under_22_07_31_16(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            add_interior_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        points, triangles = _flat_pad_floor_geometry()
+        interior = add_interior_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="F",
+            points=points,
+            triangles=triangles,
+        )
+        rels = empty_project_file.by_type("IfcRelAssociatesClassification")
+        matching = [r for r in rels if interior in r.RelatedObjects]
+        assert len(matching) == 1
+        assert matching[0].RelatingClassification.Identification == "22-07 31 16"
+
+    def test_only_one_interior_fill_per_group(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            add_interior_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        points, triangles = _flat_pad_floor_geometry()
+        add_interior_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="F1",
+            points=points,
+            triangles=triangles,
+        )
+        with pytest.raises(ValueError, match="already has an interior fill"):
+            add_interior_fill_to_group(
+                empty_project_file,
+                result.group,
+                result.composite_fill,
+                name="F2",
+                points=points,
+                triangles=triangles,
+            )
+
+    def test_slope_fills_do_not_block_interior(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """Adding an interior fill after slope fills exist is fine — only SUBGRADE children block."""
+        from ifcopenshell.api.grading import (
+            add_interior_fill_to_group,
+            add_slope_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad")
+        slope_points, slope_triangles = _slope_ribbon_geometry()
+        add_slope_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="N slope",
+            points=slope_points,
+            triangles=slope_triangles,
+        )
+        floor_points, floor_triangles = _flat_pad_floor_geometry()
+        # Should not raise.
+        add_interior_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="Floor",
+            points=floor_points,
+            triangles=floor_triangles,
+        )
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.grading import (
+            add_interior_fill_to_group,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="RTPad")
+        points, triangles = _flat_pad_floor_geometry()
+        add_interior_fill_to_group(
+            empty_project_file,
+            result.group,
+            result.composite_fill,
+            name="RT_Floor",
+            points=points,
+            triangles=triangles,
+        )
+
+        path = tmp_path / "rt_interior.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        floors = [
+            f for f in reopened.by_type("IfcEarthworksFill")
+            if f.Name == "RT_Floor"
+        ]
+        assert len(floors) == 1
+        floor = floors[0]
+        assert floor.PredefinedType == "SUBGRADE"
+        identifiers = {r.RepresentationIdentifier for r in floor.Representation.Representations}
+        assert identifiers == {"SurfaceModel", "Box"}
