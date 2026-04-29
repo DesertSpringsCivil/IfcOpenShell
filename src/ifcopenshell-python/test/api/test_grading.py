@@ -186,3 +186,131 @@ class TestSharedHelpers:
         reference = rels[0].RelatingClassification
         assert reference.Identification == "22-07 31 23"
         assert reference.ReferencedSource.Name == "OmniClass Table 22"
+
+
+def _make_group(file: ifcopenshell.file, name: str = "Test Group") -> ifcopenshell.entity_instance:
+    return file.create_entity(
+        "IfcGroup",
+        GlobalId=ifcopenshell.guid.new(),
+        Name=name,
+        ObjectType="GradingGroup",
+    )
+
+
+class TestAddMemberToGroup:
+    """Tests for ``ifcopenshell.api.grading.add_member_to_group``."""
+
+    def test_creates_new_rel_when_group_has_no_members(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import add_member_to_group
+
+        group = _make_group(empty_project_file)
+        product = _make_fill(empty_project_file)
+        rel = add_member_to_group(empty_project_file, group, product)
+
+        assert rel.is_a("IfcRelAssignsToGroup")
+        assert rel.RelatingGroup.id() == group.id()
+        assert [p.id() for p in rel.RelatedObjects] == [product.id()]
+
+    def test_appends_to_existing_rel(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.grading import add_member_to_group
+
+        group = _make_group(empty_project_file)
+        first = _make_fill(empty_project_file, name="First")
+        second = _make_fill(empty_project_file, name="Second")
+
+        rel_a = add_member_to_group(empty_project_file, group, first)
+        rel_b = add_member_to_group(empty_project_file, group, second)
+
+        assert rel_a.id() == rel_b.id()
+        assert {p.id() for p in rel_a.RelatedObjects} == {first.id(), second.id()}
+        rels = empty_project_file.by_type("IfcRelAssignsToGroup")
+        assert len(rels) == 1
+
+    def test_dedupes_when_product_already_member(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import add_member_to_group
+
+        group = _make_group(empty_project_file)
+        product = _make_fill(empty_project_file)
+
+        add_member_to_group(empty_project_file, group, product)
+        add_member_to_group(empty_project_file, group, product)
+
+        rels = empty_project_file.by_type("IfcRelAssignsToGroup")
+        assert len(rels) == 1
+        assert [p.id() for p in rels[0].RelatedObjects] == [product.id()]
+
+    def test_accepts_multiple_products_in_one_call(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import add_member_to_group
+
+        group = _make_group(empty_project_file)
+        a = _make_fill(empty_project_file, name="A")
+        b = _make_fill(empty_project_file, name="B")
+        c = _make_fill(empty_project_file, name="C")
+
+        rel = add_member_to_group(empty_project_file, group, a, b, c)
+        assert {p.id() for p in rel.RelatedObjects} == {a.id(), b.id(), c.id()}
+
+    def test_accepts_subgroup_as_member(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """The schema allows IfcGroup as a member of another IfcGroup."""
+        from ifcopenshell.api.grading import add_member_to_group
+
+        parent = _make_group(empty_project_file, name="Parent")
+        child = _make_group(empty_project_file, name="Child")
+        rel = add_member_to_group(empty_project_file, parent, child)
+        assert child.id() in {p.id() for p in rel.RelatedObjects}
+
+    def test_raises_when_group_arg_is_not_a_group(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import add_member_to_group
+
+        not_a_group = _make_fill(empty_project_file)
+        product = _make_fill(empty_project_file, name="P")
+        with pytest.raises(ValueError, match="must be an IfcGroup"):
+            add_member_to_group(empty_project_file, not_a_group, product)
+
+    def test_raises_when_no_products_supplied(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import add_member_to_group
+
+        group = _make_group(empty_project_file)
+        with pytest.raises(ValueError, match="at least one product"):
+            add_member_to_group(empty_project_file, group)
+
+    def test_raises_when_product_is_not_object_definition(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """An IfcCartesianPoint isn't an IfcObjectDefinition; rejected."""
+        from ifcopenshell.api.grading import add_member_to_group
+
+        group = _make_group(empty_project_file)
+        not_a_product = empty_project_file.create_entity(
+            "IfcCartesianPoint", Coordinates=(0.0, 0.0, 0.0)
+        )
+        with pytest.raises(ValueError, match="not an IfcObjectDefinition"):
+            add_member_to_group(empty_project_file, group, not_a_product)
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.grading import add_member_to_group
+
+        group = _make_group(empty_project_file, name="RTGroup")
+        a = _make_fill(empty_project_file, name="RT_A")
+        b = _make_fill(empty_project_file, name="RT_B")
+        add_member_to_group(empty_project_file, group, a, b)
+
+        path = tmp_path / "rt_group.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        groups = [g for g in reopened.by_type("IfcGroup") if g.Name == "RTGroup"]
+        assert len(groups) == 1
+        member_names = {p.Name for p in groups[0].IsGroupedBy[0].RelatedObjects}
+        assert member_names == {"RT_A", "RT_B"}

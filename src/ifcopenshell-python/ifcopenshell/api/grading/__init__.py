@@ -28,4 +28,8 @@ Public functions are re-exported here so callers do
 ``ifcopenshell.api.grading.create_grading_group(...)``.
 """
 
-__all__: list[str] = []
+from .add_member_to_group import add_member_to_group
+
+__all__ = [
+    "add_member_to_group",
+]
