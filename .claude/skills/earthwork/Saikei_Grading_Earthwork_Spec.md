@@ -1,9 +1,30 @@
 # Saikei Civil — Site Grading & Earthwork Implementation Spec
 
-**Status:** Draft v3.2.3 — Phase 1 shipped, Phase 2 ready
+**Status:** Draft v3.2.4 — Phases 1–3 shipped, Phase 4 ready
 **Target repo path:** `C:\GitHub\IfcOpenShell-saikei-dev\src\bonsai\bonsai\` (branch: `saikei-dev`)
 **Scope:** Non-linear site grading (pads, parking lots, ponds, infield areas)
 **Companion doc:** `Saikei_Grading_Earthwork_Research.md` (commercial tool survey — background reading)
+
+## v3.2.4 changelog
+
+Phase 3 (`ifcopenshell.api.earthwork`) shipped — 11 atomic commits, 67 tests, schema-clean. All three civil-engineering APIs are now in. Post-Phase-3 corrections from implementation drift and review:
+
+1. **§2.4** — Three additions to the cut/void section:
+   - **Schema-completeness note.** `IfcFeatureElementSubtraction.VoidsElements` cardinality is `[1:1]`; a cut entity is schema-incomplete until paired with a void relationship. `ifcopenshell.validate` will fail on a cut without one.
+   - **Voiding is a dedicated API call**, not a kwarg on `create_earthworks_cut`. Authors call `ifcopenshell.api.earthwork.void_terrain(file, cut, terrain)` after cut creation — separation of concerns keeps the schema-completeness contract visible at the call site.
+   - **`IfcEarthworksCut.PredefinedType` default is `EXCAVATION`** (general earthwork excavation). The actual IFC 4.3 enum is `BASE_EXCAVATION, CUT, DREDGING, EXCAVATION, OVEREXCAVATION, PAVEMENTMILLING, STEPEXCAVATION, TOPSOILREMOVAL, TRENCH, USERDEFINED, NOTDEFINED` — no `CUTTING` value, despite earlier handoff drafts using that name.
+
+2. **§3.3** — `Pset_SaikeiGradingCriteria` row updated. `TargetReference` is encoded as a single `IfcLabel`, not split by `TargetKind` into separate measure types. Heterogeneous content (GUID for `kind=surface`, stringified numeric for elevation/distance variants) parses on read against the discriminator `TargetKind`.
+
+3. **§4.3** — New paragraph **Cross-API helper sharing**: `ifcopenshell.api.grading._shared` is the de-facto civil-engineering shared helper module Phase 3 imports from directly. Earthwork does not duplicate `identity_placement`, `to_point_list`, `compute_bounding_box`, `apply_omniclass_classification`, `attach_earthworks_fill_common`, or `aggregate_under`. Earthwork-specific helpers (`attach_earthworks_cut_common`, predefined-type validators) live in `ifcopenshell.api.earthwork._shared`.
+
+4. **§4.3** — **Multi-site footgun**: `_resolve_site(site=None)` returns the project's *first* `IfcSite`. Multi-site projects (rare but valid in IFC 4.3) must pass `site=` explicitly to every earthwork/grading API call to avoid silent attachment to the wrong site.
+
+5. **§4.3** — Tracked-but-not-fixed: `_get_or_create_body_subcontext` duplicated between `ifcopenshell.api.surface._representation_context` and `ifcopenshell.api.earthwork.add_volume_solid_representation`. ~20 lines of isolated duplication. Cleanest long-term fix is to expose `get_body_subcontext` publicly on the surface API, or push the get-or-create logic up to `ifcopenshell.util.representation` since it isn't Saikei-specific.
+
+6. **§11 Phase 3** — Task description updated to reflect implementation: `EXCAVATION` as default predefined type, dedicated `void_terrain` for `IfcRelVoidsElement` authoring.
+
+Phase 1, 2, 3 implementations are unaffected — this revision catches the spec up to what shipped.
 
 ## v3.2.3 changelog
 
@@ -159,6 +180,10 @@ These are Civil 3D-native concepts with no directly-matching IFC 4.3 entity. Sai
 
 **`IfcEarthworksCut`** is a subtype of `IfcFeatureElementSubtraction`. Semantically it represents the act of excavation; geometrically it is the void created. It relates to the host stratum via `IfcRelVoidsElement` (the same relationship doors use to void walls).
 
+**Default `PredefinedType`** for cuts authored by Saikei is `EXCAVATION` (general earthwork excavation). The full IFC 4.3 `IfcEarthworksCutTypeEnum` is `BASE_EXCAVATION, CUT, DREDGING, EXCAVATION, OVEREXCAVATION, PAVEMENTMILLING, STEPEXCAVATION, TOPSOILREMOVAL, TRENCH, USERDEFINED, NOTDEFINED` — note no `CUTTING` value.
+
+**Schema-completeness note.** `IfcFeatureElementSubtraction.VoidsElements` has cardinality `[1:1]` — every cut must void exactly one host element. `ifcopenshell.api.earthwork.create_earthworks_cut` does not author the void relationship; the dedicated `void_terrain(file, cut, terrain)` API call handles it after cut creation. A cut entity is schema-incomplete (and `ifcopenshell.validate` will flag it) until the paired `void_terrain` call lands. The contract surface is intentional: keeping voiding as a separate API call surfaces the schema constraint at the call site rather than burying it in a kwarg.
+
 **Shape representation for cut volumes:** `IfcPolygonalFaceSet` with `Closed=TRUE` in a `ShapeRepresentation` with `RepresentationIdentifier='Body'` and `RepresentationType='Tessellation'`. `IfcPolygonalFaceSet` is the IFC 4.3 preferred lightweight closed solid — note that it's a tessellated face set, not a B-rep entity, so `'Brep'` (which in IFC's RepresentationType vocabulary is reserved for `IfcManifoldSolidBrep` and friends) is **not** the correct RepresentationType. Pattern matches `IfcOpeningElement`: the cut has its own renderable solid geometry *and* establishes a void relationship via `IfcRelVoidsElement`. These are complementary, not alternative.
 
 **`IfcEarthworksFill`** is a subtype of `IfcEarthworksElement`, which is a subtype of `IfcBuiltElement` → `IfcElement`. (Not `IfcElementAssembly` — that is a sibling, not an ancestor.) `PredefinedType` enum covers `EMBANKMENT`, `SUBGRADE`, `SUBGRADEBED`, `SLOPEFILL`, `BACKFILL`, `COUNTERWEIGHT`, `TRANSITIONSECTION`.
@@ -287,7 +312,7 @@ Naming follows bSI convention: `Pset_<Organization><Topic>` with no internal und
 |---|---|---|
 | `Pset_SaikeiGradingSource` | `IfcGroup` (grading group) | Source metadata: criteria reference, author, timestamp, grading group version |
 | `Pset_SaikeiGradingSurface` | `IfcTriangulatedIrregularNetwork` host entity | Triangulation tolerance, breakline count, vertex count, boundary polygon reference |
-| `Pset_SaikeiGradingCriteria` (template) | `IfcPropertySetTemplate` | Reusable criteria definitions: `target_kind`, `cut_slope`, `fill_slope`, `max_distance`, `retaining_wall_at_limit` |
+| `Pset_SaikeiGradingCriteria` (template) | `IfcPropertySetTemplate` | Reusable criteria definitions: `TargetKind` (`P_ENUMERATEDVALUE`, four values), `TargetReference` (`IfcLabel` — heterogeneous content: GUID for `kind=surface`, stringified numeric for elevation/distance variants; readers parse against `TargetKind`), `CutSlope` / `FillSlope` (`IfcPositiveRatioMeasure`), `MaxDistance` (`IfcPositiveLengthMeasure`, optional), `RetainingWallAtLimit` (`IfcBoolean`) |
 | `Pset_SaikeiGradingShrinkSwell` | `IfcEarthworksFill`, `IfcEarthworksCut` | `ShrinkFactor`, `SwellFactor` (not in standard Qtos — only Compacted/Loose volumes are) |
 | `Pset_SaikeiFeatureLineCommon` | `IfcAlignment` (feature line) | `IsClosed`, `Source`, `GradingGroupGuid`, `ElevationSource` |
 | `Pset_SaikeiBreaklineCommon` | `IfcAnnotation` (breakline polyline) | `Kind` (`standard` / `wall` / `non_destructive` / `proximity`), `Source` (`manual` / `feature_line` / `corridor_extract`), `GradingGroupGuid` (optional link to parent group) |
@@ -350,6 +375,12 @@ All operators inherit `tool.Ifc.Operator` and implement `_execute()` for automat
 **Core never invents API paths.** The existing `core/alignment.py` pattern is: core orchestrates by calling tool methods; tool methods call real `ifcopenshell.api.*` functions. Core **does not** call `tool.Ifc.run("some.fabricated.path")`.
 
 **B3 sequencing.** The three APIs (`ifcopenshell.api.surface`, `ifcopenshell.api.grading`, `ifcopenshell.api.earthwork`) are built FIRST as Phases 1–3 in the IfcOpenShell repo (`src/ifcopenshell-python/ifcopenshell/api/<domain>/`). Bonsai tool methods (Phases 4–6) then call those APIs rather than `ifc_file.create_entity()` directly. This mirrors the existing `ifcopenshell.api.alignment` pattern Rick Brice landed and ensures the API surface is stable before Bonsai depends on it.
+
+**Cross-API helper sharing.** `ifcopenshell.api.grading._shared` is the de-facto civil-engineering shared helper module. Phase 3 (`api.earthwork`) imports the following directly from it rather than duplicating: `_resolve_site`, `identity_placement`, `to_point_list`, `compute_bounding_box`, `apply_omniclass_classification`, `attach_earthworks_fill_common`, `aggregate_under`. Earthwork-specific helpers (`attach_earthworks_cut_common`, predefined-type validators) live in `ifcopenshell.api.earthwork._shared`. The cross-package private import is intentional and documented; it keeps Phase 3 from re-creating a parallel set of helpers and ensures the two modules stay in lock-step. If a future refactor wants to relocate the shared helpers (e.g., to `ifcopenshell.util.civil` or a public surface API), the imports are concentrated and the move is a single search-and-replace.
+
+**Multi-site footgun.** `_resolve_site(site=None)` returns the project's *first* `IfcSite`. Multi-site projects (rare but valid in IFC 4.3 — site-aggregation hierarchies, sub-sites, or projects with both an existing-conditions site and a proposed-development site) must pass `site=` explicitly to every earthwork/grading API call to avoid silent attachment to the wrong site. The Saikei API does not currently warn when multiple sites are present; Bonsai-side callers in Phases 4–6 should check `len(file.by_type("IfcSite")) > 1` and prompt the user if so.
+
+**Tracked-but-not-fixed: body-subcontext duplication.** `_get_or_create_body_subcontext` exists in both `ifcopenshell.api.surface._representation_context` and `ifcopenshell.api.earthwork.add_volume_solid_representation`. ~20 lines of isolated duplication. Cleanest long-term fix is to expose `get_body_subcontext` publicly on the surface API or push the get-or-create logic up to `ifcopenshell.util.representation` since it isn't Saikei-specific. Not blocking; flagged for a future v3.2.x cleanup pass.
 
 See §11 for the phase work breakdown and §6 for the corrected core/tool code patterns.
 
@@ -1398,7 +1429,7 @@ Keeping PRs ≤4,000 lines (Dion's constraint), **Sprint 1 is "Terrain Modeler" 
 
 | Agent | Task | Est. LoC |
 |-------|------|----------|
-| `saikei-ifc` | `IfcEarthworksCut` + `IfcEarthworksFill` solid authoring (`IfcPolygonalFaceSet` Closed); `IfcRelVoidsElement` to host `IfcGeographicElement`; standard Qto authoring (`Qto_EarthworksCutBaseQuantities`, `Qto_EarthworksFillBaseQuantities`); `Pset_SaikeiGradingShrinkSwell`. The actual prismoidal volume math (§6.4) and cut/fill solid construction (§6.5) live in Bonsai's `tool.Earthwork` (Phase 6); the API persists what it's given. | 700 |
+| `saikei-ifc` | `IfcEarthworksCut` (default `PredefinedType=EXCAVATION`) + `IfcEarthworksFill` (default `EMBANKMENT`; `SLOPEFILL`/`SUBGRADE` reserved for Phase 2) solid authoring (`IfcPolygonalFaceSet` Closed, `Body`/`Tessellation`); dedicated `void_terrain` API call for `IfcRelVoidsElement` to host `IfcGeographicElement` (separate from `create_earthworks_cut` so the `VoidsElements [1:1]` schema-completeness contract is visible at the call site); standard Qto authoring (`Qto_EarthworksCutBaseQuantities`, `Qto_EarthworksFillBaseQuantities`) — **idempotent** in-place update on re-author; `Pset_SaikeiGradingShrinkSwell` — **idempotent**. The actual prismoidal volume math (§6.4) and cut/fill solid construction (§6.5) live in Bonsai's `tool.Earthwork` (Phase 6); the API persists what it's given. See `Phase3_ifcopenshell_api_earthwork_handoff.md` for the commit-by-commit plan. | 700 |
 | `saikei-tester` | Round-trip tests; volume Qto write/read; bSI validator on cut/fill solids | 150 |
 | `docs` | API docs; scripted demo (full pad → cut/fill report → IFC) | 50 |
 
@@ -1473,4 +1504,4 @@ Most previous open questions have been resolved by this spec revision. Remaining
 
 ---
 
-*End of implementation spec. Phase 1 shipped; Phase 2 (`ifcopenshell.api.grading`) ready to start.*
+*End of implementation spec. Phases 1–3 shipped; Phase 4 (Bonsai surface module) ready to start.*
