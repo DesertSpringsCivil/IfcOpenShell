@@ -1753,3 +1753,182 @@ class TestLinkAlignmentToGroup:
         assert properties["StartStation"] == 12.5
         assert properties["EndStation"] == 87.5
         assert properties["AlignmentGuid"] == alignment.GlobalId
+
+
+def _existing_terrain_geometry() -> tuple[
+    list[tuple[float, float, float]], list[tuple[int, int, int]]
+]:
+    """3×3 vertex grid forming a 100×100 m flat existing-ground TIN at z=99 (1 m below pad)."""
+    points: list[tuple[float, float, float]] = []
+    for j in range(3):
+        for i in range(3):
+            points.append((float(i * 50), float(j * 50), 99.0))
+    triangles: list[tuple[int, int, int]] = []
+    for j in range(2):
+        for i in range(2):
+            a = j * 3 + i
+            b = a + 1
+            c = a + 3
+            d = a + 4
+            triangles.append((a, b, d))
+            triangles.append((a, d, c))
+    return points, triangles
+
+
+class TestSchemaValidation:
+    """Validator integration: every authored entity tree must be schema-valid.
+
+    The inline check runs ``ifcopenshell.validate.validate`` against a
+    full grading-scenario demo file every time. The external bSI reference
+    validator binary check is opt-in: set the ``BSI_VALIDATOR_PATH``
+    environment variable to an executable that takes one IFC path and
+    returns 0 on success.
+    """
+
+    def _build_full_grading_scenario(
+        self, file: ifcopenshell.file
+    ) -> ifcopenshell.entity_instance:
+        """Build a complete grading scenario exercising the whole Phase 2 API.
+
+        Returns the IfcGroup so callers can assert on its structure if needed.
+        """
+        import ifcopenshell.api.surface
+        from ifcopenshell.api.grading import (
+            add_interior_fill_to_group,
+            add_slope_fill_to_group,
+            assign_grading_criteria,
+            create_feature_line,
+            create_grading_criteria_template,
+            create_grading_group,
+            link_alignment_to_group,
+        )
+
+        # Existing-ground terrain (Phase 1 reuse).
+        eg_points, eg_triangles = _existing_terrain_geometry()
+        terrain = ifcopenshell.api.surface.create_terrain(
+            file,
+            name="Existing Ground",
+            points=eg_points,
+            triangles=eg_triangles,
+            triangulation_tolerance=0.005,
+        )
+
+        # Feature line for a 10×10 pad perimeter.
+        feature_line = create_feature_line(
+            file,
+            name="Pad perimeter",
+            vertices=[(20.0, 20.0, 100.0), (30.0, 20.0, 100.0), (30.0, 30.0, 100.0), (20.0, 30.0, 100.0)],
+            closed=True,
+            source="manual",
+        )
+
+        # Criteria template + grading group + criteria binding.
+        template = create_grading_criteria_template(file)
+        result = create_grading_group(
+            file,
+            name="Pad Grading",
+            target_surface=terrain,
+            interior_fill="flat",
+            author="Tester",
+        )
+        assign_grading_criteria(
+            file,
+            result.group,
+            template,
+            target_kind="surface",
+            target_reference=terrain.GlobalId,
+            cut_slope=2.0,
+            fill_slope=3.0,
+        )
+
+        # Two slope fills (north and south edge of the pad).
+        slope_points, slope_triangles = _slope_ribbon_geometry()
+        add_slope_fill_to_group(
+            file,
+            result.group,
+            result.composite_fill,
+            name="N slope",
+            points=slope_points,
+            triangles=slope_triangles,
+            feature_line=feature_line,
+        )
+        add_slope_fill_to_group(
+            file,
+            result.group,
+            result.composite_fill,
+            name="S slope",
+            points=slope_points,
+            triangles=slope_triangles,
+        )
+
+        # Interior fill (the pad floor).
+        floor_points, floor_triangles = _flat_pad_floor_geometry()
+        add_interior_fill_to_group(
+            file,
+            result.group,
+            result.composite_fill,
+            name="Pad floor",
+            points=floor_points,
+            triangles=floor_triangles,
+        )
+
+        # Corridor linkage.
+        link_alignment_to_group(
+            file, result.group, feature_line, start_station=0.0, end_station=40.0
+        )
+
+        return result.group
+
+    def test_inline_ifcopenshell_validate(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        """Run ifcopenshell.validate over a full grading-scenario demo file."""
+        import logging
+
+        import ifcopenshell.validate
+
+        self._build_full_grading_scenario(empty_project_file)
+
+        path = tmp_path / "grading_scenario.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+
+        records: list[logging.LogRecord] = []
+
+        class _CollectingHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.Logger("grading-validate")
+        logger.addHandler(_CollectingHandler(level=logging.DEBUG))
+
+        ifcopenshell.validate.validate(reopened, logger)
+
+        errors = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+        assert errors == [], f"validate() reported issues: {errors}"
+
+    def test_external_bsi_validator_if_present(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        """Optional: run an external bSI validator binary on the demo file."""
+        import os
+        import shutil
+        import subprocess
+
+        validator_path = os.environ.get("BSI_VALIDATOR_PATH")
+        if validator_path is None:
+            pytest.skip("BSI_VALIDATOR_PATH not set; skipping external validator test")
+        if not shutil.which(validator_path) and not os.path.isfile(validator_path):
+            pytest.skip(f"validator at {validator_path!r} not executable; skipping")
+
+        self._build_full_grading_scenario(empty_project_file)
+        path = tmp_path / "grading_scenario.ifc"
+        empty_project_file.write(str(path))
+
+        result = subprocess.run(
+            [validator_path, str(path)], capture_output=True, text=True, timeout=120
+        )
+        assert result.returncode == 0, (
+            f"bSI validator returned {result.returncode}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
