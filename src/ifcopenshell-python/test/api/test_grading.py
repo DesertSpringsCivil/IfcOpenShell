@@ -559,3 +559,194 @@ class TestCreateGradingCriteriaTemplate:
         target_kind = next(t for t in template.HasPropertyTemplates if t.Name == "TargetKind")
         values = [v.wrappedValue for v in target_kind.Enumerators.EnumerationValues]
         assert values == ["surface", "elevation", "relative_elevation", "distance"]
+
+
+def _make_terrain(file: ifcopenshell.file, name: str = "Existing") -> ifcopenshell.entity_instance:
+    """Build an IfcGeographicElement[TERRAIN] for use as target_surface in tests."""
+    return file.create_entity(
+        "IfcGeographicElement",
+        GlobalId=ifcopenshell.guid.new(),
+        Name=name,
+        PredefinedType="TERRAIN",
+    )
+
+
+class TestCreateGradingGroup:
+    """Tests for ``ifcopenshell.api.grading.create_grading_group``."""
+
+    def test_happy_path_returns_named_tuple(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import (
+            GradingGroupAuthoring,
+            create_grading_group,
+        )
+
+        result = create_grading_group(empty_project_file, name="Pad A")
+
+        assert isinstance(result, GradingGroupAuthoring)
+        assert result.group.is_a("IfcGroup")
+        assert result.group.ObjectType == "GradingGroup"
+        assert result.group.Name == "Pad A"
+        assert result.composite_fill.is_a("IfcEarthworksFill")
+        assert result.composite_fill.PredefinedType == "SUBGRADE"
+        assert result.composite_fill.Name == "Pad A"
+
+    def test_group_is_not_in_spatial_tree(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """IfcGroup is not an IfcProduct; verify it has no spatial container relation."""
+        from ifcopenshell.api.grading import create_grading_group
+
+        result = create_grading_group(empty_project_file, name="X")
+
+        # IfcGroup doesn't even have a ContainedInStructure attribute. Verify
+        # by checking no IfcRelContainedInSpatialStructure references it.
+        for rel in empty_project_file.by_type("IfcRelContainedInSpatialStructure"):
+            assert result.group not in rel.RelatedElements
+
+    def test_composite_fill_is_contained_in_site(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import create_grading_group
+
+        result = create_grading_group(empty_project_file, name="X")
+        rel = (result.composite_fill.ContainedInStructure or [None])[0]
+        assert rel is not None
+        assert rel.RelatingStructure.id() == _site(empty_project_file).id()
+
+    def test_composite_fill_added_to_group_as_member(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """The composite fill is the group's first IfcRelAssignsToGroup member."""
+        from ifcopenshell.api.grading import create_grading_group
+
+        result = create_grading_group(empty_project_file, name="X")
+        rels = result.group.IsGroupedBy
+        assert len(rels) == 1
+        assert result.composite_fill in rels[0].RelatedObjects
+
+    def test_composite_fill_has_standard_pset(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import create_grading_group
+
+        result = create_grading_group(empty_project_file, name="X")
+        common = _read_pset(result.composite_fill, "Pset_EarthworksFillCommon")
+        assert common.get("Status") == "NEW"
+
+    def test_composite_fill_is_omniclass_classified(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import create_grading_group
+
+        result = create_grading_group(empty_project_file, name="X")
+        rels = empty_project_file.by_type("IfcRelAssociatesClassification")
+        matching = [r for r in rels if result.composite_fill in r.RelatedObjects]
+        assert len(matching) == 1
+        reference = matching[0].RelatingClassification
+        assert reference.Identification == "22-07 31 23"
+        assert reference.ReferencedSource.Name == "OmniClass Table 22"
+
+    def test_grading_source_pset_default_values(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import create_grading_group
+
+        result = create_grading_group(
+            empty_project_file, name="X", interior_fill="flat"
+        )
+        source = _read_pset(result.group, "Pset_SaikeiGradingSource")
+        assert source["InteriorFillStrategy"] == "flat"
+        assert source["Version"] == 1
+        assert isinstance(source["Timestamp"], int)
+        assert "TargetSurfaceGuid" not in source
+        assert "Author" not in source
+
+    def test_target_surface_guid_recorded(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import create_grading_group
+
+        terrain = _make_terrain(empty_project_file, name="EG")
+        result = create_grading_group(
+            empty_project_file, name="X", target_surface=terrain, author="MJY"
+        )
+        source = _read_pset(result.group, "Pset_SaikeiGradingSource")
+        assert source["TargetSurfaceGuid"] == terrain.GlobalId
+        assert source["Author"] == "MJY"
+
+    def test_invalid_interior_fill_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import create_grading_group
+
+        with pytest.raises(ValueError, match="interior_fill must be one of"):
+            create_grading_group(empty_project_file, name="X", interior_fill="bogus")
+
+    def test_from_surface_requires_source(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.grading import create_grading_group
+
+        with pytest.raises(ValueError, match="interior_fill_source"):
+            create_grading_group(
+                empty_project_file, name="X", interior_fill="from_surface"
+            )
+
+    def test_from_surface_with_source(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """interior_fill='from_surface' is accepted when source is provided."""
+        from ifcopenshell.api.grading import create_grading_group
+
+        source_terrain = _make_terrain(empty_project_file, name="Src")
+        result = create_grading_group(
+            empty_project_file,
+            name="X",
+            interior_fill="from_surface",
+            interior_fill_source=source_terrain,
+        )
+        info = _read_pset(result.group, "Pset_SaikeiGradingSource")
+        assert info["InteriorFillStrategy"] == "from_surface"
+
+    def test_raises_when_no_site(self) -> None:
+        from ifcopenshell.api.grading import create_grading_group
+
+        file = _empty_project_file_no_site()
+        with pytest.raises(ValueError, match="no IfcSite"):
+            create_grading_group(file, name="X")
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.grading import create_grading_group
+
+        terrain = _make_terrain(empty_project_file, name="RTTerrain")
+        create_grading_group(
+            empty_project_file,
+            name="RTGroup",
+            target_surface=terrain,
+            interior_fill="interpolate_from_boundary",
+            author="Tester",
+        )
+
+        path = tmp_path / "rt_grading_group.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+
+        groups = [
+            g for g in reopened.by_type("IfcGroup")
+            if g.Name == "RTGroup" and g.ObjectType == "GradingGroup"
+        ]
+        assert len(groups) == 1
+        group = groups[0]
+        # Composite fill is a member.
+        rel = group.IsGroupedBy[0]
+        members = rel.RelatedObjects
+        assert any(
+            m.is_a("IfcEarthworksFill") and m.PredefinedType == "SUBGRADE"
+            for m in members
+        )
+        # Source pset round-trips.
+        source = _read_pset(group, "Pset_SaikeiGradingSource")
+        assert source["Author"] == "Tester"
+        assert source["TargetSurfaceGuid"] == terrain.GlobalId
