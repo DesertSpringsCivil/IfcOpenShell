@@ -39,6 +39,7 @@ from .create_earthworks_cut import create_earthworks_cut
 from .create_earthworks_fill import create_earthworks_fill
 from .void_terrain import void_terrain
 from .write_cut_quantities import write_cut_quantities
+from .write_fill_quantities import write_fill_quantities
 
 __all__ = [
     "add_volume_solid_representation",
@@ -46,4 +47,5 @@ __all__ = [
     "create_earthworks_fill",
     "void_terrain",
     "write_cut_quantities",
+    "write_fill_quantities",
 ]

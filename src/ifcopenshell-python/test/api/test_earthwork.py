@@ -1058,3 +1058,138 @@ class TestWriteCutQuantities:
         assert len(qtos) == 1
         values = _read_qto(reopened_cut, "Qto_EarthworksCutBaseQuantities")
         assert values == {"UndisturbedVolume": 75.0, "LooseVolume": 90.0}
+
+
+class TestWriteFillQuantities:
+    """Tests for ``ifcopenshell.api.earthwork.write_fill_quantities``."""
+
+    def _make_cube_fill(self, file: ifcopenshell.file) -> ifcopenshell.entity_instance:
+        from ifcopenshell.api.earthwork import create_earthworks_fill
+
+        points, faces = _cube_solid_geometry()
+        return create_earthworks_fill(file, name="X", points=points, faces=faces)
+
+    def test_happy_path_writes_all_five_quantities(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import write_fill_quantities
+
+        fill = self._make_cube_fill(empty_project_file)
+        qto = write_fill_quantities(
+            empty_project_file,
+            fill,
+            length=10.0,
+            width=5.0,
+            depth=2.0,
+            compacted_volume=100.0,
+            loose_volume=120.0,
+        )
+
+        assert qto.is_a("IfcElementQuantity")
+        assert qto.Name == "Qto_EarthworksFillBaseQuantities"
+        assert len(qto.Quantities) == 5
+        values = _read_qto(fill, "Qto_EarthworksFillBaseQuantities")
+        assert values == {
+            "Length": 10.0,
+            "Width": 5.0,
+            "Depth": 2.0,
+            "CompactedVolume": 100.0,
+            "LooseVolume": 120.0,
+        }
+
+    def test_partial_write_omits_none_quantities(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import write_fill_quantities
+
+        fill = self._make_cube_fill(empty_project_file)
+        write_fill_quantities(empty_project_file, fill, compacted_volume=42.0)
+        values = _read_qto(fill, "Qto_EarthworksFillBaseQuantities")
+        assert values == {"CompactedVolume": 42.0}
+
+    def test_idempotent_in_place_update(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import write_fill_quantities
+
+        fill = self._make_cube_fill(empty_project_file)
+        first = write_fill_quantities(empty_project_file, fill, compacted_volume=100.0)
+        second = write_fill_quantities(
+            empty_project_file,
+            fill,
+            length=10.0,
+            compacted_volume=120.0,
+            loose_volume=145.0,
+        )
+
+        assert first.id() == second.id()
+        values = _read_qto(fill, "Qto_EarthworksFillBaseQuantities")
+        assert values == {
+            "Length": 10.0,
+            "CompactedVolume": 120.0,
+            "LooseVolume": 145.0,
+        }
+
+    def test_works_on_phase2_surface_fill_too(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """A SLOPEFILL or SUBGRADE Phase-2 fill can also receive a Qto when its volume is computed."""
+        from ifcopenshell.api.earthwork import write_fill_quantities
+
+        # Author a SLOPEFILL directly (without going through api.grading) — same effect.
+        slope_fill = empty_project_file.create_entity(
+            "IfcEarthworksFill",
+            GlobalId=ifcopenshell.guid.new(),
+            Name="Slope",
+            PredefinedType="SLOPEFILL",
+        )
+        write_fill_quantities(empty_project_file, slope_fill, compacted_volume=15.0)
+        values = _read_qto(slope_fill, "Qto_EarthworksFillBaseQuantities")
+        assert values == {"CompactedVolume": 15.0}
+
+    def test_no_quantities_supplied_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import write_fill_quantities
+
+        fill = self._make_cube_fill(empty_project_file)
+        with pytest.raises(ValueError, match="at least one quantity"):
+            write_fill_quantities(empty_project_file, fill)
+
+    def test_wrong_target_type_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import write_fill_quantities
+
+        not_a_fill = _make_cut(empty_project_file)
+        with pytest.raises(ValueError, match="must be an IfcEarthworksFill"):
+            write_fill_quantities(empty_project_file, not_a_fill, compacted_volume=10.0)
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.earthwork import write_fill_quantities
+
+        fill = self._make_cube_fill(empty_project_file)
+        fill.Name = "RTFillQto"
+        write_fill_quantities(
+            empty_project_file,
+            fill,
+            length=15.0,
+            width=8.0,
+            depth=3.0,
+            compacted_volume=360.0,
+            loose_volume=420.0,
+        )
+
+        path = tmp_path / "rt_fill_qto.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        fills = [f for f in reopened.by_type("IfcEarthworksFill") if f.Name == "RTFillQto"]
+        assert len(fills) == 1
+        values = _read_qto(fills[0], "Qto_EarthworksFillBaseQuantities")
+        assert values == {
+            "Length": 15.0,
+            "Width": 8.0,
+            "Depth": 3.0,
+            "CompactedVolume": 360.0,
+            "LooseVolume": 420.0,
+        }
