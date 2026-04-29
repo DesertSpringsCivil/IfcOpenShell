@@ -35,7 +35,9 @@ Public functions are re-exported here so callers do
 """
 
 from .add_volume_solid_representation import add_volume_solid_representation
+from .create_earthworks_cut import create_earthworks_cut
 
 __all__ = [
     "add_volume_solid_representation",
+    "create_earthworks_cut",
 ]

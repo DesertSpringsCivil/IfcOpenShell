@@ -371,3 +371,175 @@ class TestAddVolumeSolidRepresentation:
         for face in face_set.Faces:
             for index in face.CoordIndex:
                 assert 1 <= index <= 8
+
+
+def _empty_project_file_no_site() -> ifcopenshell.file:
+    file = ifcopenshell.file(schema="IFC4X3_ADD2")
+    file.create_entity("IfcProject", GlobalId=ifcopenshell.guid.new(), Name="No Site")
+    length_unit = ifcopenshell.api.unit.add_si_unit(file, unit_type="LENGTHUNIT")
+    ifcopenshell.api.unit.assign_unit(file, units=[length_unit])
+    return file
+
+
+class TestCreateEarthworksCut:
+    """Tests for ``ifcopenshell.api.earthwork.create_earthworks_cut``."""
+
+    def test_happy_path(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_cut
+
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file,
+            name="Bulk excavation",
+            points=points,
+            faces=faces,
+        )
+
+        assert cut.is_a("IfcEarthworksCut")
+        assert cut.Name == "Bulk excavation"
+        assert cut.PredefinedType == "EXCAVATION"
+        assert cut.ObjectPlacement is not None
+
+    def test_contained_in_site(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_cut
+
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="X", points=points, faces=faces
+        )
+        rel = (cut.ContainedInStructure or [None])[0]
+        assert rel is not None
+        assert rel.RelatingStructure.id() == _site(empty_project_file).id()
+
+    def test_solid_body_representation_attached(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_cut
+
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="X", points=points, faces=faces
+        )
+        rep = cut.Representation.Representations[0]
+        assert rep.RepresentationIdentifier == "Body"
+        assert rep.RepresentationType == "Tessellation"
+        assert rep.Items[0].is_a("IfcPolygonalFaceSet")
+        assert rep.Items[0].Closed is True
+
+    def test_standard_pset_attached(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_cut
+
+        points, faces = _tetrahedron_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="X", points=points, faces=faces
+        )
+        common = _read_pset(cut, "Pset_EarthworksCutCommon")
+        assert common.get("Status") == "NEW"
+
+    def test_omniclass_classified_under_default_code(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_cut
+
+        points, faces = _tetrahedron_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="X", points=points, faces=faces
+        )
+        rels = empty_project_file.by_type("IfcRelAssociatesClassification")
+        matching = [r for r in rels if cut in r.RelatedObjects]
+        assert len(matching) == 1
+        assert matching[0].RelatingClassification.Identification == "22-07 31 16"
+        assert matching[0].RelatingClassification.Name == "Excavation and Fill"
+
+    def test_explicit_omniclass_code_override(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """Per the docstring: trench excavation gets a more specific code."""
+        from ifcopenshell.api.earthwork import create_earthworks_cut
+
+        points, faces = _tetrahedron_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file,
+            name="Utility trench",
+            points=points,
+            faces=faces,
+            predefined_type="TRENCH",
+            omniclass_code="22-07 31 26",
+            omniclass_title="Trench Excavation",
+        )
+        rels = empty_project_file.by_type("IfcRelAssociatesClassification")
+        matching = [r for r in rels if cut in r.RelatedObjects]
+        assert matching[0].RelatingClassification.Identification == "22-07 31 26"
+        assert matching[0].RelatingClassification.Name == "Trench Excavation"
+
+    def test_predefined_type_options(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """Each valid predefined_type round-trips."""
+        from ifcopenshell.api.earthwork import create_earthworks_cut
+
+        for pt in ("CUT", "DREDGING", "TOPSOILREMOVAL", "TRENCH"):
+            points, faces = _tetrahedron_solid_geometry()
+            cut = create_earthworks_cut(
+                empty_project_file,
+                name=f"Cut-{pt}",
+                points=points,
+                faces=faces,
+                predefined_type=pt,
+            )
+            assert cut.PredefinedType == pt
+
+    def test_invalid_predefined_type_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_cut
+
+        points, faces = _tetrahedron_solid_geometry()
+        with pytest.raises(ValueError, match="predefined_type must be one of"):
+            create_earthworks_cut(
+                empty_project_file,
+                name="X",
+                points=points,
+                faces=faces,
+                predefined_type="CUTTING",  # not in the IFC enum
+            )
+
+    def test_raises_when_no_site(self) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_cut
+
+        file = _empty_project_file_no_site()
+        points, faces = _tetrahedron_solid_geometry()
+        with pytest.raises(ValueError, match="no IfcSite"):
+            create_earthworks_cut(file, name="X", points=points, faces=faces)
+
+    def test_round_trip(self, empty_project_file: ifcopenshell.file, tmp_path) -> None:
+        from ifcopenshell.api.earthwork import create_earthworks_cut
+
+        points, faces = _cube_solid_geometry()
+        create_earthworks_cut(
+            empty_project_file,
+            name="RTCut",
+            points=points,
+            faces=faces,
+            predefined_type="DREDGING",
+            omniclass_code="22-07 31 53",
+            omniclass_title="Rock Removal",
+        )
+
+        path = tmp_path / "rt_cut.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        cuts = [c for c in reopened.by_type("IfcEarthworksCut") if c.Name == "RTCut"]
+        assert len(cuts) == 1
+        cut = cuts[0]
+        assert cut.PredefinedType == "DREDGING"
+        rep = cut.Representation.Representations[0]
+        assert rep.RepresentationIdentifier == "Body"
+        face_set = rep.Items[0]
+        assert face_set.Closed is True
+        assert len(face_set.Faces) == 6
+        common = _read_pset(cut, "Pset_EarthworksCutCommon")
+        assert common.get("Status") == "NEW"
+        rels = reopened.by_type("IfcRelAssociatesClassification")
+        matching = [r for r in rels if cut in r.RelatedObjects]
+        assert matching[0].RelatingClassification.Identification == "22-07 31 53"
