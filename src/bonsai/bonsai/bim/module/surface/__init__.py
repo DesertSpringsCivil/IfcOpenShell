@@ -31,7 +31,7 @@ UIList; commit 11 adds the create operator, etc.
 
 import bpy
 
-from . import operator, prop
+from . import operator, prop, ui
 
 
 classes: tuple[type, ...] = (
@@ -42,6 +42,10 @@ classes: tuple[type, ...] = (
     operator.CIVIL_OT_surface_retriangulate,
     operator.CIVIL_OT_surface_set_boundary,
     operator.CIVIL_OT_surface_add_breakline,
+    ui.CIVIL_PT_surface_creation,
+    ui.CIVIL_PT_surface_list,
+    ui.CIVIL_PT_surface_active,
+    ui.CIVIL_PT_surface_display,
 )
 
 

@@ -1318,6 +1318,67 @@ class TestSurfaceModuleRegistration:
     def test_uilist_class_registered(self) -> None:
         assert hasattr(bpy.types, "CIVIL_UL_surfaces")
 
+    def test_panels_registered(self) -> None:
+        """All four CIVIL_PT_surface_* sub-panels and the
+        BIM_PT_tab_surface_modeler tab parent should be in bpy.types."""
+        assert hasattr(bpy.types, "BIM_PT_tab_surface_modeler")
+        assert hasattr(bpy.types, "CIVIL_PT_surface_creation")
+        assert hasattr(bpy.types, "CIVIL_PT_surface_list")
+        assert hasattr(bpy.types, "CIVIL_PT_surface_active")
+        assert hasattr(bpy.types, "CIVIL_PT_surface_display")
+
+
+class TestSurfaceDataCache(NewIfc4X3):
+    """Tests for :class:`bonsai.bim.module.surface.data.SurfaceData`."""
+
+    def test_load_with_no_surfaces_returns_zero_count(self) -> None:
+        from bonsai.bim.module.surface.data import SurfaceData
+
+        SurfaceData.is_loaded = False
+        SurfaceData.load()
+        assert SurfaceData.is_loaded
+        assert SurfaceData.data["surface_count"] == 0
+
+    def test_load_after_creating_surface_increments_count(
+        self, tmp_path
+    ) -> None:
+        from bonsai.bim.module.surface.data import SurfaceData
+
+        points_path = tmp_path / "p.csv"
+        points_path.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        SurfaceData.is_loaded = False
+        SurfaceData.load()
+        assert SurfaceData.data["surface_count"] == 1
+
+    def test_active_surface_summary(self, tmp_path) -> None:
+        from bonsai.bim.module.surface.data import SurfaceData
+
+        points_path = tmp_path / "p.csv"
+        points_path.write_text("0,0,0\n10,0,0\n10,10,0\n0,10,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        summary = SurfaceData.active_surface_summary(tool.Ifc.get(), guid)
+        assert summary["name"] == "Existing Ground"
+        assert summary["kind"] == "existing"
+        assert summary["vertex_count"] == 4
+        assert summary["triangle_count"] == 2
+        assert summary["breakline_count"] == 0
+        assert summary["has_boundary"] is True
+
+    def test_active_surface_summary_unknown_guid_returns_missing(self) -> None:
+        from bonsai.bim.module.surface.data import SurfaceData
+
+        summary = SurfaceData.active_surface_summary(
+            tool.Ifc.get(), "non-existent-guid"
+        )
+        assert summary["name"] == "(missing)"
+
 
 class TestLoadPointsFromCsv:
     """Tests for :meth:`bonsai.tool.surface.Surface.load_points_from_csv`."""

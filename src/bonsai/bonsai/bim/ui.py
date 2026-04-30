@@ -1702,6 +1702,24 @@ class BIM_PT_tab_horizontal_alignment(Panel):
         pass
 
 
+class BIM_PT_tab_surface_modeler(Panel):
+    bl_idname = "BIM_PT_tab_surface_modeler"
+    bl_label = "Terrain / Surface"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "scene"
+    bl_order = 2
+    bim_tab_name = "CIVIL"
+
+    @classmethod
+    def poll(cls, context):
+        if tool.Blender.should_show_panel(context, cls.bim_tab_name, cls.bl_idname) and tool.Ifc.get():
+            return True
+
+    def draw(self, context):
+        pass
+
+
 class BIM_PT_tab_sheets(Panel):
     bl_idname = "BIM_PT_tab_sheets"
     bl_label = "Sheets"
