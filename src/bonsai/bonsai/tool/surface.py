@@ -1313,6 +1313,10 @@ class Surface:
         breakline.ifc_annotation_id = annotation.id()
 
         if host_surface is not None:
+            # IfcRelAssignsToProduct: per IFC 4.3 §IfcRelAssigns,
+            # RelatedObjectsType is OPTIONAL (IfcObjectTypeEnum) and is
+            # safely omitted here — the relationship is fully specified
+            # by RelatingProduct + RelatedObjects.
             ifc_file.create_entity(
                 "IfcRelAssignsToProduct",
                 GlobalId=ifcopenshell.guid.new(),

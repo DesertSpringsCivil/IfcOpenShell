@@ -2305,6 +2305,75 @@ class TestSurfaceBSIIntegration(NewIfc4X3):
         errors = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
         assert errors == [], f"ifcopenshell.validate() reported: {errors}"
 
+    def test_multi_surface_with_host_link_validates_clean(
+        self, tmp_path
+    ) -> None:
+        """Two surfaces with host-linked breaklines must round-trip
+        through ifcopenshell.validate without warnings.
+
+        Closes the cold-review IFC schema bug: IfcRelAssignsToProduct
+        requires the RelatedObjectsType attribute. Before that fix, this
+        test would have surfaced WARNING-level validate records on every
+        multi-surface file with a breakline link.
+        """
+        import logging
+
+        import ifcopenshell
+        import ifcopenshell.validate
+
+        # Two distinct surfaces, each with one breakline scoped to it.
+        path_a = tmp_path / "a.csv"
+        path_a.write_text("0,0,0\n1,0,0\n1,1,0\n0,1,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Surf A"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path_a)
+        )
+        bl_a_path = tmp_path / "bl_a.csv"
+        bl_a_path.write_text("0,0,0\n1,1,0\n")
+        bpy.ops.civil.surface_add_breakline(
+            "EXEC_DEFAULT",
+            csv_filepath=str(bl_a_path),
+            breakline_name="bl-A",
+        )
+
+        path_b = tmp_path / "b.csv"
+        path_b.write_text("10,10,0\n11,10,0\n11,11,0\n10,11,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Surf B"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path_b)
+        )
+        bl_b_path = tmp_path / "bl_b.csv"
+        bl_b_path.write_text("10,10,0\n11,11,0\n")
+        bpy.ops.civil.surface_add_breakline(
+            "EXEC_DEFAULT",
+            csv_filepath=str(bl_b_path),
+            breakline_name="bl-B",
+        )
+
+        ifc_path = tmp_path / "multi_surface_validate.ifc"
+        tool.Ifc.get().write(str(ifc_path))
+        reopened = ifcopenshell.open(str(ifc_path))
+
+        # Two IfcRelAssignsToProduct entities (one per breakline → host).
+        rels = reopened.by_type("IfcRelAssignsToProduct")
+        assert len(rels) == 2
+        for rel in rels:
+            assert len(rel.RelatedObjects) == 1
+            assert rel.RelatedObjects[0].is_a("IfcAnnotation")
+
+        records: list[logging.LogRecord] = []
+
+        class _CollectingHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.Logger("multi-surface-validate")
+        logger.addHandler(_CollectingHandler(level=logging.DEBUG))
+        ifcopenshell.validate.validate(reopened, logger)
+
+        errors = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+        assert errors == [], f"validate() reported: {errors}"
+
 
 class TestLoadPointsFromCsv:
     """Tests for :meth:`bonsai.tool.surface.Surface.load_points_from_csv`."""
