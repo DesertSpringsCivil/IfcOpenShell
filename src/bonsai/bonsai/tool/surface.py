@@ -488,6 +488,68 @@ class SaikeiTriangulationError(SaikeiSurfaceError):
     point, or :class:`Triangulator` backend error)."""
 
 
+def _extract_polyline_3d(
+    annotation: "ifcopenshell.entity_instance",
+) -> Optional[list[tuple[float, float, float]]]:
+    """Pull the ordered ``(x, y, z)`` polyline points from an
+    :class:`IfcAnnotation` whose representation is an :class:`IfcPolyline`.
+
+    Returns ``None`` if the annotation has no representation, no polyline
+    item, or fewer than two points. Callers (currently only
+    :meth:`Surface._recover_breaklines_from_annotations`) treat ``None``
+    as "skip this annotation."
+    """
+    representation = annotation.Representation
+    if representation is None:
+        return None
+    for shape_rep in representation.Representations or []:
+        for item in shape_rep.Items or []:
+            if not item.is_a("IfcPolyline"):
+                continue
+            points: list[tuple[float, float, float]] = []
+            for pt in item.Points or []:
+                coords = pt.Coordinates or ()
+                if len(coords) >= 3:
+                    points.append(
+                        (float(coords[0]), float(coords[1]), float(coords[2]))
+                    )
+                elif len(coords) == 2:
+                    points.append(
+                        (float(coords[0]), float(coords[1]), 0.0)
+                    )
+            if len(points) >= 2:
+                return points
+    return None
+
+
+def _extract_breakline_pset(
+    annotation: "ifcopenshell.entity_instance",
+) -> tuple[str, str]:
+    """Return ``(kind, source)`` from ``Pset_SaikeiBreaklineCommon`` on the
+    annotation, defaulting to ``"standard"`` / ``"recovered"`` if the pset
+    or properties are missing.
+
+    The ``"recovered"`` source label distinguishes annotations that were
+    rehydrated from disk (no in-memory provenance) from annotations
+    authored directly via :meth:`Surface.author_ifc_breakline` (which
+    preserves the user-supplied source).
+    """
+    kind = "standard"
+    source = "recovered"
+    for rel in getattr(annotation, "IsDefinedBy", None) or []:
+        if not rel.is_a("IfcRelDefinesByProperties"):
+            continue
+        pset = rel.RelatingPropertyDefinition
+        if pset is None or pset.Name != "Pset_SaikeiBreaklineCommon":
+            continue
+        for prop in pset.HasProperties or []:
+            if prop.Name == "Kind" and prop.NominalValue is not None:
+                kind = prop.NominalValue.wrappedValue or kind
+            elif prop.Name == "Source" and prop.NominalValue is not None:
+                source = prop.NominalValue.wrappedValue or source
+    return kind, source
+
+
 class Surface:
     """Tool-layer entry point for surface math, IFC authoring, and Blender
     linkage. Per spec §7.2 each method is a static or class method called
@@ -607,9 +669,17 @@ class Surface:
         ``CoordIndex`` minus 1 to convert IFC's 1-based to 0-based), and
         ``triangle_flags``. The ``outer_boundary`` defaults to the convex hull
         of the points (per spec §6.4) since IFC stores per-triangle flags, not
-        the authoring polygons. ``breaklines``, ``holes``, and ``voids`` start
-        empty — recovery from annotation set + flags is approximate and
-        deferred to a later phase.
+        the authoring polygons. ``holes`` and ``voids`` start empty — recovery
+        from the per-triangle flag mask is a Phase 4.1+ refinement.
+
+        ``breaklines`` are recovered from every :class:`IfcAnnotation` with
+        ``ObjectType="BREAKLINE"`` in the file (per spec §2.3 — breaklines
+        live on the site, not on individual surfaces, so all annotations are
+        re-attached on rehydration). For multi-surface files, this means
+        every rehydrated surface "sees" every breakline; multi-surface
+        attribution is heuristic until Phase 5 introduces explicit
+        surface↔breakline links via ``IfcRelAssociates`` or a similar
+        relationship.
 
         .. note::
 
@@ -669,10 +739,45 @@ class Surface:
             triangles=triangles,
             triangle_flags=triangle_flags,
             outer_boundary=outer_boundary if isinstance(outer_boundary, shapely.Polygon) else None,
+            breaklines=cls._recover_breaklines_from_annotations(ifc_file),
             ifc_host_entity_id=host.id(),
             ifc_tin_representation_id=tin_id,
             ifc_bbox_representation_id=cls._find_bbox_id(host),
         )
+
+    @staticmethod
+    def _recover_breaklines_from_annotations(
+        ifc_file: "ifcopenshell.file",
+    ) -> list[Breakline]:
+        """Read every ``IfcAnnotation[BREAKLINE]`` in the file and rebuild
+        the corresponding :class:`Breakline` dataclasses.
+
+        Walks the polyline geometry from the annotation's
+        ``IfcShapeRepresentation`` and pulls ``Kind`` / ``Source`` /
+        ``GradingGroupGuid`` from ``Pset_SaikeiBreaklineCommon``. Entries
+        that don't conform (no representation, missing pset, malformed
+        polyline) are skipped silently — preserving robustness across
+        author tooling.
+        """
+        recovered: list[Breakline] = []
+        for annotation in ifc_file.by_type("IfcAnnotation"):
+            if getattr(annotation, "ObjectType", None) != "BREAKLINE":
+                continue
+            polyline = _extract_polyline_3d(annotation)
+            if polyline is None or len(polyline) < 2:
+                continue
+            kind, source = _extract_breakline_pset(annotation)
+            recovered.append(
+                Breakline(
+                    guid=annotation.GlobalId,
+                    name=annotation.Name or "",
+                    polyline=polyline,
+                    kind=kind,
+                    source=source,
+                    ifc_annotation_id=annotation.id(),
+                )
+            )
+        return recovered
 
     @classmethod
     def build_tin_from_points(

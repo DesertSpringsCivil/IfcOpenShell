@@ -1175,6 +1175,128 @@ class TestSurfaceRegistry:
         ):
             tool_surface.Surface.get(ifc_file, site.GlobalId)
 
+    def test_rehydrate_recovers_breakline_annotations(self) -> None:
+        """Per spec §2.3, breaklines persist as IfcAnnotation entities
+        separate from the TIN. Rehydration must walk the file and rebuild
+        Breakline dataclasses from those annotations so the multi-session
+        editing flow doesn't silently drop previously-authored breaklines.
+        """
+        ifc_file = _make_ifc_file_with_site()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        surface = tool_surface.Surface.build_tin_from_points(
+            "BL Recovery", points
+        )
+        tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        breakline = tool_surface.Breakline(
+            guid=ifcopenshell.guid.new(),
+            name="diagonal",
+            polyline=[(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)],
+            kind="wall",
+            source="manual",
+        )
+        tool_surface.Surface.author_ifc_breakline(ifc_file, breakline)
+
+        # Wipe the cache so the next get() rehydrates from IFC.
+        tool_surface.Surface.clear()
+        rehydrated = tool_surface.Surface.get(ifc_file, surface.guid)
+
+        assert len(rehydrated.breaklines) == 1
+        recovered = rehydrated.breaklines[0]
+        assert recovered.name == "diagonal"
+        assert recovered.kind == "wall"
+        assert recovered.guid == breakline.guid
+        # Polyline geometry round-trips exactly.
+        assert recovered.polyline == [
+            (0.0, 0.0, 0.0),
+            (1.0, 1.0, 0.0),
+        ]
+
+    def test_rehydrate_no_breaklines_in_file_returns_empty_list(self) -> None:
+        """When the file has no IfcAnnotation[BREAKLINE], rehydration
+        produces a CivilSurface with empty breaklines (the common case)."""
+        ifc_file = _make_ifc_file_with_site()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        surface = tool_surface.Surface.build_tin_from_points(
+            "NoBL", points
+        )
+        tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        tool_surface.Surface.clear()
+
+        rehydrated = tool_surface.Surface.get(ifc_file, surface.guid)
+        assert rehydrated.breaklines == []
+
+    def test_multi_session_add_breakline_preserves_previous(self) -> None:
+        """The agent-flagged risk: user creates surface + breakline, reopens,
+        then adds another breakline. After the second add, BOTH breaklines
+        should be present in the TIN — not just the new one. Before the
+        rehydration recovery shipped, session 2's retriangulate would only
+        see ``diag-B`` and silently drop ``diag-A``.
+
+        Uses non-crossing breaklines (a diagonal and a centerline) to
+        avoid the documented CDT Steiner-point limitation.
+        """
+        # Session 1: create surface, add diagonal breakline. The points
+        # include the breakline endpoints + a center vertex so subsequent
+        # non-crossing breaklines can share endpoints without introducing
+        # Steiner points (the documented CDT Phase-4 limitation).
+        ifc_file = _make_ifc_file_with_site()
+        points = np.array(
+            [
+                (0.0, 0.0, 0.0),
+                (5.0, 0.0, 0.0),
+                (10.0, 0.0, 0.0),
+                (10.0, 10.0, 0.0),
+                (5.0, 10.0, 0.0),
+                (0.0, 10.0, 0.0),
+                (5.0, 5.0, 0.0),  # shared interior vertex
+            ]
+        )
+        surface = tool_surface.Surface.build_tin_from_points("Multi", points)
+        tool_surface.Surface.author_ifc_host(ifc_file, surface)
+
+        # First breakline: bottom-left edge.
+        breakline_a = tool_surface.Breakline(
+            guid=ifcopenshell.guid.new(),
+            name="bl-A",
+            polyline=[(0.0, 0.0, 0.0), (5.0, 5.0, 0.0)],
+            kind="standard",
+            source="manual",
+        )
+        tool_surface.Surface.author_ifc_breakline(ifc_file, breakline_a)
+        surface.breaklines.append(breakline_a)
+        tool_surface.Surface.retriangulate(surface)
+        tool_surface.Surface.update_ifc_tin(ifc_file, surface)
+
+        # Session 2: simulate a reopen by clearing the cache. Get() now
+        # rehydrates with breaklines recovered from IfcAnnotation.
+        tool_surface.Surface.clear()
+        rehydrated = tool_surface.Surface.get(ifc_file, surface.guid)
+        assert len(rehydrated.breaklines) == 1
+
+        # Add a second breakline that shares the (5,5) endpoint with the
+        # first — top-right edge from center to corner.
+        breakline_b = tool_surface.Breakline(
+            guid=ifcopenshell.guid.new(),
+            name="bl-B",
+            polyline=[(5.0, 5.0, 0.0), (10.0, 10.0, 0.0)],
+            kind="standard",
+            source="manual",
+        )
+        tool_surface.Surface.author_ifc_breakline(ifc_file, breakline_b)
+        rehydrated.breaklines.append(breakline_b)
+        tool_surface.Surface.retriangulate(rehydrated)
+        tool_surface.Surface.update_ifc_tin(ifc_file, rehydrated)
+
+        # Both breaklines should be present in the dataclass — proves the
+        # rehydration recovery prevented the silent drop.
+        assert len(rehydrated.breaklines) == 2
+        names = sorted(b.name for b in rehydrated.breaklines)
+        assert names == ["bl-A", "bl-B"]
+
     def test_multi_file_registry_keyed_by_id(self) -> None:
         """Per spec §4.6, the same GUID in two different files is stored as
         two separate entries — keyed on ``(id(ifc_file), guid)``."""
