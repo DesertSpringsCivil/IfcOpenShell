@@ -44,12 +44,18 @@ class FakeCivilSurface(dict):
     """Stand-in for :class:`bonsai.tool.surface.CivilSurface`. Inherits from
     ``dict`` for Prophecy serialization (same reason as :class:`FakeIfcFile`)."""
 
-    def __init__(self, name: str = "TestSurface", guid: str = "fake-guid") -> None:
+    def __init__(
+        self,
+        name: str = "TestSurface",
+        guid: str = "fake-guid",
+        ifc_host_entity_id=None,
+    ) -> None:
         super().__init__(name=name, guid=guid)
         # Real attributes the orchestration mutates (registered after dict init
         # so they don't pollute the dict for json.dumps).
         self.breaklines: list = []
         self.outer_boundary = None
+        self.ifc_host_entity_id = ifc_host_entity_id
 
 
 class FakeBreakline(dict):
@@ -220,15 +226,19 @@ class TestAddBreaklineToSurface:
 
     def test_happy_path_calls_tool_methods_in_order(self, ifc, surface):
         """get → author_ifc_breakline → mutate breaklines → retriangulate →
-        update_ifc_tin, all called once."""
+        update_ifc_tin, all called once. Surface with no IFC host (test
+        fixture default) skips the host-link."""
         fake_file = FakeIfcFile()
-        fake_surface = FakeCivilSurface()
+        fake_surface = FakeCivilSurface()  # ifc_host_entity_id=None
         breakline = FakeBreakline()
 
         ifc.get().should_be_called().will_return(fake_file)
         surface.get(fake_file, "guid-A").should_be_called().will_return(fake_surface)
         surface.author_ifc_breakline(
-            fake_file, breakline, grading_group_guid=None
+            fake_file,
+            breakline,
+            grading_group_guid=None,
+            host_surface=None,
         ).should_be_called()
         surface.retriangulate(fake_surface).should_be_called()
         surface.update_ifc_tin(fake_file, fake_surface).should_be_called()
@@ -248,7 +258,10 @@ class TestAddBreaklineToSurface:
         ifc.get().should_be_called().will_return(fake_file)
         surface.get(fake_file, "guid-B").should_be_called().will_return(fake_surface)
         surface.author_ifc_breakline(
-            fake_file, breakline, grading_group_guid="grp-1"
+            fake_file,
+            breakline,
+            grading_group_guid="grp-1",
+            host_surface=None,
         ).should_be_called()
         surface.retriangulate(fake_surface).should_be_called()
         surface.update_ifc_tin(fake_file, fake_surface).should_be_called()

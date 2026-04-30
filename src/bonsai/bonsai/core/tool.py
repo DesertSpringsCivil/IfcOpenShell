@@ -1109,7 +1109,7 @@ class Surface:
     def build_tin_from_points(cls, name, points, kind="existing", guid=None): pass
     def author_ifc_host(cls, ifc_file, surface, site=None, triangulation_tolerance=0.0): pass
     def update_ifc_tin(cls, ifc_file, surface): pass
-    def author_ifc_breakline(cls, ifc_file, breakline, site=None, grading_group_guid=None): pass
+    def author_ifc_breakline(cls, ifc_file, breakline, site=None, grading_group_guid=None, host_surface=None): pass
     def retriangulate(cls, surface): pass
     def z_at(cls, surface, x, y): pass
     def register(cls, ifc_file, surface): pass

@@ -1361,6 +1361,88 @@ class TestSurfaceRegistry:
             (1.0, 1.0, 0.0),
         ]
 
+    def test_breakline_host_assignment_scopes_recovery(self) -> None:
+        """Multi-surface disambiguation: when a breakline is authored with
+        ``host_surface=`` set, only that surface recovers it. Other
+        surfaces in the same file see no breaklines.
+
+        Closes the cold-review-flagged "breakline scatter" — before this
+        fix, every rehydrated surface inherited every IfcAnnotation in
+        the file regardless of attribution.
+        """
+        ifc_file = _make_ifc_file_with_site()
+        # Two distinct surfaces.
+        surface_a = tool_surface.Surface.build_tin_from_points(
+            "A",
+            np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]),
+        )
+        surface_b = tool_surface.Surface.build_tin_from_points(
+            "B",
+            np.array([(10.0, 10.0, 0.0), (11.0, 10.0, 0.0), (10.0, 11.0, 0.0)]),
+        )
+        host_a = tool_surface.Surface.author_ifc_host(ifc_file, surface_a)
+        host_b = tool_surface.Surface.author_ifc_host(ifc_file, surface_b)
+
+        # Author one breakline scoped to A, one scoped to B.
+        bl_a = tool_surface.Breakline(
+            guid=ifcopenshell.guid.new(),
+            name="bl-on-A",
+            polyline=[(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)],
+            kind="standard",
+            source="manual",
+        )
+        bl_b = tool_surface.Breakline(
+            guid=ifcopenshell.guid.new(),
+            name="bl-on-B",
+            polyline=[(10.0, 10.0, 0.0), (11.0, 11.0, 0.0)],
+            kind="standard",
+            source="manual",
+        )
+        tool_surface.Surface.author_ifc_breakline(
+            ifc_file, bl_a, host_surface=host_a
+        )
+        tool_surface.Surface.author_ifc_breakline(
+            ifc_file, bl_b, host_surface=host_b
+        )
+
+        # Wipe the cache and rehydrate both surfaces.
+        tool_surface.Surface.clear()
+        rehydrated_a = tool_surface.Surface.get(ifc_file, surface_a.guid)
+        rehydrated_b = tool_surface.Surface.get(ifc_file, surface_b.guid)
+
+        # A only sees its own breakline; B only sees its own.
+        a_names = {b.name for b in rehydrated_a.breaklines}
+        b_names = {b.name for b in rehydrated_b.breaklines}
+        assert a_names == {"bl-on-A"}
+        assert b_names == {"bl-on-B"}
+
+    def test_unscoped_breakline_falls_back_to_all_surfaces(self) -> None:
+        """Phase-4 fallback: if a breakline is authored WITHOUT a host
+        surface link (e.g., legacy data, or the test path that bypasses
+        the core orchestrator), every rehydrated surface still recovers
+        it. Single-surface files keep working without any migration."""
+        ifc_file = _make_ifc_file_with_site()
+        surface = tool_surface.Surface.build_tin_from_points(
+            "Single",
+            np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]),
+        )
+        tool_surface.Surface.author_ifc_host(ifc_file, surface)
+
+        bl = tool_surface.Breakline(
+            guid=ifcopenshell.guid.new(),
+            name="legacy",
+            polyline=[(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)],
+            kind="standard",
+            source="manual",
+        )
+        # No host_surface = legacy / unscoped path.
+        tool_surface.Surface.author_ifc_breakline(ifc_file, bl)
+
+        tool_surface.Surface.clear()
+        rehydrated = tool_surface.Surface.get(ifc_file, surface.guid)
+        assert len(rehydrated.breaklines) == 1
+        assert rehydrated.breaklines[0].name == "legacy"
+
     def test_rehydrate_proposed_fill_without_group_is_proposed_site(self) -> None:
         """Per :meth:`infer_kind_from_spatial_parent`: an
         ``IfcEarthworksFill[SUBGRADE]`` not assigned to any

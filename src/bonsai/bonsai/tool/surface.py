@@ -522,6 +522,32 @@ def _extract_polyline_3d(
     return None
 
 
+def _annotation_belongs_to_host(
+    annotation: "ifcopenshell.entity_instance",
+    host: "ifcopenshell.entity_instance",
+) -> bool:
+    """Return True if ``annotation`` is assigned to ``host`` via at least
+    one :class:`IfcRelAssignsToProduct`, OR if it has no host assignments
+    at all (the no-attribution fallback used by single-surface files).
+
+    Returns False only when the annotation is explicitly assigned to a
+    *different* host product — that's the case the multi-surface
+    disambiguation must filter out.
+    """
+    has_assignments = getattr(annotation, "HasAssignments", None) or []
+    host_assignments = [
+        rel
+        for rel in has_assignments
+        if rel.is_a("IfcRelAssignsToProduct")
+    ]
+    if not host_assignments:
+        # No host link at all — fall back to "global to all surfaces."
+        return True
+    return any(
+        rel.RelatingProduct == host for rel in host_assignments
+    )
+
+
 def _extract_breakline_pset(
     annotation: "ifcopenshell.entity_instance",
 ) -> tuple[str, str]:
@@ -737,7 +763,7 @@ class Surface:
             triangles=triangles,
             triangle_flags=triangle_flags,
             outer_boundary=outer_boundary if isinstance(outer_boundary, shapely.Polygon) else None,
-            breaklines=cls._recover_breaklines_from_annotations(ifc_file),
+            breaklines=cls._recover_breaklines_from_annotations(ifc_file, host),
             ifc_host_entity_id=host.id(),
             ifc_tin_representation_id=tin_id,
             ifc_bbox_representation_id=cls._find_bbox_id(host),
@@ -778,20 +804,33 @@ class Surface:
     @staticmethod
     def _recover_breaklines_from_annotations(
         ifc_file: "ifcopenshell.file",
+        host: Optional["ifcopenshell.entity_instance"] = None,
     ) -> list[Breakline]:
-        """Read every ``IfcAnnotation[BREAKLINE]`` in the file and rebuild
+        """Read ``IfcAnnotation[BREAKLINE]`` entities in the file and rebuild
         the corresponding :class:`Breakline` dataclasses.
 
+        When ``host`` is provided, annotations are filtered by their
+        :class:`IfcRelAssignsToProduct` relationships — only annotations
+        explicitly assigned to ``host`` are returned. Annotations with NO
+        such assignment (e.g., legacy data, or breaklines authored without
+        :meth:`author_ifc_breakline`'s ``host_surface`` argument) are
+        included as a fallback so single-surface Phase 4 files still
+        recover their breaklines. Annotations assigned to a *different*
+        host are excluded — that's the multi-surface disambiguation.
+
         Walks the polyline geometry from the annotation's
-        ``IfcShapeRepresentation`` and pulls ``Kind`` / ``Source`` /
-        ``GradingGroupGuid`` from ``Pset_SaikeiBreaklineCommon``. Entries
-        that don't conform (no representation, missing pset, malformed
-        polyline) are skipped silently — preserving robustness across
-        author tooling.
+        ``IfcShapeRepresentation`` and pulls ``Kind`` / ``Source`` from
+        ``Pset_SaikeiBreaklineCommon``. Entries that don't conform (no
+        representation, missing pset, malformed polyline) are skipped
+        silently.
         """
         recovered: list[Breakline] = []
         for annotation in ifc_file.by_type("IfcAnnotation"):
             if getattr(annotation, "ObjectType", None) != "BREAKLINE":
+                continue
+            if host is not None and not _annotation_belongs_to_host(
+                annotation, host
+            ):
                 continue
             polyline = _extract_polyline_3d(annotation)
             if polyline is None or len(polyline) < 2:
@@ -1159,6 +1198,7 @@ class Surface:
         breakline: Breakline,
         site: Optional["ifcopenshell.entity_instance"] = None,
         grading_group_guid: Optional[str] = None,
+        host_surface: Optional["ifcopenshell.entity_instance"] = None,
     ) -> "ifcopenshell.entity_instance":
         """Persist ``breakline`` as a separate :class:`IfcAnnotation` entity.
 
@@ -1171,6 +1211,14 @@ class Surface:
             first ``IfcSite``. Must be supplied if no ``IfcSite`` exists yet.
         :param grading_group_guid: optional GUID linking this breakline to a
             grading group whose retriangulation it participates in.
+        :param host_surface: optional :class:`IfcGeographicElement` /
+            :class:`IfcEarthworksFill` that this breakline modifies. When
+            provided, this method authors an :class:`IfcRelAssignsToProduct`
+            relating the annotation to the surface, so multi-surface files
+            can disambiguate "which surface owns which breakline" during
+            rehydration. Without it, the annotation is recovered as
+            site-global and applied to every rehydrated surface (the
+            documented Phase 4 fallback).
         :returns: the created :class:`IfcAnnotation`. Its ``GlobalId`` is
             rewritten to match :attr:`Breakline.guid` and the step id is
             stamped on :attr:`Breakline.ifc_annotation_id`.
@@ -1189,6 +1237,16 @@ class Surface:
         )
         annotation.GlobalId = breakline.guid
         breakline.ifc_annotation_id = annotation.id()
+
+        if host_surface is not None:
+            ifc_file.create_entity(
+                "IfcRelAssignsToProduct",
+                GlobalId=ifcopenshell.guid.new(),
+                Name=f"BreaklineAssignment/{breakline.name}",
+                RelatedObjects=[annotation],
+                RelatingProduct=host_surface,
+            )
+
         return annotation
 
     @staticmethod

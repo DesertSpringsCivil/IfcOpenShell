@@ -179,8 +179,20 @@ def add_breakline_to_surface(
         raise ValueError("No IFC file loaded")
 
     surface = surface_tool.get(ifc_file, surface_guid)
+    # Link the annotation to the host surface via IfcRelAssignsToProduct
+    # so multi-surface files can disambiguate breakline ownership on
+    # rehydration (per the cleanup-2 review). The link is defensive: if
+    # the surface has no IFC host yet (test fixtures bypass author_ifc_host),
+    # we skip the host-link and the breakline is recovered as
+    # site-global.
+    host_surface = None
+    if surface.ifc_host_entity_id is not None:
+        host_surface = ifc_file.by_id(surface.ifc_host_entity_id)
     surface_tool.author_ifc_breakline(
-        ifc_file, breakline, grading_group_guid=grading_group_guid
+        ifc_file,
+        breakline,
+        grading_group_guid=grading_group_guid,
+        host_surface=host_surface,
     )
     surface.breaklines.append(breakline)
     surface_tool.retriangulate(surface)
