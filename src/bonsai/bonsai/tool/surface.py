@@ -37,12 +37,16 @@ UI calls into core which calls into tool.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Optional, Protocol
+from typing import TYPE_CHECKING, Literal, Optional, Protocol
 
+import ifcopenshell.api.surface
 import ifcopenshell.guid
 import numpy as np
 import scipy.spatial
 import shapely
+
+if TYPE_CHECKING:
+    import ifcopenshell
 
 
 @dataclass
@@ -653,4 +657,180 @@ class Surface:
             w = 1.0 - u - v
             if u >= -epsilon and v >= -epsilon and w >= -epsilon:
                 return float(u * a[2] + v * b[2] + w * c[2])
+        return None
+
+    @classmethod
+    def author_ifc_host(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        surface: CivilSurface,
+        site: Optional["ifcopenshell.entity_instance"] = None,
+        triangulation_tolerance: float = 0.0,
+    ) -> "ifcopenshell.entity_instance":
+        """Persist ``surface`` as the appropriate IFC host entity per :attr:`CivilSurface.kind`.
+
+        - ``existing`` → :func:`ifcopenshell.api.surface.create_terrain`
+          (``IfcGeographicElement[TERRAIN]``).
+        - ``proposed_group`` / ``proposed_site`` →
+          :func:`ifcopenshell.api.surface.create_proposed_surface`
+          (``IfcEarthworksFill[SUBGRADE]``). The two ``proposed_*`` kinds
+          differ only in their spatial parent (group vs site); commits 8 / 9
+          handle that wiring at the core layer.
+
+        After the API mints a fresh ``GlobalId``, this wrapper rewrites it to
+        match :attr:`CivilSurface.guid` so the in-memory dataclass and the IFC
+        entity carry the same identifier. Step ids of the host, the
+        :class:`IfcTriangulatedIrregularNetwork`, and the
+        :class:`IfcBoundingBox` representations are stamped onto the surface.
+
+        :param ifc_file: target IFC file (typically ``tool.Ifc.get()``).
+        :param surface: :class:`CivilSurface` to persist; ``points``,
+            ``triangles``, and ``triangle_flags`` must be populated.
+        :param site: optional explicit :class:`IfcSite` parent; defaults to the
+            file's first ``IfcSite`` (matches the Phase 1 API behavior).
+        :param triangulation_tolerance: forwarded to ``Pset_SaikeiGradingSurface``.
+        :returns: the created :class:`IfcGeographicElement` or :class:`IfcEarthworksFill`.
+        :raises SaikeiSurfaceError: if ``surface.kind`` is not one of the three
+            supported values.
+        """
+        breakline_count = len(surface.breaklines)
+        kwargs = {
+            "name": surface.name,
+            "points": surface.points,
+            "triangles": surface.triangles,
+            "triangle_flags": surface.triangle_flags,
+            "site": site,
+            "triangulation_tolerance": triangulation_tolerance,
+            "breakline_count": breakline_count,
+        }
+
+        if surface.kind == "existing":
+            host = ifcopenshell.api.surface.create_terrain(ifc_file, **kwargs)
+        elif surface.kind in ("proposed_group", "proposed_site"):
+            host = ifcopenshell.api.surface.create_proposed_surface(ifc_file, **kwargs)
+        else:
+            raise SaikeiSurfaceError(
+                f"unknown surface.kind {surface.kind!r}; expected existing, "
+                "proposed_group, or proposed_site"
+            )
+
+        host.GlobalId = surface.guid
+        surface.ifc_host_entity_id = host.id()
+        surface.ifc_tin_representation_id = cls._find_tin_id(host)
+        surface.ifc_bbox_representation_id = cls._find_bbox_id(host)
+        return host
+
+    @classmethod
+    def update_ifc_tin(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        surface: CivilSurface,
+    ) -> "ifcopenshell.entity_instance":
+        """Replace the host entity's existing SurfaceModel TIN with one freshly
+        built from ``surface.points``, ``surface.triangles``, and
+        ``surface.triangle_flags``.
+
+        Wraps :func:`ifcopenshell.api.surface.update_tin_representation`. The
+        old TIN and its CoordList are garbage-collected if no other entities
+        still reference them. The :class:`IfcShapeRepresentation` itself is
+        preserved so any inverse references survive.
+
+        :raises SaikeiSurfaceError: if ``surface.ifc_host_entity_id`` is unset
+            (call :meth:`author_ifc_host` first) or if the host entity has no
+            existing SurfaceModel representation.
+        """
+        if surface.ifc_host_entity_id is None:
+            raise SaikeiSurfaceError(
+                "surface has no IFC host entity; call author_ifc_host first"
+            )
+        host = ifc_file.by_id(surface.ifc_host_entity_id)
+        new_tin = ifcopenshell.api.surface.update_tin_representation(
+            ifc_file,
+            host,
+            points=surface.points,
+            triangles=surface.triangles,
+            triangle_flags=surface.triangle_flags,
+        )
+        surface.ifc_tin_representation_id = new_tin.id()
+        return new_tin
+
+    @classmethod
+    def author_ifc_breakline(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        breakline: Breakline,
+        site: Optional["ifcopenshell.entity_instance"] = None,
+        grading_group_guid: Optional[str] = None,
+    ) -> "ifcopenshell.entity_instance":
+        """Persist ``breakline`` as a separate :class:`IfcAnnotation` entity.
+
+        Breaklines live outside any TIN representation so they survive
+        retriangulation (the TIN's :attr:`triangle_flags` independently
+        encode breakline-edge membership). Wraps
+        :func:`ifcopenshell.api.surface.add_breakline_annotation`.
+
+        :param site: explicit :class:`IfcSite` parent; defaults to the file's
+            first ``IfcSite``. Must be supplied if no ``IfcSite`` exists yet.
+        :param grading_group_guid: optional GUID linking this breakline to a
+            grading group whose retriangulation it participates in.
+        :returns: the created :class:`IfcAnnotation`. Its ``GlobalId`` is
+            rewritten to match :attr:`Breakline.guid` and the step id is
+            stamped on :attr:`Breakline.ifc_annotation_id`.
+        :raises SaikeiSurfaceError: if ``site`` is ``None`` and no IfcSite
+            exists in the file.
+        """
+        target_site = cls._resolve_site(ifc_file, site)
+        annotation = ifcopenshell.api.surface.add_breakline_annotation(
+            ifc_file,
+            site=target_site,
+            polyline=breakline.polyline,
+            name=breakline.name,
+            kind=breakline.kind,
+            source=breakline.source,
+            grading_group_guid=grading_group_guid,
+        )
+        annotation.GlobalId = breakline.guid
+        breakline.ifc_annotation_id = annotation.id()
+        return annotation
+
+    @staticmethod
+    def _resolve_site(
+        ifc_file: "ifcopenshell.file",
+        site: Optional["ifcopenshell.entity_instance"],
+    ) -> "ifcopenshell.entity_instance":
+        if site is not None:
+            return site
+        sites = ifc_file.by_type("IfcSite")
+        if not sites:
+            raise SaikeiSurfaceError(
+                "no IfcSite present in project; pass site= explicitly or add an IfcSite first"
+            )
+        return sites[0]
+
+    @staticmethod
+    def _find_tin_id(host: "ifcopenshell.entity_instance") -> Optional[int]:
+        """Return the step id of the host's SurfaceModel
+        :class:`IfcTriangulatedIrregularNetwork`, or ``None`` if absent."""
+        representation = host.Representation
+        if representation is None:
+            return None
+        for shape_rep in representation.Representations or []:
+            if shape_rep.RepresentationIdentifier == "SurfaceModel":
+                for item in shape_rep.Items or []:
+                    if item.is_a("IfcTriangulatedIrregularNetwork"):
+                        return item.id()
+        return None
+
+    @staticmethod
+    def _find_bbox_id(host: "ifcopenshell.entity_instance") -> Optional[int]:
+        """Return the step id of the host's Box :class:`IfcBoundingBox`, or
+        ``None`` if absent."""
+        representation = host.Representation
+        if representation is None:
+            return None
+        for shape_rep in representation.Representations or []:
+            if shape_rep.RepresentationIdentifier == "Box":
+                for item in shape_rep.Items or []:
+                    if item.is_a("IfcBoundingBox"):
+                        return item.id()
         return None

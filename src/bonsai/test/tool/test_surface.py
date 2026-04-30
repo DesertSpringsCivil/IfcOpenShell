@@ -28,11 +28,38 @@ Run via the canonical Phase 4 invocation (PowerShell, from src/bonsai)::
       --blender-executable "C:\\Program Files\\Blender Foundation\\Blender_5\\blender.exe"
 """
 
+import ifcopenshell
+import ifcopenshell.api.unit
+import ifcopenshell.guid
 import numpy as np
 import pytest
 import shapely
 
 import bonsai.tool.surface as tool_surface
+
+
+def _make_ifc_file_with_site() -> ifcopenshell.file:
+    """Build a minimal IFC4X3 file with an IfcProject + IfcSite container.
+
+    Reused across the IFC-authoring test classes; matches the bootstrap
+    pattern in ``test/api/demo_surface.py``.
+    """
+    ifc_file = ifcopenshell.file(schema="IFC4X3_ADD2")
+    project = ifc_file.create_entity(
+        "IfcProject", GlobalId=ifcopenshell.guid.new(), Name="Test Project"
+    )
+    length = ifcopenshell.api.unit.add_si_unit(ifc_file, unit_type="LENGTHUNIT")
+    ifcopenshell.api.unit.assign_unit(ifc_file, units=[length])
+    site = ifc_file.create_entity(
+        "IfcSite", GlobalId=ifcopenshell.guid.new(), Name="Test Site"
+    )
+    ifc_file.create_entity(
+        "IfcRelAggregates",
+        GlobalId=ifcopenshell.guid.new(),
+        RelatingObject=project,
+        RelatedObjects=[site],
+    )
+    return ifc_file
 
 
 class TestBreakline:
@@ -795,3 +822,235 @@ class TestSurfaceTriangulatorAttribute:
             assert len(stub.unconstrained_called_with) == 1
         finally:
             tool_surface.Surface.triangulator = original
+
+
+class TestSurfaceAuthorIfcHost:
+    """Tests for :meth:`bonsai.tool.surface.Surface.author_ifc_host`."""
+
+    @staticmethod
+    def _surface(kind: str = "existing") -> tool_surface.CivilSurface:
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        return tool_surface.Surface.build_tin_from_points(
+            "Test Surface", points, kind=kind
+        )
+
+    def test_existing_creates_geographic_element(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        surface = self._surface("existing")
+        host = tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        assert host.is_a("IfcGeographicElement")
+        assert host.PredefinedType == "TERRAIN"
+        assert host.Name == "Test Surface"
+
+    def test_proposed_group_creates_earthworks_fill(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        surface = self._surface("proposed_group")
+        host = tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        assert host.is_a("IfcEarthworksFill")
+        assert host.PredefinedType == "SUBGRADE"
+
+    def test_proposed_site_creates_earthworks_fill(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        surface = self._surface("proposed_site")
+        host = tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        assert host.is_a("IfcEarthworksFill")
+        assert host.PredefinedType == "SUBGRADE"
+
+    def test_global_id_matches_surface_guid(self) -> None:
+        """The host entity's GlobalId is rewritten to the dataclass GUID."""
+        ifc_file = _make_ifc_file_with_site()
+        surface = self._surface()
+        host = tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        assert host.GlobalId == surface.guid
+
+    def test_stamps_host_id_on_surface(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        surface = self._surface()
+        host = tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        assert surface.ifc_host_entity_id == host.id()
+
+    def test_stamps_tin_id_on_surface(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        surface = self._surface()
+        tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        assert surface.ifc_tin_representation_id is not None
+        tin = ifc_file.by_id(surface.ifc_tin_representation_id)
+        assert tin.is_a("IfcTriangulatedIrregularNetwork")
+
+    def test_stamps_bbox_id_on_surface(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        surface = self._surface()
+        tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        assert surface.ifc_bbox_representation_id is not None
+        bbox = ifc_file.by_id(surface.ifc_bbox_representation_id)
+        assert bbox.is_a("IfcBoundingBox")
+
+    def test_unknown_kind_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        # Construct a surface with an invalid kind, bypassing the type-checked
+        # build_tin_from_points entry point.
+        surface = self._surface()
+        surface.kind = "nonsense"  # type: ignore[assignment]
+        with pytest.raises(
+            tool_surface.SaikeiSurfaceError, match="unknown surface.kind"
+        ):
+            tool_surface.Surface.author_ifc_host(ifc_file, surface)
+
+    def test_explicit_site_argument(self) -> None:
+        """When an explicit site is supplied, it is used regardless of file order."""
+        ifc_file = _make_ifc_file_with_site()
+        # Add a second site; pass the first one explicitly.
+        site_a = ifc_file.by_type("IfcSite")[0]
+        ifc_file.create_entity(
+            "IfcSite", GlobalId=ifcopenshell.guid.new(), Name="Site B"
+        )
+        surface = self._surface()
+        host = tool_surface.Surface.author_ifc_host(ifc_file, surface, site=site_a)
+        # Containment: the host should be related to site_a via
+        # IfcRelContainedInSpatialStructure.
+        contained_in = [
+            rel
+            for rel in ifc_file.by_type("IfcRelContainedInSpatialStructure")
+            if host in (rel.RelatedElements or [])
+        ]
+        assert len(contained_in) == 1
+        assert contained_in[0].RelatingStructure == site_a
+
+    def test_breakline_count_passed_to_pset(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        surface = self._surface()
+        surface.breaklines.append(
+            tool_surface.Breakline(
+                guid=ifcopenshell.guid.new(),
+                name="bl",
+                polyline=[(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)],
+                kind="standard",
+                source="manual",
+            )
+        )
+        host = tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        # Find the Pset_SaikeiGradingSurface and verify BreaklineCount.
+        psets_via_rels = []
+        for rel in ifc_file.by_type("IfcRelDefinesByProperties"):
+            if host in (rel.RelatedObjects or []):
+                psets_via_rels.append(rel.RelatingPropertyDefinition)
+        saikei_pset = next(
+            (p for p in psets_via_rels if p.Name == "Pset_SaikeiGradingSurface"),
+            None,
+        )
+        assert saikei_pset is not None
+        breakline_count = next(
+            (
+                p.NominalValue.wrappedValue
+                for p in saikei_pset.HasProperties
+                if p.Name == "BreaklineCount"
+            ),
+            None,
+        )
+        assert breakline_count == 1
+
+
+class TestSurfaceUpdateIfcTin:
+    """Tests for :meth:`bonsai.tool.surface.Surface.update_ifc_tin`."""
+
+    def test_no_host_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        surface = tool_surface.Surface.build_tin_from_points("orphan", points)
+        with pytest.raises(
+            tool_surface.SaikeiSurfaceError, match="no IFC host entity"
+        ):
+            tool_surface.Surface.update_ifc_tin(ifc_file, surface)
+
+    def test_replaces_old_tin(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        surface = tool_surface.Surface.build_tin_from_points("update target", points)
+        tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        old_tin_id = surface.ifc_tin_representation_id
+        # Add a new vertex and retriangulate.
+        surface.points = np.vstack([surface.points, [[0.5, 0.5, 1.0]]])
+        tool_surface.Surface.retriangulate(surface)
+        new_tin = tool_surface.Surface.update_ifc_tin(ifc_file, surface)
+        assert new_tin.id() != old_tin_id
+        assert surface.ifc_tin_representation_id == new_tin.id()
+        # Old TIN should be garbage-collected (no other refs to it).
+        tins = ifc_file.by_type("IfcTriangulatedIrregularNetwork")
+        assert len(tins) == 1
+        assert tins[0].id() == new_tin.id()
+
+
+class TestSurfaceAuthorIfcBreakline:
+    """Tests for :meth:`bonsai.tool.surface.Surface.author_ifc_breakline`."""
+
+    @staticmethod
+    def _breakline() -> tool_surface.Breakline:
+        return tool_surface.Breakline(
+            guid=ifcopenshell.guid.new(),
+            name="centerline",
+            polyline=[(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (10.0, 10.0, 0.0)],
+            kind="standard",
+            source="manual",
+        )
+
+    def test_creates_annotation(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        breakline = self._breakline()
+        annotation = tool_surface.Surface.author_ifc_breakline(ifc_file, breakline)
+        assert annotation.is_a("IfcAnnotation")
+        assert annotation.Name == "centerline"
+        assert annotation.ObjectType == "BREAKLINE"
+
+    def test_global_id_matches_breakline_guid(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        breakline = self._breakline()
+        annotation = tool_surface.Surface.author_ifc_breakline(ifc_file, breakline)
+        assert annotation.GlobalId == breakline.guid
+
+    def test_stamps_step_id_on_breakline(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        breakline = self._breakline()
+        annotation = tool_surface.Surface.author_ifc_breakline(ifc_file, breakline)
+        assert breakline.ifc_annotation_id == annotation.id()
+
+    def test_no_site_in_file_raises(self) -> None:
+        ifc_file = ifcopenshell.file(schema="IFC4X3_ADD2")
+        ifc_file.create_entity(
+            "IfcProject", GlobalId=ifcopenshell.guid.new(), Name="No Site"
+        )
+        with pytest.raises(
+            tool_surface.SaikeiSurfaceError, match="no IfcSite"
+        ):
+            tool_surface.Surface.author_ifc_breakline(ifc_file, self._breakline())
+
+    def test_grading_group_guid_passed_through(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        breakline = self._breakline()
+        group_guid = ifcopenshell.guid.new()
+        annotation = tool_surface.Surface.author_ifc_breakline(
+            ifc_file, breakline, grading_group_guid=group_guid
+        )
+        # Find Pset_SaikeiBreaklineCommon and check GradingGroupGuid.
+        psets = []
+        for rel in ifc_file.by_type("IfcRelDefinesByProperties"):
+            if annotation in (rel.RelatedObjects or []):
+                psets.append(rel.RelatingPropertyDefinition)
+        breakline_pset = next(
+            (p for p in psets if p.Name == "Pset_SaikeiBreaklineCommon"), None
+        )
+        assert breakline_pset is not None
+        stored_guid = next(
+            (
+                p.NominalValue.wrappedValue
+                for p in breakline_pset.HasProperties
+                if p.Name == "GradingGroupGuid"
+            ),
+            None,
+        )
+        assert stored_guid == group_guid
