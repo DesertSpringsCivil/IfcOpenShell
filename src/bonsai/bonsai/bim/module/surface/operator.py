@@ -325,7 +325,10 @@ class CIVIL_OT_surface_add_breakline(Operator, tool.Ifc.Operator):
     bl_label = "Add Breakline to Surface"
     bl_description = (
         "Append a breakline polyline to the active surface, persist as "
-        "IfcAnnotation, and retriangulate the TIN to honor the new edge"
+        "IfcAnnotation, and retriangulate the TIN to honor the new edge. "
+        "Phase 4 limitation: the polyline must fully cross the outer "
+        "boundary — internal-only ridges (start and end inside the surface) "
+        "are silently dropped by the constrained Delaunay backend"
     )
     bl_options = {"REGISTER", "UNDO"}
 

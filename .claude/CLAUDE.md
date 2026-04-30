@@ -88,22 +88,27 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/core/test_alignment.py -o
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/core/test_surface.py -o "addopts=" -v
 
 # Tool tests — requires Blender headless (pytest-blender)
-# Phase 4 canonical invocation (use space-separated --blender-executable, NOT =-joined):
+# Canonical invocation: space-separated --blender-executable, NOT =-joined.
+# pytest-blender's plugin.py:105 strips its own flags only when they appear as
+# separate tokens; the =-joined form falls through to the inner pytest as a
+# positional arg and breaks collection. Always use space-separated form.
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_alignment.py \
-  -o "addopts=" -p pytest-blender \
+  -o "addopts=" -p pytest-blender -v \
   --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
 
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_surface.py \
-  -o "addopts=" -p pytest-blender \
+  -o "addopts=" -p pytest-blender -v \
   --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
 
 # Operator tests — requires Blender headless (pytest-blender)
-python -m pytest test/bim/module/alignment/test_alignment_operators.py -m "alignment" -v \
-  --blender-executable="/c/Program Files/Blender Foundation/Blender_5/blender.exe"
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/bim/module/alignment/test_alignment_operators.py \
+  -o "addopts=" -p pytest-blender -m "alignment" -v \
+  --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
 
 # All alignment tests at once (tool + operator, in Blender headless)
-python -m pytest test/tool/test_alignment.py test/bim/module/alignment/ -m "alignment or not alignment" -v \
-  --blender-executable="/c/Program Files/Blender Foundation/Blender_5/blender.exe"
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_alignment.py test/bim/module/alignment/ \
+  -o "addopts=" -p pytest-blender -m "alignment or not alignment" -v \
+  --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
 ```
 
 **Phase 4 surface module note:** the tool tests at `test/tool/test_surface.py`
@@ -132,14 +137,16 @@ extensions site-packages (`%APPDATA%\Blender Foundation\Blender\5.0\extensions\.
 - Horizontal alignment (PI method), segment visualization, PI picker, PI edit
   mode (G key), georef, CSV import, stationing, Add Element dialog integration.
 - **Phase 4 — Bonsai surface module:** `tool.Surface` math layer (TIN
-  construction, retriangulation, Z-at-XY interpolation, IFC authoring
-  via `ifcopenshell.api.surface`, Blender mesh linkage), `core.surface`
-  orchestration (`create_surface_from_points`, `add_breakline_to_surface`,
+  construction, retriangulation, STRtree-accelerated Z-at-XY
+  interpolation, IFC authoring via `ifcopenshell.api.surface`, Blender
+  mesh linkage), `core.surface` orchestration
+  (`create_surface_from_points`, `add_breakline_to_surface`,
   `set_outer_boundary`, `retriangulate_surface`), UI (operators
   `CIVIL_OT_surface_{create_from_points,add_breakline,set_boundary,
   retriangulate}`, panel `BIM_PT_tab_surface_modeler` with four
-  sub-panels, `SurfaceDecorator` GPU drawing, registry / lazy
-  rehydration). 134 surface tests + bSI validator integration green.
+  sub-panels, `SurfaceDecorator` GPU drawing, registry with breakline
+  recovery from IfcAnnotation on rehydration). 149 surface tests
+  (132 tool + 17 core) + bSI validator integration green.
 
 **Not done:** Vertical alignment, corridor generation, cross-sections,
 earthwork (volumes), drainage.
