@@ -308,3 +308,30 @@ class TestSetOuterBoundary:
             ifc, surface, surface_guid="g", boundary_polygon=polygon
         )
         assert fake_surface.outer_boundary is polygon
+
+
+# ---------------------------------------------------------------------------
+# retriangulate_surface
+# ---------------------------------------------------------------------------
+
+
+class TestRetriangulateSurface:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, surface):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.retriangulate_surface(ifc, surface, surface_guid="g")
+
+    def test_happy_path_calls_tool_methods_in_order(self, ifc, surface):
+        """get → retriangulate → update_ifc_tin."""
+        fake_file = FakeIfcFile()
+        fake_surface = FakeCivilSurface()
+
+        ifc.get().should_be_called().will_return(fake_file)
+        surface.get(fake_file, "guid-R").should_be_called().will_return(fake_surface)
+        surface.retriangulate(fake_surface).should_be_called()
+        surface.update_ifc_tin(fake_file, fake_surface).should_be_called()
+
+        result = subject.retriangulate_surface(
+            ifc, surface, surface_guid="guid-R"
+        )
+        assert result is fake_surface

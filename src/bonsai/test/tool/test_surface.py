@@ -1533,3 +1533,108 @@ class TestSurfaceAddBreaklineOperator(NewIfc4X3):
                         if prop.Name == "Kind":
                             kind_value = prop.NominalValue.wrappedValue
         assert kind_value == "wall"
+
+
+class TestSurfaceSetBoundaryAndRetriangulateOperators(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_surface_set_boundary` and
+    :class:`CIVIL_OT_surface_retriangulate`."""
+
+    def _create_active_surface(self, tmp_path) -> str:
+        """Create a 3x3 grid surface so set_boundary can clip to a sub-grid
+        without introducing Steiner points (the Phase 4 CDT limitation).
+        Vertices live at every (x, y) in {0, 5, 10}."""
+        points_path = tmp_path / "grid.csv"
+        rows = []
+        for y in (0, 5, 10):
+            for x in (0, 5, 10):
+                rows.append(f"{x},{y},0")
+        points_path.write_text("\n".join(rows) + "\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        return bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+    def test_set_boundary_headless(self, tmp_path) -> None:
+        guid = self._create_active_surface(tmp_path)
+
+        # Quarter-square boundary using existing grid vertices: (5,5), (10,5),
+        # (10,10), (5,10). Area = 25.
+        boundary_path = tmp_path / "boundary.csv"
+        boundary_path.write_text("5,5,0\n10,5,0\n10,10,0\n5,10,0\n")
+
+        result = bpy.ops.civil.surface_set_boundary(
+            "EXEC_DEFAULT", csv_filepath=str(boundary_path)
+        )
+        assert result == {"FINISHED"}
+
+        surface = tool.Surface.get(tool.Ifc.get(), guid)
+        assert isinstance(surface.outer_boundary, shapely.Polygon)
+        assert surface.outer_boundary.area == pytest.approx(25.0)
+        assert len(surface.triangles) > 0
+
+    def test_set_boundary_too_few_vertices_raises(self, tmp_path) -> None:
+        self._create_active_surface(tmp_path)
+        boundary_path = tmp_path / "ring.csv"
+        boundary_path.write_text("0,0,0\n10,0,0\n")  # only 2 vertices
+        with pytest.raises(RuntimeError, match=r"≥\s*3 vertices"):
+            bpy.ops.civil.surface_set_boundary(
+                "EXEC_DEFAULT", csv_filepath=str(boundary_path)
+            )
+
+    def test_set_boundary_no_active_surface_raises(self, tmp_path) -> None:
+        boundary_path = tmp_path / "ring.csv"
+        boundary_path.write_text("0,0,0\n10,0,0\n10,10,0\n0,10,0\n")
+        bpy.context.scene.CivilSurfaceProperties.active_surface_guid = ""
+        with pytest.raises(RuntimeError, match="No active surface"):
+            bpy.ops.civil.surface_set_boundary(
+                "EXEC_DEFAULT", csv_filepath=str(boundary_path)
+            )
+
+    def test_retriangulate_headless(self, tmp_path) -> None:
+        guid = self._create_active_surface(tmp_path)
+        before_tin_id = tool.Surface.get(
+            tool.Ifc.get(), guid
+        ).ifc_tin_representation_id
+        result = bpy.ops.civil.surface_retriangulate("EXEC_DEFAULT")
+        assert result == {"FINISHED"}
+        # After force-rebuild the TIN id should be different (new entity in IFC).
+        after_tin_id = tool.Surface.get(
+            tool.Ifc.get(), guid
+        ).ifc_tin_representation_id
+        assert after_tin_id != before_tin_id
+
+    def test_retriangulate_no_active_surface_raises(self) -> None:
+        bpy.context.scene.CivilSurfaceProperties.active_surface_guid = ""
+        with pytest.raises(RuntimeError, match="No active surface"):
+            bpy.ops.civil.surface_retriangulate("EXEC_DEFAULT")
+
+    def test_disk_round_trip_preserves_surface(self, tmp_path) -> None:
+        """End-to-end: create + set_boundary → write IFC → reopen → assert."""
+        import ifcopenshell
+
+        self._create_active_surface(tmp_path)
+        # Quarter boundary that hits existing grid vertices (no Steiner points).
+        boundary_path = tmp_path / "boundary.csv"
+        boundary_path.write_text("5,5,0\n10,5,0\n10,10,0\n5,10,0\n")
+        bpy.ops.civil.surface_set_boundary(
+            "EXEC_DEFAULT", csv_filepath=str(boundary_path)
+        )
+
+        # Write to disk.
+        ifc_path = tmp_path / "round_trip.ifc"
+        tool.Ifc.get().write(str(ifc_path))
+
+        # Reopen as a fresh ifcopenshell.file (not via Bonsai's project).
+        reopened = ifcopenshell.open(str(ifc_path))
+        terrains = reopened.by_type("IfcGeographicElement")
+        assert len(terrains) == 1
+        terrain = terrains[0]
+        assert terrain.PredefinedType == "TERRAIN"
+
+        # Find the persisted TIN.
+        tins = reopened.by_type("IfcTriangulatedIrregularNetwork")
+        assert len(tins) == 1
+        tin = tins[0]
+        assert tin.Closed is False
+        assert len(tin.CoordIndex) > 0
+        assert len(tin.Flags) == len(tin.CoordIndex)

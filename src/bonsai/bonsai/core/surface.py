@@ -230,3 +230,28 @@ def set_outer_boundary(
     surface_tool.retriangulate(surface)
     surface_tool.update_ifc_tin(ifc_file, surface)
     return surface
+
+
+def retriangulate_surface(
+    ifc_tool: "type[tool.Ifc]",
+    surface_tool: "type[tool.Surface]",
+    surface_guid: str,
+) -> Any:
+    """Force rebuild the active surface's TIN without changing inputs.
+
+    Useful when the surface's authoring polygons or breaklines were mutated
+    out-of-band (e.g., a hole polygon was edited via the Properties panel
+    without going through :func:`set_outer_boundary`). Rare in normal use —
+    the edit-flow orchestrators (:func:`add_breakline_to_surface`,
+    :func:`set_outer_boundary`) already retriangulate.
+
+    :raises ValueError: if no IFC file is loaded.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    surface = surface_tool.get(ifc_file, surface_guid)
+    surface_tool.retriangulate(surface)
+    surface_tool.update_ifc_tin(ifc_file, surface)
+    return surface

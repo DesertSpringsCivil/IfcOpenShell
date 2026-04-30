@@ -35,6 +35,7 @@ Each operator follows the Bonsai standard pattern:
 
 import bpy
 import ifcopenshell.guid
+import shapely
 from bpy.props import EnumProperty, StringProperty
 from bpy.types import Operator
 
@@ -137,6 +138,160 @@ class CIVIL_OT_surface_create_from_points(Operator, tool.Ifc.Operator):
     def invoke(self, context, event):
         # If the user already populated csv_filepath (e.g., via a property
         # bound on the panel), skip the file dialog and execute directly.
+        if self.csv_filepath:
+            return self.execute(context)
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+
+class CIVIL_OT_surface_retriangulate(Operator, tool.Ifc.Operator):
+    """Force-rebuild the active surface's TIN.
+
+    Headless-only ([H] per spec §8.6) — exposed in the panel as a small
+    "rebuild" button for cases where authoring polygons were edited
+    out-of-band. Most edit flows (set_boundary, add_breakline) already
+    retriangulate automatically.
+
+    Headless usage::
+
+        bpy.ops.civil.surface_retriangulate("EXEC_DEFAULT")
+    """
+
+    bl_idname = "civil.surface_retriangulate"
+    bl_label = "Retriangulate Active Surface"
+    bl_description = (
+        "Force a constrained-Delaunay rebuild of the active surface's TIN. "
+        "Rarely needed manually — boundary / breakline edits already retriangulate"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    def _execute(self, context):
+        props = context.scene.CivilSurfaceProperties
+        if not props.active_surface_guid:
+            self.report(
+                {"ERROR"},
+                "No active surface — select one in the panel UIList first",
+            )
+            return {"CANCELLED"}
+
+        try:
+            surface = core_surface.retriangulate_surface(
+                tool.Ifc, tool.Surface, surface_guid=props.active_surface_guid
+            )
+        except (ValueError, tool_surface.SaikeiSurfaceError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        try:
+            tool.Surface.update_blender_mesh(tool.Ifc.get(), surface)
+        except tool_surface.SaikeiSurfaceError as exc:
+            self.report({"WARNING"}, f"Blender mesh refresh failed: {exc}")
+
+        self.report(
+            {"INFO"},
+            f"Retriangulated {surface.name} → {len(surface.triangles)} triangles",
+        )
+        return {"FINISHED"}
+
+
+class CIVIL_OT_surface_set_boundary(Operator, tool.Ifc.Operator):
+    """Replace the active surface's outer-boundary polygon.
+
+    Modal entry per spec §8.5: ``invoke()`` opens a file selector for a
+    polygon-ring CSV/XYZ file (≥ 3 rows of x,y,z; Z is ignored — the
+    polygon is XY only). The interactive viewport-pick polygon flow is a
+    Phase 4.1+ refinement.
+
+    The CSV may be open (last point ≠ first point) — :class:`shapely.Polygon`
+    closes the ring automatically.
+
+    Headless usage::
+
+        bpy.ops.civil.surface_set_boundary(
+            "EXEC_DEFAULT", csv_filepath="/path/to/ring.csv"
+        )
+    """
+
+    bl_idname = "civil.surface_set_boundary"
+    bl_label = "Set Outer Boundary"
+    bl_description = (
+        "Replace the active surface's outer-boundary polygon and "
+        "retriangulate. Polygon ring loaded from a CSV / XYZ file."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    csv_filepath: StringProperty(
+        name="Boundary CSV / XYZ",
+        description="Path to a CSV / whitespace-separated XYZ file describing "
+        "the polygon ring (≥ 3 rows of x,y,z; Z is ignored)",
+        subtype="FILE_PATH",
+    )
+    filter_glob: StringProperty(
+        default="*.csv;*.txt;*.xyz",
+        options={"HIDDEN"},
+    )
+
+    def _execute(self, context):
+        props = context.scene.CivilSurfaceProperties
+        if not props.active_surface_guid:
+            self.report(
+                {"ERROR"},
+                "No active surface — select one in the panel UIList first",
+            )
+            return {"CANCELLED"}
+
+        try:
+            ring_points = tool.Surface.load_points_from_csv(self.csv_filepath)
+        except tool_surface.SaikeiSurfaceError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        if ring_points.shape[0] < 3:
+            self.report(
+                {"ERROR"},
+                f"boundary polygon needs ≥ 3 vertices; got {ring_points.shape[0]}",
+            )
+            return {"CANCELLED"}
+
+        try:
+            polygon = shapely.Polygon(
+                [(float(p[0]), float(p[1])) for p in ring_points]
+            )
+        except (ValueError, shapely.errors.GEOSException) as exc:
+            self.report({"ERROR"}, f"could not build polygon from ring: {exc}")
+            return {"CANCELLED"}
+
+        if not polygon.is_valid:
+            self.report(
+                {"ERROR"},
+                f"polygon is not topologically valid: "
+                f"{shapely.is_valid_reason(polygon)}",
+            )
+            return {"CANCELLED"}
+
+        try:
+            surface = core_surface.set_outer_boundary(
+                tool.Ifc,
+                tool.Surface,
+                surface_guid=props.active_surface_guid,
+                boundary_polygon=polygon,
+            )
+        except (ValueError, tool_surface.SaikeiSurfaceError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        try:
+            tool.Surface.update_blender_mesh(tool.Ifc.get(), surface)
+        except tool_surface.SaikeiSurfaceError as exc:
+            self.report({"WARNING"}, f"Blender mesh refresh failed: {exc}")
+
+        self.report(
+            {"INFO"},
+            f"Set boundary on {surface.name} → {len(surface.triangles)} triangles",
+        )
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
         if self.csv_filepath:
             return self.execute(context)
         context.window_manager.fileselect_add(self)

@@ -39,6 +39,8 @@ classes: tuple[type, ...] = (
     prop.CIVIL_UL_surfaces,
     prop.CivilSurfaceProperties,
     operator.CIVIL_OT_surface_create_from_points,
+    operator.CIVIL_OT_surface_retriangulate,
+    operator.CIVIL_OT_surface_set_boundary,
     operator.CIVIL_OT_surface_add_breakline,
 )
 
