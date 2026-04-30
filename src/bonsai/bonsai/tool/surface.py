@@ -683,17 +683,15 @@ class Surface:
 
         .. note::
 
-            **proposed_group / proposed_site round-trip ambiguity.** Both
-            ``proposed_group`` and ``proposed_site`` host as
-            ``IfcEarthworksFill[SUBGRADE]`` (per spec §2.2 host-entity table)
-            with identical IFC structure — the distinction is only meaningful
-            at the Bonsai authoring layer (where it determines spatial parent:
-            grading group vs site). On read-back this method always returns
-            ``kind="proposed_group"``; callers in the core layer must not
-            branch on ``surface.kind == "proposed_site"`` for any
-            schema-consequential decision after a rehydration path. The
-            authored-then-cached path (via :meth:`register`) preserves the
-            original kind verbatim.
+            **proposed_group / proposed_site disambiguation on read-back.**
+            Both kinds host as ``IfcEarthworksFill[SUBGRADE]`` with identical
+            entity structure (per spec §2.2). To disambiguate on rehydration,
+            this method calls :meth:`infer_kind_from_spatial_parent` which
+            checks for an ``IfcRelAssignsToGroup`` relationship whose
+            ``RelatingGroup.ObjectType == "GradingGroup"``. Phase 4 files (no
+            grading groups exist yet) always read back as
+            ``"proposed_site"``; once Phase 5 authors grading groups, the
+            same helper classifies pre-existing fills correctly.
         """
         host = next(
             (e for e in ifc_file.by_type("IfcRoot") if e.GlobalId == guid),
@@ -708,7 +706,7 @@ class Surface:
         if host.is_a("IfcGeographicElement") and predefined_type == "TERRAIN":
             kind = "existing"
         elif host.is_a("IfcEarthworksFill") and predefined_type == "SUBGRADE":
-            kind = "proposed_group"
+            kind = cls.infer_kind_from_spatial_parent(host)
         else:
             raise SaikeiSurfaceError(
                 f"entity {host.is_a()} is not a Saikei surface host "
@@ -744,6 +742,38 @@ class Surface:
             ifc_tin_representation_id=tin_id,
             ifc_bbox_representation_id=cls._find_bbox_id(host),
         )
+
+    @staticmethod
+    def infer_kind_from_spatial_parent(
+        host: "ifcopenshell.entity_instance",
+    ) -> Literal["proposed_group", "proposed_site"]:
+        """Determine whether an :class:`IfcEarthworksFill` belongs to a
+        grading group or sits at the site composite root.
+
+        Walks the host's ``HasAssignments`` inverse looking for
+        :class:`IfcRelAssignsToGroup` whose ``RelatingGroup`` carries
+        ``ObjectType="GradingGroup"`` (the convention Phase 5 will adopt
+        when authoring grading groups per spec §6.3). Returns
+        ``"proposed_group"`` if found, ``"proposed_site"`` otherwise.
+
+        For Phase 4 files (no grading groups exist yet), this always
+        returns ``"proposed_site"``. Once Phase 5 authors
+        ``IfcGroup[GradingGroup]`` + ``IfcRelAssignsToGroup`` relations,
+        the same helper correctly classifies pre-existing fills without
+        a code change.
+
+        Phase 4 author-time path: :meth:`author_ifc_host` accepts the
+        caller-supplied ``surface.kind`` directly and doesn't go through
+        this inference. This helper is for the rehydration path only,
+        where the in-memory dataclass kind has been lost.
+        """
+        for rel in getattr(host, "HasAssignments", None) or []:
+            if not rel.is_a("IfcRelAssignsToGroup"):
+                continue
+            group = rel.RelatingGroup
+            if group is not None and getattr(group, "ObjectType", None) == "GradingGroup":
+                return "proposed_group"
+        return "proposed_site"
 
     @staticmethod
     def _recover_breaklines_from_annotations(

@@ -1283,6 +1283,117 @@ class TestSurfaceRegistry:
             (1.0, 1.0, 0.0),
         ]
 
+    def test_rehydrate_proposed_fill_without_group_is_proposed_site(self) -> None:
+        """Per :meth:`infer_kind_from_spatial_parent`: an
+        ``IfcEarthworksFill[SUBGRADE]`` not assigned to any
+        ``IfcGroup[GradingGroup]`` round-trips as ``"proposed_site"`` (the
+        composite-site kind). Phase 4 files never author grading groups,
+        so all proposed surfaces should rehydrate as proposed_site."""
+        ifc_file = _make_ifc_file_with_site()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        surface = tool_surface.Surface.build_tin_from_points(
+            "P", points, kind="proposed_site"
+        )
+        tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        tool_surface.Surface.clear()
+
+        rehydrated = tool_surface.Surface.get(ifc_file, surface.guid)
+        assert rehydrated.kind == "proposed_site"
+
+    def test_rehydrate_proposed_fill_with_grading_group_is_proposed_group(
+        self,
+    ) -> None:
+        """When the proposed fill is assigned to an ``IfcGroup`` whose
+        ``ObjectType == "GradingGroup"``, rehydration classifies it as
+        ``"proposed_group"``. This is the Phase 5 case — pre-wired into
+        Phase 4 so grading-group rehydration just works."""
+        ifc_file = _make_ifc_file_with_site()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        surface = tool_surface.Surface.build_tin_from_points(
+            "PG", points, kind="proposed_group"
+        )
+        host = tool_surface.Surface.author_ifc_host(ifc_file, surface)
+
+        # Author a fake IfcGroup[GradingGroup] and assign the host to it
+        # (Phase 5 will own this code path; here we just exercise the
+        # disambiguation helper).
+        group = ifc_file.create_entity(
+            "IfcGroup",
+            GlobalId=ifcopenshell.guid.new(),
+            Name="Test Grading Group",
+            ObjectType="GradingGroup",
+        )
+        ifc_file.create_entity(
+            "IfcRelAssignsToGroup",
+            GlobalId=ifcopenshell.guid.new(),
+            RelatingGroup=group,
+            RelatedObjects=[host],
+        )
+
+        tool_surface.Surface.clear()
+        rehydrated = tool_surface.Surface.get(ifc_file, surface.guid)
+        assert rehydrated.kind == "proposed_group"
+
+    def test_infer_kind_helper_directly(self) -> None:
+        """Smoke-test :meth:`Surface.infer_kind_from_spatial_parent`
+        without going through rehydration."""
+        ifc_file = _make_ifc_file_with_site()
+        # No-group fill → proposed_site.
+        host = ifc_file.create_entity(
+            "IfcEarthworksFill",
+            GlobalId=ifcopenshell.guid.new(),
+            Name="Bare Fill",
+            PredefinedType="SUBGRADE",
+        )
+        assert (
+            tool_surface.Surface.infer_kind_from_spatial_parent(host)
+            == "proposed_site"
+        )
+
+        # Same host assigned to a grading group → proposed_group.
+        group = ifc_file.create_entity(
+            "IfcGroup",
+            GlobalId=ifcopenshell.guid.new(),
+            ObjectType="GradingGroup",
+        )
+        ifc_file.create_entity(
+            "IfcRelAssignsToGroup",
+            GlobalId=ifcopenshell.guid.new(),
+            RelatingGroup=group,
+            RelatedObjects=[host],
+        )
+        assert (
+            tool_surface.Surface.infer_kind_from_spatial_parent(host)
+            == "proposed_group"
+        )
+
+        # A group whose ObjectType is something else (e.g., a clash group)
+        # should NOT be classified as proposed_group.
+        other_host = ifc_file.create_entity(
+            "IfcEarthworksFill",
+            GlobalId=ifcopenshell.guid.new(),
+            PredefinedType="SUBGRADE",
+        )
+        unrelated_group = ifc_file.create_entity(
+            "IfcGroup",
+            GlobalId=ifcopenshell.guid.new(),
+            ObjectType="ClashGroup",
+        )
+        ifc_file.create_entity(
+            "IfcRelAssignsToGroup",
+            GlobalId=ifcopenshell.guid.new(),
+            RelatingGroup=unrelated_group,
+            RelatedObjects=[other_host],
+        )
+        assert (
+            tool_surface.Surface.infer_kind_from_spatial_parent(other_host)
+            == "proposed_site"
+        )
+
     def test_rehydrate_no_breaklines_in_file_returns_empty_list(self) -> None:
         """When the file has no IfcAnnotation[BREAKLINE], rehydration
         produces a CivilSurface with empty breaklines (the common case)."""
