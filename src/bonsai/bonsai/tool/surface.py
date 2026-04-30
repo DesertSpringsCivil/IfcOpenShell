@@ -39,11 +39,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Optional, Protocol
 
+import bpy
 import ifcopenshell.api.surface
 import ifcopenshell.guid
 import numpy as np
 import scipy.spatial
 import shapely
+
+import bonsai.tool as tool
 
 if TYPE_CHECKING:
     import ifcopenshell
@@ -489,6 +492,119 @@ class Surface:
     stub before exercising :meth:`build_tin_from_points` /
     :meth:`retriangulate`, then restore the default in teardown."""
 
+    _registry: dict[tuple[int, str], "CivilSurface"] = {}
+    """Per spec §4.6: lazy-rehydrating cache keyed by ``(id(ifc_file), guid)``.
+    IFC is the source of truth; this cache avoids re-reading the IFC entity on
+    every :meth:`get` call. Multi-file safety comes from ``id(ifc_file)`` in
+    the key. Headless tests call :meth:`clear` in teardown."""
+
+    @classmethod
+    def register(
+        cls, ifc_file: "ifcopenshell.file", surface: CivilSurface
+    ) -> None:
+        """Add ``surface`` to the registry under ``(id(ifc_file), surface.guid)``.
+
+        Called by core orchestration after :meth:`author_ifc_host` so the
+        in-memory dataclass is reused on subsequent :meth:`get` calls without
+        a round-trip through :meth:`_rehydrate_from_ifc`.
+        """
+        cls._registry[(id(ifc_file), surface.guid)] = surface
+
+    @classmethod
+    def get(
+        cls, ifc_file: "ifcopenshell.file", guid: str
+    ) -> CivilSurface:
+        """Return the cached :class:`CivilSurface` for ``guid``, rehydrating
+        from IFC on cache miss.
+
+        :raises SaikeiSurfaceError: if ``guid`` doesn't resolve to an entity in
+            ``ifc_file``, or the entity isn't one of the supported host types
+            (``IfcGeographicElement[TERRAIN]``, ``IfcEarthworksFill[SUBGRADE]``).
+        """
+        key = (id(ifc_file), guid)
+        if key not in cls._registry:
+            cls._registry[key] = cls._rehydrate_from_ifc(ifc_file, guid)
+        return cls._registry[key]
+
+    @classmethod
+    def invalidate(
+        cls, ifc_file: "ifcopenshell.file", guid: str
+    ) -> None:
+        """Drop the cache entry for ``guid`` so the next :meth:`get` rehydrates
+        from IFC. Called by edit operations after committing IFC writes."""
+        cls._registry.pop((id(ifc_file), guid), None)
+
+    @classmethod
+    def clear(cls) -> None:
+        """Wipe the entire registry. Headless test teardown calls this to
+        prevent cross-test contamination."""
+        cls._registry.clear()
+
+    @classmethod
+    def _rehydrate_from_ifc(
+        cls, ifc_file: "ifcopenshell.file", guid: str
+    ) -> CivilSurface:
+        """Reconstruct a :class:`CivilSurface` from the IFC entity identified
+        by ``guid``.
+
+        Reads the host's SurfaceModel :class:`IfcTriangulatedIrregularNetwork`
+        for ``points`` (from ``Coordinates.CoordList``), ``triangles`` (from
+        ``CoordIndex`` minus 1 to convert IFC's 1-based to 0-based), and
+        ``triangle_flags``. The ``outer_boundary`` defaults to the convex hull
+        of the points (per spec §6.4) since IFC stores per-triangle flags, not
+        the authoring polygons. ``breaklines``, ``holes``, and ``voids`` start
+        empty — recovery from annotation set + flags is approximate and
+        deferred to a later phase.
+        """
+        host = next(
+            (e for e in ifc_file.by_type("IfcRoot") if e.GlobalId == guid),
+            None,
+        )
+        if host is None:
+            raise SaikeiSurfaceError(
+                f"no IFC entity with GlobalId {guid!r} in this file"
+            )
+
+        predefined_type = getattr(host, "PredefinedType", None)
+        if host.is_a("IfcGeographicElement") and predefined_type == "TERRAIN":
+            kind = "existing"
+        elif host.is_a("IfcEarthworksFill") and predefined_type == "SUBGRADE":
+            kind = "proposed_group"
+        else:
+            raise SaikeiSurfaceError(
+                f"entity {host.is_a()} is not a Saikei surface host "
+                "(expected IfcGeographicElement[TERRAIN] or "
+                "IfcEarthworksFill[SUBGRADE])"
+            )
+
+        tin_id = cls._find_tin_id(host)
+        if tin_id is None:
+            raise SaikeiSurfaceError(
+                f"host #{host.id()} has no IfcTriangulatedIrregularNetwork "
+                "in its SurfaceModel representation"
+            )
+        tin = ifc_file.by_id(tin_id)
+
+        points = np.asarray(tin.Coordinates.CoordList, dtype=float)
+        triangles = np.asarray(tin.CoordIndex, dtype=int) - 1
+        triangle_flags = np.asarray(tin.Flags or [], dtype=int)
+        outer_boundary = shapely.MultiPoint(
+            [(float(p[0]), float(p[1])) for p in points]
+        ).convex_hull
+
+        return CivilSurface(
+            guid=guid,
+            name=host.Name or "",
+            kind=kind,  # type: ignore[arg-type]
+            points=points,
+            triangles=triangles,
+            triangle_flags=triangle_flags,
+            outer_boundary=outer_boundary if isinstance(outer_boundary, shapely.Polygon) else None,
+            ifc_host_entity_id=host.id(),
+            ifc_tin_representation_id=tin_id,
+            ifc_bbox_representation_id=cls._find_bbox_id(host),
+        )
+
     @classmethod
     def build_tin_from_points(
         cls,
@@ -834,3 +950,85 @@ class Surface:
                     if item.is_a("IfcBoundingBox"):
                         return item.id()
         return None
+
+    @classmethod
+    def create_blender_mesh(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        surface: CivilSurface,
+    ) -> bpy.types.Object:
+        """Create a Blender mesh + object for ``surface`` and link it to the
+        IFC host entity.
+
+        Mirrors the alignment-precedent in
+        :meth:`bonsai.tool.alignment.Alignment.create_object_for_alignment`:
+
+        1. If ``tool.Ifc.get_object(host)`` already returns an object, return
+           that — no-op for re-entrant calls.
+        2. Build a fresh ``bpy.types.Mesh`` from ``surface.points`` and
+           ``surface.triangles``, name it ``IfcGeographicElement/<name>`` or
+           ``IfcEarthworksFill/<name>``.
+        3. Wrap in a new ``bpy.types.Object`` and bind via :func:`tool.Ifc.link`
+           for the bidirectional dataclass ↔ Blender ↔ IFC mapping.
+        4. Place into the project's collection hierarchy via
+           :func:`tool.Collector.assign`.
+
+        :raises SaikeiSurfaceError: if ``surface.ifc_host_entity_id`` is unset
+            (call :meth:`author_ifc_host` first).
+        """
+        if surface.ifc_host_entity_id is None:
+            raise SaikeiSurfaceError(
+                "surface has no IFC host entity; call author_ifc_host first"
+            )
+        host = ifc_file.by_id(surface.ifc_host_entity_id)
+
+        existing_obj = tool.Ifc.get_object(host)
+        if existing_obj:
+            return existing_obj
+
+        mesh = cls._build_mesh_data(surface, mesh_name=f"{host.is_a()}/{host.Name or surface.guid}")
+        obj_name = f"{host.is_a()}/{host.Name or surface.guid}"
+        obj = bpy.data.objects.new(obj_name, mesh)
+
+        tool.Ifc.link(host, obj)
+        tool.Collector.assign(obj)
+        return obj
+
+    @classmethod
+    def update_blender_mesh(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        surface: CivilSurface,
+    ) -> Optional[bpy.types.Object]:
+        """Rebuild the Blender mesh data for ``surface`` after retriangulation.
+
+        Looks up the Blender object linked to the IFC host, clears the existing
+        mesh data, and rebuilds from ``surface.points`` and ``surface.triangles``.
+        Returns ``None`` if no Blender object is linked yet (caller may want to
+        :meth:`create_blender_mesh` first).
+        """
+        if surface.ifc_host_entity_id is None:
+            return None
+        host = ifc_file.by_id(surface.ifc_host_entity_id)
+        obj = tool.Ifc.get_object(host)
+        if obj is None or not isinstance(obj.data, bpy.types.Mesh):
+            return None
+
+        mesh = obj.data
+        mesh.clear_geometry()
+        verts = [(float(p[0]), float(p[1]), float(p[2])) for p in surface.points]
+        faces = [(int(t[0]), int(t[1]), int(t[2])) for t in surface.triangles]
+        mesh.from_pydata(verts, [], faces)
+        mesh.update()
+        return obj
+
+    @staticmethod
+    def _build_mesh_data(surface: CivilSurface, mesh_name: str) -> bpy.types.Mesh:
+        """Construct a new ``bpy.types.Mesh`` from ``surface.points`` and
+        ``surface.triangles``."""
+        mesh = bpy.data.meshes.new(mesh_name)
+        verts = [(float(p[0]), float(p[1]), float(p[2])) for p in surface.points]
+        faces = [(int(t[0]), int(t[1]), int(t[2])) for t in surface.triangles]
+        mesh.from_pydata(verts, [], faces)
+        mesh.update()
+        return mesh

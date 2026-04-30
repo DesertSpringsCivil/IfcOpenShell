@@ -28,6 +28,7 @@ Run via the canonical Phase 4 invocation (PowerShell, from src/bonsai)::
       --blender-executable "C:\\Program Files\\Blender Foundation\\Blender_5\\blender.exe"
 """
 
+import bpy
 import ifcopenshell
 import ifcopenshell.api.unit
 import ifcopenshell.guid
@@ -35,7 +36,9 @@ import numpy as np
 import pytest
 import shapely
 
+import bonsai.tool as tool
 import bonsai.tool.surface as tool_surface
+from test.bim.bootstrap import NewIfc4X3
 
 
 def _make_ifc_file_with_site() -> ifcopenshell.file:
@@ -1054,3 +1057,190 @@ class TestSurfaceAuthorIfcBreakline:
             None,
         )
         assert stored_guid == group_guid
+
+
+@pytest.fixture(autouse=True)
+def _reset_surface_registry():
+    """Wipe :attr:`Surface._registry` between every test so cross-test
+    contamination can't mask bugs (per spec §4.6 "headless tests call
+    Surface.clear() in fixture teardown")."""
+    yield
+    tool_surface.Surface.clear()
+
+
+class TestSurfaceRegistry:
+    """Tests for :class:`Surface._registry` and :meth:`get` / :meth:`register`
+    / :meth:`invalidate` / :meth:`clear` per spec §4.6."""
+
+    @staticmethod
+    def _build_registered_surface() -> tuple[
+        ifcopenshell.file, tool_surface.CivilSurface
+    ]:
+        ifc_file = _make_ifc_file_with_site()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        surface = tool_surface.Surface.build_tin_from_points("Reg Test", points)
+        tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        tool_surface.Surface.register(ifc_file, surface)
+        return ifc_file, surface
+
+    def test_register_then_get_returns_same_instance(self) -> None:
+        ifc_file, surface = self._build_registered_surface()
+        cached = tool_surface.Surface.get(ifc_file, surface.guid)
+        assert cached is surface  # same object, not just equivalent
+
+    def test_get_rehydrates_on_cache_miss(self) -> None:
+        ifc_file, surface = self._build_registered_surface()
+        # Wipe the cache; next get() must rehydrate from IFC.
+        tool_surface.Surface.clear()
+        rehydrated = tool_surface.Surface.get(ifc_file, surface.guid)
+        # New instance, but same data.
+        assert rehydrated is not surface
+        assert rehydrated.guid == surface.guid
+        assert rehydrated.name == surface.name
+        assert rehydrated.kind == surface.kind
+        assert rehydrated.points.shape == surface.points.shape
+        assert rehydrated.triangles.shape == surface.triangles.shape
+
+    def test_invalidate_drops_specific_entry(self) -> None:
+        ifc_file, surface = self._build_registered_surface()
+        # Register a second surface so we can prove invalidate is targeted.
+        points2 = np.array(
+            [(10.0, 10.0, 0.0), (11.0, 10.0, 0.0), (10.0, 11.0, 0.0)]
+        )
+        surface_b = tool_surface.Surface.build_tin_from_points("B", points2)
+        tool_surface.Surface.author_ifc_host(ifc_file, surface_b)
+        tool_surface.Surface.register(ifc_file, surface_b)
+
+        tool_surface.Surface.invalidate(ifc_file, surface.guid)
+
+        # surface.guid is gone; surface_b.guid is still cached as the same instance.
+        assert (id(ifc_file), surface.guid) not in tool_surface.Surface._registry
+        assert tool_surface.Surface.get(ifc_file, surface_b.guid) is surface_b
+
+    def test_clear_wipes_registry(self) -> None:
+        ifc_file, surface = self._build_registered_surface()
+        assert tool_surface.Surface._registry  # non-empty
+        tool_surface.Surface.clear()
+        assert not tool_surface.Surface._registry
+
+    def test_get_unknown_guid_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        with pytest.raises(
+            tool_surface.SaikeiSurfaceError, match="no IFC entity with GlobalId"
+        ):
+            tool_surface.Surface.get(ifc_file, ifcopenshell.guid.new())
+
+    def test_get_wrong_entity_type_raises(self) -> None:
+        """Looking up a non-surface entity by its GUID should raise."""
+        ifc_file = _make_ifc_file_with_site()
+        site = ifc_file.by_type("IfcSite")[0]
+        # IfcSite is not a Saikei surface host.
+        with pytest.raises(
+            tool_surface.SaikeiSurfaceError, match="not a Saikei surface host"
+        ):
+            tool_surface.Surface.get(ifc_file, site.GlobalId)
+
+    def test_multi_file_registry_keyed_by_id(self) -> None:
+        """Per spec §4.6, the same GUID in two different files is stored as
+        two separate entries — keyed on ``(id(ifc_file), guid)``."""
+        ifc_file_a = _make_ifc_file_with_site()
+        ifc_file_b = _make_ifc_file_with_site()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        guid = ifcopenshell.guid.new()
+
+        surface_a = tool_surface.Surface.build_tin_from_points(
+            "A", points, guid=guid
+        )
+        tool_surface.Surface.author_ifc_host(ifc_file_a, surface_a)
+        tool_surface.Surface.register(ifc_file_a, surface_a)
+
+        surface_b = tool_surface.Surface.build_tin_from_points(
+            "B", points, guid=guid
+        )
+        tool_surface.Surface.author_ifc_host(ifc_file_b, surface_b)
+        tool_surface.Surface.register(ifc_file_b, surface_b)
+
+        # Same guid, two separate registry entries.
+        assert tool_surface.Surface.get(ifc_file_a, guid) is surface_a
+        assert tool_surface.Surface.get(ifc_file_b, guid) is surface_b
+
+
+class TestSurfaceBlenderMesh(NewIfc4X3):
+    """Tests for :meth:`Surface.create_blender_mesh` and
+    :meth:`Surface.update_blender_mesh`.
+
+    Inherits :class:`test.bim.bootstrap.NewIfc4X3` so each test starts from a
+    Bonsai-bootstrapped IFC4X3 project (with its collection hierarchy and
+    spatial root) — :func:`tool.Collector.assign` requires the project /
+    container Blender objects to be present.
+    """
+
+    def _make_registered_surface(
+        self, name: str = "MeshTest"
+    ) -> tool_surface.CivilSurface:
+        ifc_file = tool.Ifc.get()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        surface = tool_surface.Surface.build_tin_from_points(name, points)
+        tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        return surface
+
+    def test_create_blender_mesh_returns_object(self) -> None:
+        surface = self._make_registered_surface()
+        obj = tool_surface.Surface.create_blender_mesh(tool.Ifc.get(), surface)
+        assert obj is not None
+        assert obj.data is not None
+        assert isinstance(obj.data, bpy.types.Mesh)
+        # Two triangles → 2 polygons; 4 unique vertices.
+        assert len(obj.data.polygons) == 2
+        assert len(obj.data.vertices) == 4
+
+    def test_create_blender_mesh_no_host_raises(self) -> None:
+        ifc_file = tool.Ifc.get()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        surface = tool_surface.Surface.build_tin_from_points("orphan", points)
+        with pytest.raises(
+            tool_surface.SaikeiSurfaceError, match="no IFC host entity"
+        ):
+            tool_surface.Surface.create_blender_mesh(ifc_file, surface)
+
+    def test_create_blender_mesh_idempotent(self) -> None:
+        """Calling create_blender_mesh twice returns the same Blender object."""
+        surface = self._make_registered_surface()
+        ifc_file = tool.Ifc.get()
+        obj_a = tool_surface.Surface.create_blender_mesh(ifc_file, surface)
+        obj_b = tool_surface.Surface.create_blender_mesh(ifc_file, surface)
+        assert obj_a is obj_b
+
+    def test_create_blender_mesh_links_to_ifc_entity(self) -> None:
+        """Bidirectional link works both ways via tool.Ifc."""
+        surface = self._make_registered_surface()
+        ifc_file = tool.Ifc.get()
+        obj = tool_surface.Surface.create_blender_mesh(ifc_file, surface)
+        host = ifc_file.by_id(surface.ifc_host_entity_id)
+        assert tool.Ifc.get_object(host) is obj
+        assert tool.Ifc.get_entity(obj) == host
+
+    def test_update_blender_mesh_rebuilds_geometry(self) -> None:
+        surface = self._make_registered_surface()
+        ifc_file = tool.Ifc.get()
+        obj = tool_surface.Surface.create_blender_mesh(ifc_file, surface)
+        # Add a vertex and retriangulate.
+        surface.points = np.vstack([surface.points, [[0.5, 0.5, 1.0]]])
+        tool_surface.Surface.retriangulate(surface)
+        updated = tool_surface.Surface.update_blender_mesh(ifc_file, surface)
+        assert updated is obj  # in-place update
+        assert len(obj.data.vertices) == 5
+
+    def test_update_blender_mesh_no_object_returns_none(self) -> None:
+        surface = self._make_registered_surface()
+        # No create_blender_mesh call — no object linked.
+        result = tool_surface.Surface.update_blender_mesh(tool.Ifc.get(), surface)
+        assert result is None
