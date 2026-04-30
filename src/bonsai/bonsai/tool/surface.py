@@ -235,9 +235,10 @@ class _ScipyShapelyTriangulator:
     lookup. The lookup tolerance is :data:`COORDINATE_PRECISION` decimal
     places (default 6 ≈ micrometre precision in metric project units).
 
-    Returned ``flags`` are zeros at this layer; commit 5 implements the
-    centroid-in-polygon hole/void translation and the breakline-edge
-    bitmask.
+    Returned ``flags`` follow IFC 4.3.2 §8.8.3.48 per-triangle Flags
+    semantics (per spec §2.1, §5): ``-2`` for triangles whose centroid is
+    inside a void polygon, ``-1`` for hole, otherwise a 3-bit bitmask of
+    which triangle edges are breakline edges.
 
     Pinned dependency versions per spec §4.4: ``scipy >= 1.11, < 2.0`` and
     ``shapely >= 2.1, < 3.0``.
@@ -286,9 +287,68 @@ class _ScipyShapelyTriangulator:
         )
         triangle_geoms = shapely.constrained_delaunay_triangles(constrained_geom)
         triangles = self._extract_triangle_indices(triangle_geoms, coord_to_index)
-        # Flags are zeros at this layer; commit 5 fills in hole/void/breakline-bitmask.
-        flags = np.zeros(len(triangles), dtype=int)
+        flags = self._compute_flags(
+            points, triangles, breakline_segments, holes, voids
+        )
         return triangles, flags
+
+    @staticmethod
+    def _compute_flags(
+        points: np.ndarray,
+        triangles: np.ndarray,
+        breakline_segments: list[tuple[int, int]],
+        holes: list[shapely.Polygon],
+        voids: list[shapely.Polygon],
+    ) -> np.ndarray:
+        """Translate caller-supplied polygons + breakline segments into the
+        per-triangle IFC ``Flags`` integer (per spec §2.1, §5).
+
+        Per spec §6.3 (cross-surface composition), voids take precedence over
+        holes — a triangle whose centroid lies in both a void and a hole is
+        flagged ``-2``. Triangles outside all hole/void polygons get the 3-bit
+        breakline-edge bitmask (``0`` to ``7``).
+
+        Edge ``i`` (in IFC's 1-based convention) is between vertex ``i`` and
+        vertex ``(i+1) mod 3`` of the triangle's CoordIndex triple. Bit
+        position 0 of the mask corresponds to IFC edge 1, bit 1 to edge 2,
+        bit 2 to edge 3.
+        """
+        breakline_set: set[frozenset[int]] = {
+            frozenset((int(a), int(b))) for a, b in breakline_segments
+        }
+        flags = np.zeros(len(triangles), dtype=int)
+
+        for triangle_index, triangle in enumerate(triangles):
+            v0, v1, v2 = triangle
+            centroid_x = (
+                points[v0, 0] + points[v1, 0] + points[v2, 0]
+            ) / 3.0
+            centroid_y = (
+                points[v0, 1] + points[v1, 1] + points[v2, 1]
+            ) / 3.0
+            centroid = shapely.Point(float(centroid_x), float(centroid_y))
+
+            # Voids take precedence over holes per spec §6.3.
+            if any(centroid.within(void) for void in voids):
+                flags[triangle_index] = -2
+                continue
+            if any(centroid.within(hole) for hole in holes):
+                flags[triangle_index] = -1
+                continue
+
+            # Breakline-edge bitmask — IFC edge i is (vertex i, vertex (i+1) mod 3).
+            bitmask = 0
+            edges = (
+                (int(v0), int(v1)),
+                (int(v1), int(v2)),
+                (int(v2), int(v0)),
+            )
+            for edge_index, (start_vertex, end_vertex) in enumerate(edges):
+                if frozenset((start_vertex, end_vertex)) in breakline_set:
+                    bitmask |= 1 << edge_index
+            flags[triangle_index] = bitmask
+
+        return flags
 
     @classmethod
     def _build_coord_index(
@@ -442,11 +502,12 @@ class Surface:
             mints a fresh ``ifcopenshell.guid.new()``; supply explicitly when
             rehydrating from an existing entity.
         :returns: :class:`CivilSurface` with ``triangles`` from
-            :meth:`Triangulator.unconstrained`, ``triangle_flags`` zeros (commit 5
-            translates polygons → flags), and ``outer_boundary`` set to the
-            convex hull of ``points`` so the volume-calculation domain is never
-            undefined (per spec §6.4). No IFC authoring at this layer; commit 6
-            wraps :func:`ifcopenshell.api.surface.create_terrain` /
+            :meth:`Triangulator.unconstrained`, ``triangle_flags`` zeros
+            (no breaklines / holes / voids on a freshly-built TIN), and
+            ``outer_boundary`` set to the convex hull of ``points`` so the
+            volume-calculation domain is never undefined (per spec §6.4). No
+            IFC authoring at this layer; commit 6 wraps
+            :func:`ifcopenshell.api.surface.create_terrain` /
             ``create_proposed_surface`` and stamps step ids onto the returned
             surface.
         :raises SaikeiTriangulationError: if ``points`` is the wrong shape or

@@ -306,18 +306,16 @@ class TestScipyShapelyTriangulator:
             f"got count {edges_count.get((0, 2))}; full edges: {edges_count}"
         )
 
-    def test_constrained_flags_zeros_for_now(self) -> None:
-        """Holes/voids polygons are accepted but flags are still zeros at this commit;
-        commit 5 implements centroid-in-polygon flag translation."""
+    def test_constrained_no_breakline_no_polygon_flags_zero(self) -> None:
+        """With no breaklines and no hole/void polygons, every triangle's flag is 0
+        (IFC: no breakline edges, not a hole, not a void)."""
         triangulator = self._make()
         points = np.array(
             [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (10.0, 10.0, 0.0), (0.0, 10.0, 0.0)]
         )
         outer = shapely.Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
-        hole = shapely.Polygon([(2, 2), (4, 2), (4, 4), (2, 4)])
-        void = shapely.Polygon([(6, 6), (8, 6), (8, 8), (6, 8)])
-        triangles, flags = triangulator.constrained(points, [], outer, [hole], [void])
-        assert (flags == 0).all()  # Will be -1 / -2 after commit 5.
+        triangles, flags = triangulator.constrained(points, [], outer, [], [])
+        assert (flags == 0).all()
 
     def test_constrained_wrong_outer_type_raises(self) -> None:
         triangulator = self._make()
@@ -341,6 +339,127 @@ class TestScipyShapelyTriangulator:
         backend: tool_surface.Triangulator = self._make()  # type: ignore[assignment]
         assert hasattr(backend, "unconstrained")
         assert hasattr(backend, "constrained")
+
+
+class TestFlagsTranslation:
+    """Tests for the polygon → IFC ``Flags`` translation in
+    :meth:`_ScipyShapelyTriangulator.constrained`.
+
+    Per spec §2.1 + §5: each triangle's ``Flags`` integer is one of
+    ``-2`` (void), ``-1`` (hole), or ``0`` to ``7`` (3-bit breakline-edge mask).
+    """
+
+    @staticmethod
+    def _make() -> tool_surface._ScipyShapelyTriangulator:
+        return tool_surface._ScipyShapelyTriangulator()
+
+    def test_centroid_in_hole_flagged_minus_one(self) -> None:
+        """A triangle whose centroid lies inside a hole polygon gets Flag -1."""
+        triangulator = self._make()
+        # Two-triangle unit square with a hole that covers ~half of it.
+        # The hole spans x in [0.0, 0.6], y in [0.0, 1.0] which contains the
+        # centroid of triangles in the lower-left half.
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        outer = shapely.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        hole = shapely.Polygon([(0, 0), (0.6, 0), (0.6, 1), (0, 1)])
+        triangles, flags = triangulator.constrained(points, [], outer, [hole], [])
+        # At least one triangle's centroid lies inside the hole.
+        assert any(flag == -1 for flag in flags), f"no -1 flag in {flags.tolist()}"
+
+    def test_centroid_in_void_flagged_minus_two(self) -> None:
+        """A triangle whose centroid lies inside a void polygon gets Flag -2."""
+        triangulator = self._make()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        outer = shapely.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        void = shapely.Polygon([(0, 0), (0.6, 0), (0.6, 1), (0, 1)])
+        triangles, flags = triangulator.constrained(points, [], outer, [], [void])
+        assert any(flag == -2 for flag in flags), f"no -2 flag in {flags.tolist()}"
+
+    def test_void_takes_precedence_over_hole(self) -> None:
+        """Per spec §6.3, voids override holes when polygons overlap."""
+        triangulator = self._make()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        outer = shapely.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        # The void and hole polygons are identical and cover the lower-left half.
+        hole = shapely.Polygon([(0, 0), (0.6, 0), (0.6, 1), (0, 1)])
+        void = shapely.Polygon([(0, 0), (0.6, 0), (0.6, 1), (0, 1)])
+        triangles, flags = triangulator.constrained(points, [], outer, [hole], [void])
+        # Triangles in the overlapping region must be -2, not -1.
+        assert -2 in flags.tolist()
+        assert -1 not in flags.tolist()
+
+    def test_outside_hole_and_void_gets_zero_or_breakline_mask(self) -> None:
+        """Triangles whose centroid is outside both hole and void polygons get
+        a non-negative flag (0 if no breakline edges, 1–7 otherwise)."""
+        triangulator = self._make()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        outer = shapely.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        # A small hole far from where the triangulation will fall.
+        hole = shapely.Polygon(
+            [(0.45, 0.45), (0.55, 0.45), (0.55, 0.55), (0.45, 0.55)]
+        )
+        triangles, flags = triangulator.constrained(points, [], outer, [hole], [])
+        # At least one triangle should be entirely outside the small hole.
+        assert any(flag == 0 for flag in flags)
+
+    def test_breakline_edge_sets_bitmask(self) -> None:
+        """A breakline along the diagonal of a unit square sets the
+        appropriate edge bit in both adjacent triangles."""
+        triangulator = self._make()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        outer = shapely.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        triangles, flags = triangulator.constrained(
+            points, [(0, 2)], outer, [], []
+        )
+        # Both triangles share the diagonal (0, 2). For each triangle, find
+        # which edge index (0/1/2) maps to that pair, then assert the bit is set.
+        for triangle, flag in zip(triangles, flags):
+            v0, v1, v2 = (int(triangle[0]), int(triangle[1]), int(triangle[2]))
+            edges = (
+                (v0, v1),
+                (v1, v2),
+                (v2, v0),
+            )
+            for edge_index, (a, b) in enumerate(edges):
+                if {a, b} == {0, 2}:
+                    expected_bit = 1 << edge_index
+                    assert flag & expected_bit, (
+                        f"triangle {triangle.tolist()} edge index {edge_index} "
+                        f"is the breakline (vertices 0,2) but flag {flag} "
+                        f"does not have bit {expected_bit} set"
+                    )
+                    break
+            else:
+                pytest.fail(
+                    f"triangle {triangle.tolist()} does not contain the breakline "
+                    f"diagonal (0, 2); flags={flags.tolist()}"
+                )
+
+    def test_breakline_segments_passed_directly_to_triangulator(self) -> None:
+        """Bypass Surface.retriangulate and pass breakline_segments directly —
+        verify the triangulator translates them into bitmask flags."""
+        triangulator = self._make()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (2.0, 2.0, 0.0), (0.0, 2.0, 0.0)]
+        )
+        outer = shapely.Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])
+        # Breakline along the diagonal — vertices 0 and 2.
+        triangles, flags = triangulator.constrained(
+            points, [(0, 2)], outer, [], []
+        )
+        # Every flag should be in the 1-7 range (bitmask) since the diagonal
+        # is shared by both triangles.
+        assert all(1 <= flag <= 7 for flag in flags), f"flags={flags.tolist()}"
 
 
 class TestSurfaceBuildTinFromPoints:
@@ -513,6 +632,34 @@ class TestSurfaceRetriangulate:
         tool_surface.Surface.retriangulate(surface)
         # Original 4 corners plus the 2 new midpoints = 6 points.
         assert surface.points.shape == (6, 3)
+
+    def test_retriangulate_translates_breakline_to_flag_bitmask(self) -> None:
+        """End-to-end through Surface.retriangulate: a breakline polyline
+        produces non-zero edge-bitmask flags on the triangles it touches."""
+        surface = self._unit_square_surface()
+        surface.breaklines.append(
+            tool_surface.Breakline(
+                guid="bl-flagcheck",
+                name="diagonal",
+                polyline=[(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)],
+                kind="standard",
+                source="manual",
+            )
+        )
+        tool_surface.Surface.retriangulate(surface)
+        assert any(
+            1 <= int(flag) <= 7 for flag in surface.triangle_flags
+        ), f"no breakline-bitmask flag in {surface.triangle_flags.tolist()}"
+
+    def test_retriangulate_translates_hole_polygon_to_minus_one(self) -> None:
+        """End-to-end: a hole polygon on the surface yields a -1 flag on
+        triangles whose centroid falls inside it after retriangulation."""
+        surface = self._unit_square_surface()
+        surface.holes.append(
+            shapely.Polygon([(0, 0), (0.6, 0), (0.6, 1), (0, 1)])
+        )
+        tool_surface.Surface.retriangulate(surface)
+        assert -1 in surface.triangle_flags.tolist()
 
     def test_no_outer_boundary_raises(self) -> None:
         points = np.array(
