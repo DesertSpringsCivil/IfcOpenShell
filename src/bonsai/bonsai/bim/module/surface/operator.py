@@ -26,11 +26,25 @@ Each operator follows the Bonsai standard pattern:
   the underscore form with the IFC operator boilerplate.
 - Operators that author IFC catch typed tool exceptions
   (:class:`SaikeiSurfaceError`, :class:`SaikeiTriangulationError`) and
-  convert them to ``self.report({"ERROR"}, ...)`` + ``CANCELLED`` per the
-  spec §8.5 modal/headless contract. Headless callers via
-  ``bpy.ops.civil.surface_<X>("EXEC_DEFAULT", ...)`` receive the same
-  cancelled/finished result codes (with ``self.report`` writing to
-  ``bpy.context.window_manager.reports``).
+  convert them to ``self.report({"ERROR"}, ...)`` + ``return {"CANCELLED"}``
+  inside ``_execute``.
+
+.. note::
+
+    **Bonsai's `tool.Ifc.Operator.execute` always returns
+    ``{"FINISHED"}``** regardless of what ``_execute`` returns — the
+    inner CANCELLED is dropped at the wrapper boundary (see
+    ``tool/ifc.py:execute``, decorated ``@final``). What the headless
+    caller actually sees is:
+
+    1. An ``ERROR``-level report on the Window Manager's reports list.
+    2. Blender re-raises that report as a Python ``RuntimeError`` from
+       the ``bpy.ops`` boundary call. Headless tests use
+       ``pytest.raises(RuntimeError)`` to detect cancellation.
+
+    Callers that need a clean status code should also assert "no IFC
+    entity was authored" as a behavior check rather than relying on
+    the return set.
 """
 
 import bpy

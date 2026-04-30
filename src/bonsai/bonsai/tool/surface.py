@@ -465,8 +465,13 @@ class _ScipyShapelyTriangulator:
                 if key not in coord_to_index:
                     raise ValueError(
                         f"triangle vertex {key} not found in input points; "
-                        "shapely may have introduced a Steiner point — supply "
-                        "breakline endpoints that match input vertices exactly"
+                        "shapely introduced a Steiner point. This usually "
+                        "means a breakline crosses the outer boundary at a "
+                        "non-vertex point, OR two breaklines intersect "
+                        "interior to the surface. Phase 4 fix: add the "
+                        "intersection coordinates to surface.points before "
+                        "retriangulation, or restrict breaklines to share "
+                        "existing surface vertices"
                     )
                 triangle_indices.append(coord_to_index[key])
             indices.append(tuple(triangle_indices))  # type: ignore[arg-type]

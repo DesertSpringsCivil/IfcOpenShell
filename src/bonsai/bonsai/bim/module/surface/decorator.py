@@ -68,8 +68,14 @@ class SurfaceDecorator:
 
     @classmethod
     def install(cls, context: bpy.types.Context) -> None:
-        """Register the POST_VIEW draw handler. Idempotent — repeated
-        calls re-install."""
+        """Register the POST_VIEW draw handler.
+
+        Re-installable, not idempotent: a repeated call uninstalls the
+        previous handler and registers a fresh one against the supplied
+        context. This is the right behavior when the user toggles the
+        decorator off and back on, or switches scenes — the new context
+        captures the new viewport's state.
+        """
         if cls.is_installed:
             cls.uninstall()
         instance = cls()
