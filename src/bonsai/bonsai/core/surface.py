@@ -127,3 +127,106 @@ def create_surface_from_points(
     )
     surface_tool.register(ifc_file, surface)
     return surface
+
+
+def add_breakline_to_surface(
+    ifc_tool: "type[tool.Ifc]",
+    surface_tool: "type[tool.Surface]",
+    surface_guid: str,
+    breakline: Any,
+    grading_group_guid: Optional[str] = None,
+) -> Any:
+    """Append a breakline to an existing surface and retriangulate.
+
+    Business rules:
+
+    1. An IFC file must be loaded.
+    2. ``surface_guid`` must resolve to a registered or rehydrate-able surface.
+
+    Sequencing:
+
+    1. :meth:`tool.Surface.get` — fetch the surface from the registry
+       (rehydrates from IFC if cache-missed).
+    2. :meth:`tool.Surface.author_ifc_breakline` — persist as
+       :class:`IfcAnnotation` with :class:`IfcPolyline` representation.
+    3. Append to ``surface.breaklines`` so the next retriangulation honors it.
+    4. :meth:`tool.Surface.retriangulate` — rebuild the constrained Delaunay
+       with the new breakline as a forced edge (when it fully crosses the
+       outer boundary; see ``_build_constrained_geometry`` docstring for the
+       documented limitation).
+    5. :meth:`tool.Surface.update_ifc_tin` — replace the host's existing
+       SurfaceModel TIN with the rebuilt one. Old TIN + CoordList are GC'd.
+
+    Cache invalidation is intentionally deferred: the in-memory ``surface``
+    instance was mutated in place (breakline appended, points / triangles /
+    flags rebuilt by ``retriangulate``), and ``update_ifc_tin`` re-stamps
+    ``surface.ifc_tin_representation_id`` to the new TIN's step id. A future
+    phase will implement breakline rehydration from the ``IfcAnnotation``
+    set; until then, calling :meth:`tool.Surface.invalidate` after this
+    function would lose the breakline list on next :meth:`get`.
+
+    :param ifc_tool: the :class:`tool.Ifc` class.
+    :param surface_tool: the :class:`tool.Surface` class.
+    :param surface_guid: GlobalId of the host surface entity.
+    :param breakline: a :class:`Breakline` dataclass to attach.
+    :param grading_group_guid: optional GUID linking the breakline to a
+        grading group (forwarded to ``Pset_SaikeiBreaklineCommon``).
+    :returns: the mutated :class:`CivilSurface`.
+    :raises ValueError: if no IFC file is loaded.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    surface = surface_tool.get(ifc_file, surface_guid)
+    surface_tool.author_ifc_breakline(
+        ifc_file, breakline, grading_group_guid=grading_group_guid
+    )
+    surface.breaklines.append(breakline)
+    surface_tool.retriangulate(surface)
+    surface_tool.update_ifc_tin(ifc_file, surface)
+    return surface
+
+
+def set_outer_boundary(
+    ifc_tool: "type[tool.Ifc]",
+    surface_tool: "type[tool.Surface]",
+    surface_guid: str,
+    boundary_polygon: Any,
+) -> Any:
+    """Replace a surface's outer-boundary polygon and retriangulate.
+
+    Business rules:
+
+    1. An IFC file must be loaded.
+    2. ``surface_guid`` must resolve to a registered or rehydrate-able surface.
+    3. ``boundary_polygon`` must be a :class:`shapely.Polygon` — the tool
+       layer's :meth:`Triangulator.constrained` validates this and raises
+       :class:`ValueError` on the wrong type. Core does not import shapely,
+       so the type check is delegated downstream.
+
+    Sequencing:
+
+    1. :meth:`tool.Surface.get` — fetch from registry / rehydrate.
+    2. Mutate ``surface.outer_boundary`` directly (caller-supplied authoring
+       input per spec §5).
+    3. :meth:`tool.Surface.retriangulate` — clip the constrained Delaunay
+       to the new boundary; triangles outside are dropped, hole / void
+       flags are recomputed.
+    4. :meth:`tool.Surface.update_ifc_tin` — push the rebuilt TIN to IFC.
+
+    Cache invalidation is deferred for the same reason as
+    :func:`add_breakline_to_surface`.
+
+    :returns: the mutated :class:`CivilSurface`.
+    :raises ValueError: if no IFC file is loaded.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    surface = surface_tool.get(ifc_file, surface_guid)
+    surface.outer_boundary = boundary_polygon
+    surface_tool.retriangulate(surface)
+    surface_tool.update_ifc_tin(ifc_file, surface)
+    return surface

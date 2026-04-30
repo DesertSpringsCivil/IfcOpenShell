@@ -46,6 +46,24 @@ class FakeCivilSurface(dict):
 
     def __init__(self, name: str = "TestSurface", guid: str = "fake-guid") -> None:
         super().__init__(name=name, guid=guid)
+        # Real attributes the orchestration mutates (registered after dict init
+        # so they don't pollute the dict for json.dumps).
+        self.breaklines: list = []
+        self.outer_boundary = None
+
+
+class FakeBreakline(dict):
+    """Stand-in for :class:`Breakline`."""
+
+    def __init__(self, guid: str = "bl-guid", name: str = "test-breakline") -> None:
+        super().__init__(guid=guid, name=name)
+
+
+class FakePolygon(dict):
+    """Stand-in for :class:`shapely.Polygon`."""
+
+    def __init__(self, label: str = "boundary") -> None:
+        super().__init__(label=label)
 
 
 # ---------------------------------------------------------------------------
@@ -185,3 +203,108 @@ class TestCreateSurfaceFromPoints:
             points=points,
             triangulation_tolerance=0.005,
         )
+
+
+# ---------------------------------------------------------------------------
+# add_breakline_to_surface
+# ---------------------------------------------------------------------------
+
+
+class TestAddBreaklineToSurface:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, surface):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.add_breakline_to_surface(
+                ifc, surface, surface_guid="g", breakline=FakeBreakline()
+            )
+
+    def test_happy_path_calls_tool_methods_in_order(self, ifc, surface):
+        """get → author_ifc_breakline → mutate breaklines → retriangulate →
+        update_ifc_tin, all called once."""
+        fake_file = FakeIfcFile()
+        fake_surface = FakeCivilSurface()
+        breakline = FakeBreakline()
+
+        ifc.get().should_be_called().will_return(fake_file)
+        surface.get(fake_file, "guid-A").should_be_called().will_return(fake_surface)
+        surface.author_ifc_breakline(
+            fake_file, breakline, grading_group_guid=None
+        ).should_be_called()
+        surface.retriangulate(fake_surface).should_be_called()
+        surface.update_ifc_tin(fake_file, fake_surface).should_be_called()
+
+        result = subject.add_breakline_to_surface(
+            ifc, surface, surface_guid="guid-A", breakline=breakline
+        )
+        assert result is fake_surface
+        # Breakline got appended to the dataclass list.
+        assert breakline in fake_surface.breaklines
+
+    def test_grading_group_guid_passes_through(self, ifc, surface):
+        fake_file = FakeIfcFile()
+        fake_surface = FakeCivilSurface()
+        breakline = FakeBreakline()
+
+        ifc.get().should_be_called().will_return(fake_file)
+        surface.get(fake_file, "guid-B").should_be_called().will_return(fake_surface)
+        surface.author_ifc_breakline(
+            fake_file, breakline, grading_group_guid="grp-1"
+        ).should_be_called()
+        surface.retriangulate(fake_surface).should_be_called()
+        surface.update_ifc_tin(fake_file, fake_surface).should_be_called()
+
+        subject.add_breakline_to_surface(
+            ifc,
+            surface,
+            surface_guid="guid-B",
+            breakline=breakline,
+            grading_group_guid="grp-1",
+        )
+
+
+# ---------------------------------------------------------------------------
+# set_outer_boundary
+# ---------------------------------------------------------------------------
+
+
+class TestSetOuterBoundary:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, surface):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.set_outer_boundary(
+                ifc, surface, surface_guid="g", boundary_polygon=FakePolygon()
+            )
+
+    def test_happy_path_calls_tool_methods_in_order(self, ifc, surface):
+        """get → mutate outer_boundary → retriangulate → update_ifc_tin."""
+        fake_file = FakeIfcFile()
+        fake_surface = FakeCivilSurface()
+        polygon = FakePolygon(label="new-boundary")
+
+        ifc.get().should_be_called().will_return(fake_file)
+        surface.get(fake_file, "guid-X").should_be_called().will_return(fake_surface)
+        surface.retriangulate(fake_surface).should_be_called()
+        surface.update_ifc_tin(fake_file, fake_surface).should_be_called()
+
+        result = subject.set_outer_boundary(
+            ifc, surface, surface_guid="guid-X", boundary_polygon=polygon
+        )
+        assert result is fake_surface
+        assert fake_surface.outer_boundary is polygon
+
+    def test_polygon_replaces_previous_boundary(self, ifc, surface):
+        """Mutation overwrites the existing outer_boundary attribute."""
+        fake_file = FakeIfcFile()
+        fake_surface = FakeCivilSurface()
+        fake_surface.outer_boundary = FakePolygon(label="old")
+        polygon = FakePolygon(label="new")
+
+        ifc.get().should_be_called().will_return(fake_file)
+        surface.get(fake_file, "g").should_be_called().will_return(fake_surface)
+        surface.retriangulate(fake_surface).should_be_called()
+        surface.update_ifc_tin(fake_file, fake_surface).should_be_called()
+
+        subject.set_outer_boundary(
+            ifc, surface, surface_guid="g", boundary_polygon=polygon
+        )
+        assert fake_surface.outer_boundary is polygon
