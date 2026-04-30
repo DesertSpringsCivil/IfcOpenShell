@@ -24,11 +24,10 @@ Phase 4 of the Saikei grading/earthwork sprint. This module owns:
 - The :class:`Triangulator` protocol per spec §4.4 — a swappable backend
   for unconstrained / constrained Delaunay so tests can override with
   deterministic stubs.
-
-Subsequent commits add the default :class:`_ScipyShapelyTriangulator`
-backend and the :class:`Surface` tool class with ``build_tin_from_points``,
-``retriangulate``, ``z_at``, and IFC authoring wrappers around
-``ifcopenshell.api.surface``.
+- The default :class:`_ScipyShapelyTriangulator` backend.
+- The :class:`Surface` tool class with ``build_tin_from_points``,
+  ``retriangulate``, and ``z_at``. IFC authoring wrappers and the
+  ``_registry`` cache land in subsequent commits.
 
 The tool layer is the only Saikei layer that imports ``numpy``, ``shapely``,
 or ``bpy``. Core stays import-clean (only built-ins + ``ifcopenshell``);
@@ -40,6 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Optional, Protocol
 
+import ifcopenshell.guid
 import numpy as np
 import scipy.spatial
 import shapely
@@ -392,3 +392,204 @@ class _ScipyShapelyTriangulator:
                 triangle_indices.append(coord_to_index[key])
             indices.append(tuple(triangle_indices))  # type: ignore[arg-type]
         return np.array(indices, dtype=int)
+
+
+class SaikeiSurfaceError(Exception):
+    """Base exception for the Saikei surface tool layer.
+
+    Operators catch this and the more specific subclasses below to convert
+    tool-layer failures into ``self.report({"ERROR"}, ...)`` + ``CANCELLED``
+    in interactive mode (per handoff §"Modal vs headless operator contract").
+    Headless callers receive the raw exception.
+    """
+
+
+class SaikeiTriangulationError(SaikeiSurfaceError):
+    """Raised when triangulation fails (degenerate input, missing Steiner
+    point, or :class:`Triangulator` backend error)."""
+
+
+class Surface:
+    """Tool-layer entry point for surface math, IFC authoring, and Blender
+    linkage. Per spec §7.2 each method is a static or class method called
+    from :mod:`bonsai.core.surface` orchestration.
+
+    The default :attr:`triangulator` is :class:`_ScipyShapelyTriangulator`.
+    Tests override this class attribute with deterministic stubs (predictable
+    triangle order) so hand-checked assertions stay stable; remember to
+    reset to the default in fixture teardown.
+    """
+
+    triangulator: Triangulator = _ScipyShapelyTriangulator()
+    """Swappable Delaunay backend per spec §4.4. Tests reassign this to a
+    stub before exercising :meth:`build_tin_from_points` /
+    :meth:`retriangulate`, then restore the default in teardown."""
+
+    @classmethod
+    def build_tin_from_points(
+        cls,
+        name: str,
+        points: np.ndarray,
+        kind: Literal["existing", "proposed_group", "proposed_site"] = "existing",
+        guid: Optional[str] = None,
+    ) -> CivilSurface:
+        """Build an unconstrained TIN from a 3D point cloud.
+
+        :param name: Human-readable label for the resulting surface.
+        :param points: ``(N, 3)`` array of XYZ vertex coordinates in project units.
+        :param kind: IFC host entity selection per :class:`CivilSurface.kind`.
+        :param guid: Optional pre-assigned IFC GlobalId. ``None`` (default)
+            mints a fresh ``ifcopenshell.guid.new()``; supply explicitly when
+            rehydrating from an existing entity.
+        :returns: :class:`CivilSurface` with ``triangles`` from
+            :meth:`Triangulator.unconstrained`, ``triangle_flags`` zeros (commit 5
+            translates polygons → flags), and ``outer_boundary`` set to the
+            convex hull of ``points`` so the volume-calculation domain is never
+            undefined (per spec §6.4). No IFC authoring at this layer; commit 6
+            wraps :func:`ifcopenshell.api.surface.create_terrain` /
+            ``create_proposed_surface`` and stamps step ids onto the returned
+            surface.
+        :raises SaikeiTriangulationError: if ``points`` is the wrong shape or
+            has fewer than 3 vertices.
+        """
+        if not isinstance(points, np.ndarray):
+            points = np.asarray(points, dtype=float)
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise SaikeiTriangulationError(
+                f"points must be (N, 3), got shape {points.shape}"
+            )
+        if points.shape[0] < 3:
+            raise SaikeiTriangulationError(
+                f"build_tin_from_points requires at least 3 points, got {points.shape[0]}"
+            )
+
+        try:
+            triangles = cls.triangulator.unconstrained(points)
+        except Exception as exc:
+            raise SaikeiTriangulationError(
+                f"unconstrained Delaunay failed: {exc}"
+            ) from exc
+
+        triangle_flags = np.zeros(len(triangles), dtype=int)
+        outer_boundary = shapely.MultiPoint(
+            [(float(x), float(y)) for x, y, *_ in points]
+        ).convex_hull
+        if not isinstance(outer_boundary, shapely.Polygon):
+            # Three collinear points yield a LineString hull; the points are
+            # pathological for a TIN regardless, but surface the error here
+            # rather than letting callers debug a non-Polygon boundary.
+            raise SaikeiTriangulationError(
+                "convex hull of input points is not a polygon (collinear input?)"
+            )
+
+        return CivilSurface(
+            guid=guid if guid is not None else ifcopenshell.guid.new(),
+            name=name,
+            kind=kind,
+            points=np.asarray(points, dtype=float).copy(),
+            triangles=triangles,
+            triangle_flags=triangle_flags,
+            outer_boundary=outer_boundary,
+        )
+
+    @classmethod
+    def retriangulate(cls, surface: CivilSurface) -> None:
+        """Rebuild ``surface.triangles`` and ``surface.triangle_flags`` via
+        constrained Delaunay, honoring ``surface.breaklines``,
+        ``surface.outer_boundary``, ``surface.holes``, and ``surface.voids``.
+
+        Updates the surface in place. The points array is grown if any
+        breakline polyline vertex isn't already present (matched by rounded
+        XY at :data:`_ScipyShapelyTriangulator.COORDINATE_PRECISION`).
+
+        Raises :class:`SaikeiTriangulationError` if the surface lacks an
+        ``outer_boundary`` (use :meth:`build_tin_from_points` first, which
+        sets a convex-hull default), or if the constrained backend errors.
+        """
+        if surface.outer_boundary is None:
+            raise SaikeiTriangulationError(
+                "surface has no outer_boundary; call build_tin_from_points first"
+            )
+
+        augmented_points, breakline_segments = cls._resolve_breakline_segments(surface)
+
+        try:
+            triangles, flags = cls.triangulator.constrained(
+                augmented_points,
+                breakline_segments,
+                surface.outer_boundary,
+                surface.holes,
+                surface.voids,
+            )
+        except Exception as exc:
+            raise SaikeiTriangulationError(
+                f"constrained Delaunay failed: {exc}"
+            ) from exc
+
+        surface.points = augmented_points
+        surface.triangles = triangles
+        surface.triangle_flags = flags
+
+    @staticmethod
+    def _resolve_breakline_segments(
+        surface: CivilSurface,
+    ) -> tuple[np.ndarray, list[tuple[int, int]]]:
+        """Return ``(augmented_points, segments)`` for the surface's breaklines.
+
+        Walks each :class:`Breakline.polyline`, looking up each vertex in
+        ``surface.points`` by rounded XY. New vertices are appended; segments
+        are emitted as ``(start_idx, end_idx)`` pairs for each consecutive
+        polyline pair.
+        """
+        precision = _ScipyShapelyTriangulator.COORDINATE_PRECISION
+        coord_to_index: dict[tuple[float, float], int] = {
+            (round(float(x), precision), round(float(y), precision)): i
+            for i, (x, y, *_) in enumerate(surface.points)
+        }
+        new_points: list[tuple[float, float, float]] = [
+            (float(p[0]), float(p[1]), float(p[2])) for p in surface.points
+        ]
+        segments: list[tuple[int, int]] = []
+
+        for breakline in surface.breaklines:
+            indices: list[int] = []
+            for x, y, z in breakline.polyline:
+                key = (round(float(x), precision), round(float(y), precision))
+                if key not in coord_to_index:
+                    coord_to_index[key] = len(new_points)
+                    new_points.append((float(x), float(y), float(z)))
+                indices.append(coord_to_index[key])
+            for a, b in zip(indices[:-1], indices[1:]):
+                if a != b:
+                    segments.append((a, b))
+
+        return np.asarray(new_points, dtype=float), segments
+
+    @staticmethod
+    def z_at(surface: CivilSurface, x: float, y: float) -> Optional[float]:
+        """Interpolated Z at ``(x, y)`` via point-in-triangle + barycentric.
+
+        :returns: interpolated Z value, or ``None`` if ``(x, y)`` is outside
+            every triangle in ``surface.triangles``.
+
+        Linear scan over triangles. Sufficient for Phase 4 fixtures (≤ a few
+        thousand triangles); STRtree-accelerated lookup is a Phase 4.1+
+        optimization for larger surfaces.
+        """
+        px, py = float(x), float(y)
+        points = surface.points
+        epsilon = 1e-9
+
+        for triangle in surface.triangles:
+            a = points[triangle[0]]
+            b = points[triangle[1]]
+            c = points[triangle[2]]
+            denom = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1])
+            if abs(denom) < 1e-12:
+                continue
+            u = ((b[1] - c[1]) * (px - c[0]) + (c[0] - b[0]) * (py - c[1])) / denom
+            v = ((c[1] - a[1]) * (px - c[0]) + (a[0] - c[0]) * (py - c[1])) / denom
+            w = 1.0 - u - v
+            if u >= -epsilon and v >= -epsilon and w >= -epsilon:
+                return float(u * a[2] + v * b[2] + w * c[2])
+        return None
