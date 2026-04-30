@@ -2175,6 +2175,28 @@ class TestSurfaceDecorator(NewIfc4X3):
             SurfaceDecorator.COLOR_ELEVATION_HIGH
         )
 
+    def test_load_post_handler_registered_and_uninstalls_decorator(self) -> None:
+        """Closes the cold-review-flagged decorator handler leak. The
+        @persistent load_post handler must be installed at module-register
+        time so that opening a .blend file doesn't leave a draw handler
+        running against the previous file's captured context.
+        """
+        from bonsai.bim.module.surface import _on_load_post
+        from bonsai.bim.module.surface.decorator import SurfaceDecorator
+
+        # Handler is registered.
+        assert _on_load_post in bpy.app.handlers.load_post
+
+        # Install the decorator, then fire the load_post handler manually
+        # — uninstall must run.
+        SurfaceDecorator.install(bpy.context)
+        try:
+            assert SurfaceDecorator.is_installed
+            _on_load_post(None)
+            assert not SurfaceDecorator.is_installed
+        finally:
+            SurfaceDecorator.uninstall()
+
     def test_elevation_color_interpolates_between_stops(self) -> None:
         """At t=0.25 the result should be the midpoint of LOW and MID."""
         from bonsai.bim.module.surface.decorator import SurfaceDecorator

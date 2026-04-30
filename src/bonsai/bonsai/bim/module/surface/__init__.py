@@ -30,6 +30,7 @@ UIList; commit 11 adds the create operator, etc.
 """
 
 import bpy
+from bpy.app.handlers import persistent
 
 from . import operator, prop, ui
 
@@ -49,19 +50,42 @@ classes: tuple[type, ...] = (
 )
 
 
+@persistent
+def _on_load_post(_dummy: bpy.types.Scene) -> None:
+    """File-load cleanup: uninstall the GPU draw handler that was
+    captured against the previous file's context.
+
+    Without this, the SurfaceDecorator's ``draw_3d`` callback continues
+    to run with a closure over the old context, racing the new file's
+    initialization. ``@bpy.app.handlers.persistent`` keeps this hook
+    registered across .blend reloads.
+
+    Lazy-imports the decorator module so this handler doesn't trigger
+    a module-level import chain at addon-register time.
+    """
+    from . import decorator as surface_decorator
+
+    surface_decorator.SurfaceDecorator.uninstall()
+
+
 def register() -> None:
     """Module-level registration hook.
 
     Called by ``bonsai.bim`` after the parent has registered all module
     classes. Attaches :class:`CivilSurfaceProperties` to ``bpy.types.Scene``
     as a ``PointerProperty`` so the UI panel can read / write surface state
-    via ``context.scene.CivilSurfaceProperties``.
+    via ``context.scene.CivilSurfaceProperties``. Also registers the
+    file-load cleanup handler.
     """
     bpy.types.Scene.CivilSurfaceProperties = bpy.props.PointerProperty(
         type=prop.CivilSurfaceProperties
     )
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
 
 
 def unregister() -> None:
     """Module-level teardown hook (mirror of :func:`register`)."""
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
     del bpy.types.Scene.CivilSurfaceProperties
