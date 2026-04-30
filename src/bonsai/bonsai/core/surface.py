@@ -46,6 +46,7 @@ What does NOT live here:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
@@ -53,6 +54,37 @@ if TYPE_CHECKING:
 
 
 _ALLOWED_KINDS = {"existing", "proposed_group", "proposed_site"}
+
+_logger = logging.getLogger("bonsai.core.surface")
+
+
+def _warn_multi_site(ifc_file: Any) -> None:
+    """Emit a warning when the file contains more than one IfcSite.
+
+    Per spec §4.3, surface and breakline operators auto-resolve the spatial
+    parent to ``file.by_type("IfcSite")[0]`` when no explicit site is
+    supplied. In multi-site files this silently picks an arbitrary site,
+    which can land surfaces in the wrong spatial container. The handoff
+    flagged this as a footgun for Phases 4–6; this helper surfaces a
+    warning so callers (operators, scripts) can detect the case and either
+    abort or pass an explicit site.
+
+    The warning routes through Python's logging module rather than
+    ``self.report({"WARNING"}, ...)`` because core has no operator
+    handle — UI operators can opt to elevate it (a Phase 4.1+ option).
+    """
+    try:
+        site_count = len(ifc_file.by_type("IfcSite"))
+    except Exception:
+        return
+    if site_count > 1:
+        _logger.warning(
+            "Saikei surface operator running on a multi-site IFC file "
+            "(%d IfcSite entities). The default spatial parent "
+            "resolution picks the first IfcSite — pass an explicit "
+            "site argument if that's not the one you intended.",
+            site_count,
+        )
 
 
 def create_surface_from_points(
@@ -119,6 +151,8 @@ def create_surface_from_points(
             f"kind must be one of {sorted(_ALLOWED_KINDS)}, got {kind!r}"
         )
 
+    _warn_multi_site(ifc_file)
+
     surface = surface_tool.build_tin_from_points(
         name=name.strip(), points=points, kind=kind
     )
@@ -177,6 +211,8 @@ def add_breakline_to_surface(
     ifc_file = ifc_tool.get()
     if ifc_file is None:
         raise ValueError("No IFC file loaded")
+
+    _warn_multi_site(ifc_file)
 
     surface = surface_tool.get(ifc_file, surface_guid)
     # Link the annotation to the host surface via IfcRelAssignsToProduct

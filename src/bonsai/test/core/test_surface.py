@@ -188,6 +188,75 @@ class TestCreateSurfaceFromPoints:
             ifc, surface, name="S", points=points, kind="proposed_site"
         )
 
+    def test_multi_site_file_emits_warning(self, ifc, surface, caplog):
+        """Closes the cold-review-flagged multi-site footgun (spec §4.3).
+        Files with >1 IfcSite log a WARNING-level message so callers
+        notice the implicit-first-site spatial-parent resolution.
+        """
+
+        class MultiSiteFakeFile(FakeIfcFile):
+            def by_type(self, ifc_class):
+                if ifc_class == "IfcSite":
+                    return [object(), object()]  # 2 sites
+                return []
+
+        fake_file = MultiSiteFakeFile()
+        fake_surface = FakeCivilSurface()
+
+        ifc.get().should_be_called().will_return(fake_file)
+        surface.build_tin_from_points(
+            name="MS", points=[(0, 0, 0), (1, 0, 0), (0, 1, 0)], kind="existing"
+        ).should_be_called().will_return(fake_surface)
+        surface.author_ifc_host(
+            fake_file, fake_surface, triangulation_tolerance=0.0
+        ).should_be_called()
+        surface.register(fake_file, fake_surface).should_be_called()
+
+        with caplog.at_level("WARNING", logger="bonsai.core.surface"):
+            subject.create_surface_from_points(
+                ifc,
+                surface,
+                name="MS",
+                points=[(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+            )
+
+        assert any(
+            "multi-site" in r.message.lower() for r in caplog.records
+        ), f"expected multi-site warning, got: {[r.message for r in caplog.records]}"
+
+    def test_single_site_file_does_not_warn(self, ifc, surface, caplog):
+        """Sanity: single-site files don't trigger the warning."""
+
+        class SingleSiteFakeFile(FakeIfcFile):
+            def by_type(self, ifc_class):
+                if ifc_class == "IfcSite":
+                    return [object()]  # 1 site
+                return []
+
+        fake_file = SingleSiteFakeFile()
+        fake_surface = FakeCivilSurface()
+
+        ifc.get().should_be_called().will_return(fake_file)
+        surface.build_tin_from_points(
+            name="OK", points=[(0, 0, 0), (1, 0, 0), (0, 1, 0)], kind="existing"
+        ).should_be_called().will_return(fake_surface)
+        surface.author_ifc_host(
+            fake_file, fake_surface, triangulation_tolerance=0.0
+        ).should_be_called()
+        surface.register(fake_file, fake_surface).should_be_called()
+
+        with caplog.at_level("WARNING", logger="bonsai.core.surface"):
+            subject.create_surface_from_points(
+                ifc,
+                surface,
+                name="OK",
+                points=[(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+            )
+
+        assert not any(
+            "multi-site" in r.message.lower() for r in caplog.records
+        )
+
     def test_triangulation_tolerance_forwarded_to_tool(self, ifc, surface):
         fake_file = FakeIfcFile()
         fake_surface = FakeCivilSurface()
