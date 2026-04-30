@@ -45,6 +45,26 @@ from bpy.props import (
 from bpy.types import PropertyGroup, UIList
 
 
+def _on_decorator_toggle_change(self, context: bpy.types.Context) -> None:
+    """Install / uninstall :class:`SurfaceDecorator` based on the two
+    decorator-toggle booleans.
+
+    Lazy-imports the decorator module to avoid the circular import that
+    would otherwise hit (decorator imports tool which imports the bim
+    module's prop). The handler runs when ``show_triangles`` or
+    ``show_elevation_banding`` flips — installed once with both False
+    means "uninstall completely"; either True means "install if not
+    already installed".
+    """
+    from . import decorator as surface_decorator
+
+    if self.show_triangles or self.show_elevation_banding:
+        if not surface_decorator.SurfaceDecorator.is_installed:
+            surface_decorator.SurfaceDecorator.install(context)
+    else:
+        surface_decorator.SurfaceDecorator.uninstall()
+
+
 class CivilSurfaceListItem(PropertyGroup):
     """A single row in the surface list. Points the UI at one authored
     surface entity in the IFC file."""
@@ -193,6 +213,7 @@ class CivilSurfaceProperties(PropertyGroup):
         name="Show Triangles",
         description="Render the TIN triangle wireframe via the surface decorator",
         default=False,
+        update=_on_decorator_toggle_change,
     )
 
     show_elevation_banding: BoolProperty(
@@ -200,4 +221,5 @@ class CivilSurfaceProperties(PropertyGroup):
         description="Render the TIN with per-vertex elevation colors via the "
         "surface decorator",
         default=False,
+        update=_on_decorator_toggle_change,
     )

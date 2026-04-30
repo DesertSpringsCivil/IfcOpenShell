@@ -1380,6 +1380,105 @@ class TestSurfaceDataCache(NewIfc4X3):
         assert summary["name"] == "(missing)"
 
 
+class TestSurfaceDecorator(NewIfc4X3):
+    """Tests for :class:`bonsai.bim.module.surface.decorator.SurfaceDecorator`.
+
+    The GPU draw handler itself can't run headless (no viewport), but install/
+    uninstall lifecycle, the toggle update= callback, and the elevation-color
+    ramp math are all exercisable.
+    """
+
+    def test_install_uninstall_lifecycle(self) -> None:
+        from bonsai.bim.module.surface.decorator import SurfaceDecorator
+
+        SurfaceDecorator.uninstall()  # ensure clean slate
+        assert not SurfaceDecorator.is_installed
+        SurfaceDecorator.install(bpy.context)
+        try:
+            assert SurfaceDecorator.is_installed
+            assert len(SurfaceDecorator.handlers) == 1
+        finally:
+            SurfaceDecorator.uninstall()
+        assert not SurfaceDecorator.is_installed
+        assert SurfaceDecorator.handlers == []
+
+    def test_install_idempotent(self) -> None:
+        from bonsai.bim.module.surface.decorator import SurfaceDecorator
+
+        SurfaceDecorator.uninstall()
+        SurfaceDecorator.install(bpy.context)
+        SurfaceDecorator.install(bpy.context)  # second install replaces handler
+        try:
+            assert SurfaceDecorator.is_installed
+            assert len(SurfaceDecorator.handlers) == 1
+        finally:
+            SurfaceDecorator.uninstall()
+
+    def test_toggle_show_triangles_installs_decorator(self) -> None:
+        from bonsai.bim.module.surface.decorator import SurfaceDecorator
+
+        SurfaceDecorator.uninstall()
+        props = bpy.context.scene.CivilSurfaceProperties
+        props.show_triangles = True
+        try:
+            assert SurfaceDecorator.is_installed
+        finally:
+            props.show_triangles = False
+            SurfaceDecorator.uninstall()
+
+    def test_toggling_both_off_uninstalls_decorator(self) -> None:
+        from bonsai.bim.module.surface.decorator import SurfaceDecorator
+
+        SurfaceDecorator.uninstall()
+        props = bpy.context.scene.CivilSurfaceProperties
+        props.show_triangles = True
+        props.show_elevation_banding = True
+        try:
+            assert SurfaceDecorator.is_installed
+            props.show_triangles = False
+            assert SurfaceDecorator.is_installed  # banding still on
+            props.show_elevation_banding = False
+            assert not SurfaceDecorator.is_installed
+        finally:
+            props.show_triangles = False
+            props.show_elevation_banding = False
+            SurfaceDecorator.uninstall()
+
+    def test_elevation_color_ramp_endpoints(self) -> None:
+        """``_elevation_color`` returns the low / mid / high stops at 0 /
+        0.5 / 1 respectively, and clamps out-of-range values."""
+        from bonsai.bim.module.surface.decorator import SurfaceDecorator
+
+        assert SurfaceDecorator._elevation_color(0.0) == pytest.approx(
+            SurfaceDecorator.COLOR_ELEVATION_LOW
+        )
+        assert SurfaceDecorator._elevation_color(0.5) == pytest.approx(
+            SurfaceDecorator.COLOR_ELEVATION_MID
+        )
+        assert SurfaceDecorator._elevation_color(1.0) == pytest.approx(
+            SurfaceDecorator.COLOR_ELEVATION_HIGH
+        )
+        # Out-of-range values are clamped.
+        assert SurfaceDecorator._elevation_color(-0.5) == pytest.approx(
+            SurfaceDecorator.COLOR_ELEVATION_LOW
+        )
+        assert SurfaceDecorator._elevation_color(1.5) == pytest.approx(
+            SurfaceDecorator.COLOR_ELEVATION_HIGH
+        )
+
+    def test_elevation_color_interpolates_between_stops(self) -> None:
+        """At t=0.25 the result should be the midpoint of LOW and MID."""
+        from bonsai.bim.module.surface.decorator import SurfaceDecorator
+
+        result = SurfaceDecorator._elevation_color(0.25)
+        expected = SurfaceDecorator._lerp_rgba(
+            SurfaceDecorator.COLOR_ELEVATION_LOW,
+            SurfaceDecorator.COLOR_ELEVATION_MID,
+            0.5,
+        )
+        assert result == pytest.approx(expected)
+
+
 class TestLoadPointsFromCsv:
     """Tests for :meth:`bonsai.tool.surface.Surface.load_points_from_csv`."""
 
