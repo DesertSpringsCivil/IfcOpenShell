@@ -28,6 +28,8 @@ Run via the canonical Phase 4 invocation (PowerShell, from src/bonsai)::
       --blender-executable "C:\\Program Files\\Blender Foundation\\Blender_5\\blender.exe"
 """
 
+import logging
+
 import bpy
 import ifcopenshell
 import ifcopenshell.api.unit
@@ -541,17 +543,13 @@ class TestFlagsTranslation:
         # is shared by both triangles.
         assert all(1 <= flag <= 7 for flag in flags), f"flags={flags.tolist()}"
 
-    def test_internal_breakline_silently_dropped_pin(self) -> None:
+    def test_internal_breakline_silently_dropped_pin(self, caplog) -> None:
         """Pin the documented Phase 4 limitation: breaklines that don't
-        fully cross the outer boundary are silently dropped by the CDT
-        (per :meth:`_build_constrained_geometry` docstring).
-
-        This test exists to surface the corner case rather than assert any
-        particular topology — the CDT's behavior is implementation-defined
-        when the breakline doesn't split the polygon. We assert only that
-        triangulation completes without error and produces a valid output;
-        the user-visible consequence (breakline not honored as a forced edge)
-        is an accepted Phase 4 limitation.
+        fully cross the outer boundary aren't honored as forced edges
+        (per :meth:`_build_constrained_geometry` docstring). The CDT
+        completes without error, but the tool layer emits a WARNING log
+        so callers / users can detect the non-honored breakline rather
+        than getting a silent miss.
         """
         triangulator = self._make()
         points = np.array(
@@ -568,11 +566,18 @@ class TestFlagsTranslation:
         outer = shapely.Polygon([(0, 0), (4, 0), (4, 4), (0, 4)])
         # Internal breakline from vertex 4 to vertex 5 — does NOT fully cross
         # the outer boundary. shapely.ops.split returns the polygon unchanged.
-        triangles, flags = triangulator.constrained(
-            points, [(4, 5)], outer, [], []
-        )
+        with caplog.at_level("WARNING", logger="bonsai.tool.surface"):
+            triangles, flags = triangulator.constrained(
+                points, [(4, 5)], outer, [], []
+            )
         assert triangles.ndim == 2 and triangles.shape[1] == 3
         assert flags.shape == (triangles.shape[0],)
+        # WARNING was emitted naming the dropped segment.
+        assert any(
+            "not honored" in r.message
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+        ), f"expected breakline-drop warning, got: {[r.message for r in caplog.records]}"
 
 
 class TestSurfaceBuildTinFromPoints:

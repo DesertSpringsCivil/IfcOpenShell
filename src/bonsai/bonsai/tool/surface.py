@@ -36,6 +36,7 @@ UI calls into core which calls into tool.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Optional, Protocol
 
@@ -50,6 +51,9 @@ import bonsai.tool as tool
 
 if TYPE_CHECKING:
     import ifcopenshell
+
+
+_logger = logging.getLogger("bonsai.tool.surface")
 
 
 @dataclass
@@ -427,6 +431,7 @@ class _ScipyShapelyTriangulator:
                 ]
             )
             new_polygons: list[shapely.Polygon] = []
+            polygon_count_before = len(polygons)
             for poly in polygons:
                 split_result = shapely.ops.split(poly, line)
                 if hasattr(split_result, "geoms"):
@@ -435,6 +440,22 @@ class _ScipyShapelyTriangulator:
                     )
                 elif isinstance(split_result, shapely.Polygon):
                     new_polygons.append(split_result)
+            # Detect the silent-drop case: split produced no new sub-polygons
+            # (either because the breakline doesn't fully cross any polygon,
+            # or because it's tangential to a sub-polygon boundary). Log a
+            # warning so callers / users can spot non-honored breaklines
+            # rather than getting a TIN that silently ignores their input.
+            if len(new_polygons) <= polygon_count_before:
+                _logger.warning(
+                    "Breakline segment (%d, %d) was not honored by the "
+                    "constrained Delaunay backend — polyline may not fully "
+                    "cross the outer boundary, or may be tangent to an "
+                    "existing sub-polygon edge. The annotation persists in "
+                    "IFC but the resulting TIN does not contain the forced "
+                    "edge.",
+                    a,
+                    b,
+                )
             polygons = new_polygons or polygons
         return shapely.MultiPolygon(polygons) if len(polygons) > 1 else polygons[0]
 
