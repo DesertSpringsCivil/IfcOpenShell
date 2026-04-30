@@ -1918,6 +1918,69 @@ class TestSurfaceDataCache(NewIfc4X3):
         )
         assert summary["name"] == "(missing)"
 
+    def test_load_syncs_uilist_with_ifc_entities(self, tmp_path) -> None:
+        """Closes the cold-review-flagged "UIList empty on file reopen"
+        bug. SurfaceData.load() must repopulate
+        CivilSurfaceProperties.surfaces from the IFC tree, not just count
+        entities. Without this, opening a file with surfaces shows an
+        empty list."""
+        from bonsai.bim.module.surface.data import SurfaceData
+
+        # Create a surface, then simulate "reopen" by clearing the UIList.
+        path = tmp_path / "p.csv"
+        path.write_text("0,0,0\n10,0,0\n10,10,0\n0,10,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "ListTest"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        # The UIList has 1 row from the create operator.
+        assert len(bpy.context.scene.CivilSurfaceProperties.surfaces) == 1
+
+        # Simulate a file reopen: clear the UIList in place.
+        bpy.context.scene.CivilSurfaceProperties.surfaces.clear()
+        assert len(bpy.context.scene.CivilSurfaceProperties.surfaces) == 0
+
+        # Force a load — the UIList should rebuild from the IFC tree.
+        SurfaceData.is_loaded = False
+        SurfaceData.load()
+
+        surfaces = bpy.context.scene.CivilSurfaceProperties.surfaces
+        assert len(surfaces) == 1
+        assert surfaces[0].name == "ListTest"
+        assert surfaces[0].kind == "existing"
+        assert surfaces[0].guid != ""
+        assert surfaces[0].ifc_id > 0
+
+    def test_load_preserves_active_selection_if_guid_still_present(
+        self, tmp_path
+    ) -> None:
+        """When refreshing an existing UIList, the previously-selected
+        row stays selected if its GUID survives in the IFC."""
+        from bonsai.bim.module.surface.data import SurfaceData
+
+        path_a = tmp_path / "a.csv"
+        path_a.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Surf A"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path_a)
+        )
+        path_b = tmp_path / "b.csv"
+        path_b.write_text("10,10,0\n11,10,0\n10,11,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Surf B"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path_b)
+        )
+
+        # Select A.
+        props = bpy.context.scene.CivilSurfaceProperties
+        props.active_surface_index = 0
+        guid_a = props.active_surface_guid
+
+        # Force a reload — A's guid is still in the IFC, selection preserved.
+        SurfaceData.is_loaded = False
+        SurfaceData.load()
+        assert props.active_surface_guid == guid_a
+
 
 class TestActiveSurfaceIndexSync(NewIfc4X3):
     """Tests for the :func:`_on_active_surface_index_change` update callback.

@@ -20,9 +20,13 @@
 
 Mirrors :mod:`bonsai.bim.module.alignment.data`: the panel reads from
 :class:`SurfaceData.data` rather than re-querying IFC every redraw. Bonsai's
-:func:`bonsai.bim.handler.refresh_ui_data` clears the ``is_loaded`` flag on
-each IFC mutation, forcing the next panel ``draw()`` to call :meth:`load`.
+:func:`bonsai.bim.handler.refresh_ui_data` calls :func:`refresh` (auto-
+discovered via the ``modules`` dict) on every IFC mutation, which marks
+``SurfaceData.is_loaded = False`` so the next panel ``draw()`` calls
+:meth:`load`.
 """
+
+import bpy
 
 import bonsai.tool as tool
 
@@ -35,7 +39,14 @@ class SurfaceData:
 
     @classmethod
     def load(cls) -> None:
-        """Refresh :attr:`data` from the active IFC file."""
+        """Refresh :attr:`data` from the active IFC file.
+
+        Also re-syncs ``CivilSurfaceProperties.surfaces`` (the UIList
+        backing collection) from the IFC entity tree. Without this sync,
+        opening a file that already contains surfaces shows an empty
+        UIList — only surfaces created in the *current* session would
+        appear.
+        """
         cls.data = {
             "surface_count": 0,
             "active_surface_summary": None,
@@ -53,7 +64,52 @@ class SurfaceData:
         fills = [f for f in fills if f.PredefinedType == "SUBGRADE"]
         cls.data["surface_count"] = len(terrains) + len(fills)
 
+        cls._sync_uilist_from_ifc(terrains, fills)
+
         cls.is_loaded = True
+
+    @staticmethod
+    def _sync_uilist_from_ifc(
+        terrains: list, fills: list
+    ) -> None:
+        """Reconcile ``CivilSurfaceProperties.surfaces`` with the IFC
+        entity set.
+
+        Idempotent: clears the collection and rebuilds from the IFC tree.
+        Preserves ``active_surface_index`` if the previously-selected GUID
+        is still present in the file; otherwise resets to 0.
+        """
+        scene = bpy.context.scene if bpy.context else None
+        if scene is None or not hasattr(scene, "CivilSurfaceProperties"):
+            return
+        props = scene.CivilSurfaceProperties
+
+        previous_guid = props.active_surface_guid
+
+        props.surfaces.clear()
+        for entity in terrains:
+            item = props.surfaces.add()
+            item.name = entity.Name or ""
+            item.guid = entity.GlobalId
+            item.ifc_id = entity.id()
+            item.kind = "existing"
+        for entity in fills:
+            item = props.surfaces.add()
+            item.name = entity.Name or ""
+            item.guid = entity.GlobalId
+            item.ifc_id = entity.id()
+            # Disambiguation between proposed_group / proposed_site
+            # happens in tool.Surface.infer_kind_from_spatial_parent;
+            # the UIList just shows the icon for "proposed of some kind."
+            item.kind = "proposed_group"
+
+        # Restore the previous selection if its GUID is still in the list.
+        for index, item in enumerate(props.surfaces):
+            if item.guid == previous_guid:
+                props.active_surface_index = index
+                break
+        else:
+            props.active_surface_index = 0 if len(props.surfaces) else 0
 
     @classmethod
     def active_surface_summary(
