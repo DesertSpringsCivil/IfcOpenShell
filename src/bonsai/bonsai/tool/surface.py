@@ -914,6 +914,10 @@ class Surface:
         surface.points = augmented_points
         surface.triangles = triangles
         surface.triangle_flags = flags
+        # The z_at STRtree index is cached per-surface (per spec §6.4 perf
+        # target). Re-triangulating invalidates it; the next z_at call
+        # rebuilds from the new triangles array.
+        surface.metadata.pop("_z_at_index", None)
 
     @staticmethod
     def _resolve_breakline_segments(
@@ -950,29 +954,41 @@ class Surface:
 
         return np.asarray(new_points, dtype=float), segments
 
-    @staticmethod
-    def z_at(surface: CivilSurface, x: float, y: float) -> Optional[float]:
+    @classmethod
+    def z_at(
+        cls, surface: CivilSurface, x: float, y: float
+    ) -> Optional[float]:
         """Interpolated Z at ``(x, y)`` via point-in-triangle + barycentric.
 
         :returns: interpolated Z value, or ``None`` if ``(x, y)`` is outside
             every triangle in ``surface.triangles``.
 
-        Linear scan over triangles. Sufficient for Phase 4 fixtures (≤ a few
-        thousand triangles); STRtree-accelerated lookup is a Phase 4.1+
-        optimization for larger surfaces.
+        STRtree-accelerated. The first call on a given surface builds an
+        :class:`shapely.STRtree` of triangle XY polygons and caches it on
+        ``surface.metadata["_z_at_index"]``; subsequent calls reuse the
+        cached tree and only run barycentric checks on the candidate
+        triangles whose XY bounding box contains the query point. The
+        cache is invalidated by :meth:`retriangulate` (triangles array
+        change → cache pop). Phase 5 slope projection issues thousands
+        of ``z_at`` calls per slope vector; the linear scan would be
+        ~10^8 Python iterations on realistic surfaces.
 
-        The inside-test ``epsilon`` is intentionally **absolute**, not relative
-        to triangle size. At civil-engineering project scales (1 m to 10 km
-        extents in metric units), ``1e-9`` corresponds to nanometre-precision
-        leakage at the boundary — well below survey accuracy and small enough
-        that its effect on interpolated Z is negligible for any practical
-        triangle.
+        The inside-test ``epsilon`` is intentionally **absolute**, not
+        relative to triangle size. At civil-engineering project scales
+        (1 m to 10 km extents in metric units), ``1e-9`` corresponds to
+        nanometre-precision leakage at the boundary — well below survey
+        accuracy and small enough that its effect on interpolated Z is
+        negligible for any practical triangle.
         """
         px, py = float(x), float(y)
         points = surface.points
         epsilon = 1e-9
 
-        for triangle in surface.triangles:
+        tree, triangle_polys = cls._get_or_build_z_at_index(surface)
+        candidate_indices = tree.query(shapely.Point(px, py))
+
+        for index in candidate_indices:
+            triangle = surface.triangles[int(index)]
             a = points[triangle[0]]
             b = points[triangle[1]]
             c = points[triangle[2]]
@@ -985,6 +1001,43 @@ class Surface:
             if u >= -epsilon and v >= -epsilon and w >= -epsilon:
                 return float(u * a[2] + v * b[2] + w * c[2])
         return None
+
+    @staticmethod
+    def _get_or_build_z_at_index(
+        surface: CivilSurface,
+    ) -> tuple["shapely.STRtree", list[shapely.Polygon]]:
+        """Return the cached STRtree + triangle-polygon list for
+        :meth:`z_at` queries, building it on first use.
+
+        Cache key: ``surface.metadata["_z_at_index"]``. Stored as a tuple
+        ``(strtree, triangle_polys)`` so callers can recover the polygon
+        list at the index returned by ``tree.query`` (the STRtree itself
+        only returns integer indices, not the polygons).
+
+        Triangles are 2D (XY only) for the spatial-index step; the Z
+        component is recovered from ``surface.points[triangle[i]][2]``
+        in the barycentric step.
+        """
+        cached = surface.metadata.get("_z_at_index")
+        if cached is not None:
+            return cached
+
+        triangle_polys: list[shapely.Polygon] = []
+        for triangle in surface.triangles:
+            triangle_polys.append(
+                shapely.Polygon(
+                    [
+                        (
+                            float(surface.points[triangle[i], 0]),
+                            float(surface.points[triangle[i], 1]),
+                        )
+                        for i in range(3)
+                    ]
+                )
+            )
+        tree = shapely.STRtree(triangle_polys)
+        surface.metadata["_z_at_index"] = (tree, triangle_polys)
+        return tree, triangle_polys
 
     @classmethod
     def author_ifc_host(

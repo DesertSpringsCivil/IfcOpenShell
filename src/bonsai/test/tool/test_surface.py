@@ -814,6 +814,84 @@ class TestSurfaceZAt:
         assert z is not None
         assert z == pytest.approx(5.0)
 
+    def test_strtree_index_built_on_first_call_and_cached(self) -> None:
+        """First :meth:`z_at` call builds the STRtree index and caches it
+        in ``surface.metadata["_z_at_index"]``; subsequent calls reuse the
+        cached tree."""
+        surface = self._flat_unit_square()
+        assert "_z_at_index" not in surface.metadata
+
+        tool_surface.Surface.z_at(surface, 0.5, 0.5)
+        assert "_z_at_index" in surface.metadata
+        cached_tuple = surface.metadata["_z_at_index"]
+
+        tool_surface.Surface.z_at(surface, 0.25, 0.75)
+        # Same tuple object reused — proves no rebuild.
+        assert surface.metadata["_z_at_index"] is cached_tuple
+
+    def test_retriangulate_invalidates_z_at_index(self) -> None:
+        """:meth:`retriangulate` must drop the cached STRtree index so the
+        next :meth:`z_at` call rebuilds against the new triangles."""
+        surface = self._flat_unit_square()
+        tool_surface.Surface.z_at(surface, 0.5, 0.5)
+        assert "_z_at_index" in surface.metadata
+
+        tool_surface.Surface.retriangulate(surface)
+        assert "_z_at_index" not in surface.metadata
+
+        # Next z_at rebuilds. Verify it still returns correct values.
+        z = tool_surface.Surface.z_at(surface, 0.5, 0.5)
+        assert z == pytest.approx(0.0)
+        assert "_z_at_index" in surface.metadata
+
+    def test_z_at_correctness_unchanged_with_strtree(self) -> None:
+        """Sanity: regression on the existing z_at correctness suite. The
+        STRtree path must produce identical results to the linear scan
+        for at-vertex / on-edge / interior queries."""
+        surface = self._pyramid()
+        # At apex.
+        assert tool_surface.Surface.z_at(surface, 5.0, 5.0) == pytest.approx(10.0)
+        # Halfway from base corner to apex.
+        assert tool_surface.Surface.z_at(surface, 2.5, 2.5) == pytest.approx(5.0)
+        # Outside.
+        assert tool_surface.Surface.z_at(surface, -1.0, -1.0) is None
+        assert tool_surface.Surface.z_at(surface, 100.0, 100.0) is None
+
+    def test_z_at_performance_on_grid_surface(self) -> None:
+        """STRtree-accelerated lookup keeps z_at sub-linear on larger
+        surfaces. With a 50x50 grid (4900 triangles) and 1000 random
+        queries, the total time should be well under 1 second on any
+        modern machine. This is a ballpark perf gate, not a strict bound."""
+        import time
+
+        # Build a 50x50 grid surface — 2500 vertices, ~4900 triangles.
+        n = 50
+        coords = []
+        for j in range(n):
+            for i in range(n):
+                coords.append((float(i), float(j), float(i + j) * 0.1))
+        points = np.asarray(coords, dtype=float)
+        surface = tool_surface.Surface.build_tin_from_points("Perf", points)
+
+        # 1000 random in-bound queries.
+        rng = np.random.default_rng(seed=0)
+        xs = rng.uniform(0, n - 1, size=1000)
+        ys = rng.uniform(0, n - 1, size=1000)
+
+        start = time.perf_counter()
+        hits = 0
+        for x, y in zip(xs, ys):
+            z = tool_surface.Surface.z_at(surface, float(x), float(y))
+            if z is not None:
+                hits += 1
+        elapsed = time.perf_counter() - start
+
+        assert hits > 950  # most random queries land inside the grid
+        assert elapsed < 1.0, (
+            f"1000 z_at queries on a {len(surface.triangles)}-triangle "
+            f"surface took {elapsed:.3f}s; STRtree may be misbehaving"
+        )
+
     def test_inclined_plane_interpolates(self) -> None:
         # Plane z = x: linear ramp.
         points = np.array(
