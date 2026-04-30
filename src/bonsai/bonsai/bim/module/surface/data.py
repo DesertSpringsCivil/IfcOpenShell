@@ -78,6 +78,14 @@ class SurfaceData:
         Idempotent: clears the collection and rebuilds from the IFC tree.
         Preserves ``active_surface_index`` if the previously-selected GUID
         is still present in the file; otherwise resets to 0.
+
+        The :attr:`active_surface_id` and :attr:`active_surface_guid`
+        scratchpad are restored *after* the rebuild so the
+        ``_on_active_surface_index_change`` callback firing mid-rebuild
+        (against an intermediate empty / partial collection) doesn't
+        leave the panel pointing at stale state. We snapshot the GUID
+        before clearing, then restore both the index AND the
+        id/guid scratchpad explicitly at the end.
         """
         scene = bpy.context.scene if bpy.context else None
         if scene is None or not hasattr(scene, "CivilSurfaceProperties"):
@@ -104,13 +112,27 @@ class SurfaceData:
             # groups classify proposed_group correctly without code change.
             item.kind = tool.Surface.infer_kind_from_spatial_parent(entity)
 
-        # Restore the previous selection if its GUID is still in the list.
+        # Find the index for the previously-selected GUID, defaulting to 0.
+        target_index = 0
         for index, item in enumerate(props.surfaces):
             if item.guid == previous_guid:
-                props.active_surface_index = index
+                target_index = index
                 break
+
+        # Set the index (this fires the update callback once, against the
+        # fully-built collection — safe).
+        props.active_surface_index = target_index
+
+        # Belt-and-braces: explicitly restore the id/guid scratchpad in
+        # case the callback short-circuited (e.g., index was already
+        # target_index and Blender skipped the update event).
+        if 0 <= target_index < len(props.surfaces):
+            current = props.surfaces[target_index]
+            props.active_surface_id = current.ifc_id
+            props.active_surface_guid = current.guid
         else:
-            props.active_surface_index = 0 if len(props.surfaces) else 0
+            props.active_surface_id = 0
+            props.active_surface_guid = ""
 
     @classmethod
     def active_surface_summary(
