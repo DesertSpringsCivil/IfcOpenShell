@@ -1358,6 +1358,148 @@ def _reset_surface_registry():
     tool_surface.Surface.clear()
 
 
+class TestRehydrationHelpers:
+    """Direct tests for the module-level rehydration helpers.
+
+    These functions were previously only exercised via
+    ``_recover_breaklines_from_annotations``; the cold-review tester
+    flagged them as untested helper paths. Direct tests pin error
+    branches and skip-paths that the integration test wouldn't surface.
+    """
+
+    @staticmethod
+    def _make_breakline_annotation(
+        ifc_file: ifcopenshell.file,
+        polyline: list[tuple[float, float, float]],
+        kind: str = "standard",
+        source: str = "manual",
+        name: str = "test-bl",
+    ) -> ifcopenshell.entity_instance:
+        """Build an IfcAnnotation[BREAKLINE] via the Phase 1 API for use
+        in the helper-function tests."""
+        site = ifc_file.by_type("IfcSite")[0]
+        return ifcopenshell.api.surface.add_breakline_annotation(
+            ifc_file,
+            site=site,
+            polyline=polyline,
+            name=name,
+            kind=kind,
+            source=source,
+        )
+
+    def test_extract_polyline_3d_returns_points(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        annotation = self._make_breakline_annotation(
+            ifc_file,
+            polyline=[(0.0, 0.0, 0.0), (10.0, 5.0, 1.5)],
+        )
+        result = tool_surface._extract_polyline_3d(annotation)
+        assert result == [(0.0, 0.0, 0.0), (10.0, 5.0, 1.5)]
+
+    def test_extract_polyline_3d_returns_none_when_representation_absent(
+        self,
+    ) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        # Hand-roll an IfcAnnotation with no Representation.
+        annotation = ifc_file.create_entity(
+            "IfcAnnotation",
+            GlobalId=ifcopenshell.guid.new(),
+            Name="naked",
+            ObjectType="BREAKLINE",
+            PredefinedType="USERDEFINED",
+        )
+        assert tool_surface._extract_polyline_3d(annotation) is None
+
+    def test_extract_breakline_pset_returns_pset_values(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        annotation = self._make_breakline_annotation(
+            ifc_file,
+            polyline=[(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)],
+            kind="wall",
+            source="feature_line",
+        )
+        kind, source = tool_surface._extract_breakline_pset(annotation)
+        assert kind == "wall"
+        assert source == "feature_line"
+
+    def test_extract_breakline_pset_falls_back_when_pset_missing(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        # Bare annotation with no Pset_SaikeiBreaklineCommon.
+        annotation = ifc_file.create_entity(
+            "IfcAnnotation",
+            GlobalId=ifcopenshell.guid.new(),
+            Name="no-pset",
+            ObjectType="BREAKLINE",
+            PredefinedType="USERDEFINED",
+        )
+        kind, source = tool_surface._extract_breakline_pset(annotation)
+        assert kind == "standard"
+        assert source == "recovered"
+
+    def test_annotation_belongs_to_host_no_assignments_returns_true(
+        self,
+    ) -> None:
+        """The fallback for legacy unscoped breaklines: when an annotation
+        has no IfcRelAssignsToProduct, return True for any host so
+        single-surface files keep recovering their breaklines."""
+        ifc_file = _make_ifc_file_with_site()
+        annotation = self._make_breakline_annotation(
+            ifc_file,
+            polyline=[(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)],
+        )
+        # Use any IfcProduct as the host; the fallback ignores it.
+        host = ifc_file.by_type("IfcSite")[0]
+        assert tool_surface._annotation_belongs_to_host(annotation, host) is True
+
+    def test_annotation_belongs_to_host_matches_assigned_product(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        # Build a surface to use as host.
+        surface = tool_surface.Surface.build_tin_from_points(
+            "Host",
+            np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]),
+        )
+        host = tool_surface.Surface.author_ifc_host(ifc_file, surface)
+        # Author breakline scoped to host.
+        breakline = tool_surface.Breakline(
+            guid=ifcopenshell.guid.new(),
+            name="bl",
+            polyline=[(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)],
+            kind="standard",
+            source="manual",
+        )
+        annotation = tool_surface.Surface.author_ifc_breakline(
+            ifc_file, breakline, host_surface=host
+        )
+        assert tool_surface._annotation_belongs_to_host(annotation, host) is True
+
+    def test_annotation_belongs_to_host_rejects_other_product(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        # Two surfaces; breakline scoped to A only.
+        surface_a = tool_surface.Surface.build_tin_from_points(
+            "A",
+            np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]),
+        )
+        surface_b = tool_surface.Surface.build_tin_from_points(
+            "B",
+            np.array([(10.0, 10.0, 0.0), (11.0, 10.0, 0.0), (10.0, 11.0, 0.0)]),
+        )
+        host_a = tool_surface.Surface.author_ifc_host(ifc_file, surface_a)
+        host_b = tool_surface.Surface.author_ifc_host(ifc_file, surface_b)
+        breakline = tool_surface.Breakline(
+            guid=ifcopenshell.guid.new(),
+            name="bl",
+            polyline=[(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)],
+            kind="standard",
+            source="manual",
+        )
+        annotation = tool_surface.Surface.author_ifc_breakline(
+            ifc_file, breakline, host_surface=host_a
+        )
+        # Belongs to A, not B.
+        assert tool_surface._annotation_belongs_to_host(annotation, host_a) is True
+        assert tool_surface._annotation_belongs_to_host(annotation, host_b) is False
+
+
 class TestSurfaceRegistry:
     """Tests for :class:`Surface._registry` and :meth:`get` / :meth:`register`
     / :meth:`invalidate` / :meth:`clear` per spec §4.6."""
