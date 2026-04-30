@@ -1436,3 +1436,100 @@ class TestSurfaceCreateFromPointsOperator(NewIfc4X3):
                 "EXEC_DEFAULT", csv_filepath=str(points_path)
             )
         assert len(ifc_file.by_type("IfcGeographicElement")) == before
+
+
+class TestSurfaceAddBreaklineOperator(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_surface_add_breakline` headless path."""
+
+    def _create_active_surface(self, tmp_path) -> str:
+        """Helper: create a unit-square surface and return its GUID. Sets it
+        as the active surface in props."""
+        points_path = tmp_path / "square.csv"
+        points_path.write_text("0,0,0\n10,0,0\n10,10,0\n0,10,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        props = bpy.context.scene.CivilSurfaceProperties
+        return props.active_surface_guid
+
+    def test_headless_add_breakline(self, tmp_path) -> None:
+        guid = self._create_active_surface(tmp_path)
+        # Diagonal breakline crossing the unit-square surface.
+        polyline_path = tmp_path / "diag.csv"
+        polyline_path.write_text("0,0,0\n10,10,0\n")
+
+        ifc_file = tool.Ifc.get()
+        before_annotations = len(ifc_file.by_type("IfcAnnotation"))
+
+        result = bpy.ops.civil.surface_add_breakline(
+            "EXEC_DEFAULT",
+            csv_filepath=str(polyline_path),
+            kind="standard",
+            breakline_name="diagonal",
+        )
+        assert result == {"FINISHED"}
+
+        # An IfcAnnotation was authored.
+        annotations = ifc_file.by_type("IfcAnnotation")
+        assert len(annotations) == before_annotations + 1
+        breakline_annotation = annotations[-1]
+        assert breakline_annotation.Name == "diagonal"
+        assert breakline_annotation.ObjectType == "BREAKLINE"
+
+        # The cached surface has the breakline appended.
+        surface = tool.Surface.get(ifc_file, guid)
+        assert len(surface.breaklines) == 1
+        assert surface.breaklines[0].name == "diagonal"
+
+    def test_no_active_surface_raises(self, tmp_path) -> None:
+        polyline_path = tmp_path / "diag.csv"
+        polyline_path.write_text("0,0,0\n10,10,0\n")
+        # No active_surface_guid set.
+        bpy.context.scene.CivilSurfaceProperties.active_surface_guid = ""
+        with pytest.raises(RuntimeError, match="No active surface"):
+            bpy.ops.civil.surface_add_breakline(
+                "EXEC_DEFAULT", csv_filepath=str(polyline_path)
+            )
+
+    def test_too_short_polyline_raises(self, tmp_path) -> None:
+        self._create_active_surface(tmp_path)
+        polyline_path = tmp_path / "single.csv"
+        polyline_path.write_text("0,0,0\n")  # only 1 point — must be ≥ 2
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.surface_add_breakline(
+                "EXEC_DEFAULT", csv_filepath=str(polyline_path)
+            )
+
+    def test_kind_passed_through_to_pset(self, tmp_path) -> None:
+        self._create_active_surface(tmp_path)
+        polyline_path = tmp_path / "diag.csv"
+        polyline_path.write_text("0,0,0\n10,10,0\n")
+
+        bpy.ops.civil.surface_add_breakline(
+            "EXEC_DEFAULT",
+            csv_filepath=str(polyline_path),
+            kind="wall",
+            breakline_name="wall-line",
+        )
+
+        ifc_file = tool.Ifc.get()
+        annotation = next(
+            (
+                a
+                for a in ifc_file.by_type("IfcAnnotation")
+                if a.Name == "wall-line"
+            ),
+            None,
+        )
+        assert annotation is not None
+
+        # Find the Pset_SaikeiBreaklineCommon and check Kind.
+        kind_value = None
+        for rel in ifc_file.by_type("IfcRelDefinesByProperties"):
+            if annotation in (rel.RelatedObjects or []):
+                pset = rel.RelatingPropertyDefinition
+                if pset.Name == "Pset_SaikeiBreaklineCommon":
+                    for prop in pset.HasProperties:
+                        if prop.Name == "Kind":
+                            kind_value = prop.NominalValue.wrappedValue
+        assert kind_value == "wall"

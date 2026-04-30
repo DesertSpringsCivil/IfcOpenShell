@@ -34,7 +34,8 @@ Each operator follows the Bonsai standard pattern:
 """
 
 import bpy
-from bpy.props import FloatProperty, StringProperty
+import ifcopenshell.guid
+from bpy.props import EnumProperty, StringProperty
 from bpy.types import Operator
 
 import bonsai.core.surface as core_surface
@@ -136,6 +137,144 @@ class CIVIL_OT_surface_create_from_points(Operator, tool.Ifc.Operator):
     def invoke(self, context, event):
         # If the user already populated csv_filepath (e.g., via a property
         # bound on the panel), skip the file dialog and execute directly.
+        if self.csv_filepath:
+            return self.execute(context)
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+
+class CIVIL_OT_surface_add_breakline(Operator, tool.Ifc.Operator):
+    """Add a breakline to the active surface and retriangulate.
+
+    Modal entry per spec §8.5: ``invoke()`` opens a file selector for a
+    polyline CSV/XYZ file (same format as ``CIVIL_OT_surface_create_from_points``
+    — three columns of XYZ floats, one row per polyline vertex). The
+    interactive viewport-pick modal flow (click points to define the
+    polyline) is a Phase 4.1+ refinement; for now the file-dialog path
+    covers both UI invocation and headless callers.
+
+    Headless usage::
+
+        bpy.ops.civil.surface_add_breakline(
+            "EXEC_DEFAULT",
+            csv_filepath="/path/to/polyline.csv",
+            kind="standard",
+            breakline_name="ridge",
+        )
+
+    Reads :attr:`CivilSurfaceProperties.active_surface_guid` to identify
+    the host surface.
+    """
+
+    bl_idname = "civil.surface_add_breakline"
+    bl_label = "Add Breakline to Surface"
+    bl_description = (
+        "Append a breakline polyline to the active surface, persist as "
+        "IfcAnnotation, and retriangulate the TIN to honor the new edge"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    csv_filepath: StringProperty(
+        name="Polyline CSV / XYZ",
+        description="Path to a CSV / whitespace-separated XYZ file describing "
+        "an ordered polyline (≥ 2 rows of x,y,z)",
+        subtype="FILE_PATH",
+    )
+    filter_glob: StringProperty(
+        default="*.csv;*.txt;*.xyz",
+        options={"HIDDEN"},
+    )
+    kind: EnumProperty(
+        name="Kind",
+        description="Breakline kind per spec §2.3",
+        items=[
+            ("standard", "Standard", "Edges added to the TIN at each segment"),
+            ("wall", "Wall", "Edges added; downstream may render a vertical face"),
+            (
+                "non_destructive",
+                "Non-Destructive",
+                "Edges added without splitting existing triangles",
+            ),
+            (
+                "proximity",
+                "Proximity",
+                "Triangles flagged near this polyline; no edges forced",
+            ),
+        ],
+        default="standard",
+    )
+    breakline_name: StringProperty(
+        name="Name",
+        description="Human-readable label for the IfcAnnotation",
+        default="Breakline",
+    )
+    source: StringProperty(
+        name="Source",
+        description="Free-form provenance label (manual, feature_line, etc.)",
+        default="manual",
+    )
+
+    def _execute(self, context):
+        props = context.scene.CivilSurfaceProperties
+        if not props.active_surface_guid:
+            self.report(
+                {"ERROR"},
+                "No active surface — select a surface in the panel UIList first",
+            )
+            return {"CANCELLED"}
+
+        try:
+            polyline_points = tool.Surface.load_points_from_csv(self.csv_filepath)
+        except tool_surface.SaikeiSurfaceError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        if polyline_points.shape[0] < 2:
+            self.report(
+                {"ERROR"},
+                f"breakline polyline must have ≥ 2 points; got {polyline_points.shape[0]}",
+            )
+            return {"CANCELLED"}
+
+        breakline = tool_surface.Breakline(
+            guid=ifcopenshell.guid.new(),
+            name=self.breakline_name,
+            polyline=[
+                (float(p[0]), float(p[1]), float(p[2])) for p in polyline_points
+            ],
+            kind=self.kind,
+            source=self.source,
+        )
+
+        try:
+            surface = core_surface.add_breakline_to_surface(
+                tool.Ifc,
+                tool.Surface,
+                surface_guid=props.active_surface_guid,
+                breakline=breakline,
+            )
+        except (ValueError, tool_surface.SaikeiSurfaceError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        # Refresh the Blender mesh so the user sees the rebuilt TIN with the
+        # new breakline edges.
+        try:
+            tool.Surface.update_blender_mesh(tool.Ifc.get(), surface)
+        except tool_surface.SaikeiSurfaceError as exc:
+            self.report(
+                {"WARNING"},
+                f"breakline added to IFC but Blender mesh refresh failed: {exc}",
+            )
+
+        self.report(
+            {"INFO"},
+            f"Added breakline {breakline.name!r} ({len(breakline.polyline)} pts) "
+            f"to {surface.name}",
+        )
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
         if self.csv_filepath:
             return self.execute(context)
         context.window_manager.fileselect_add(self)
