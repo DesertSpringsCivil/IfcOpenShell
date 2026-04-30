@@ -45,6 +45,31 @@ from bpy.props import (
 from bpy.types import PropertyGroup, UIList
 
 
+def _on_active_surface_index_change(
+    self, context: bpy.types.Context
+) -> None:
+    """Sync :attr:`active_surface_id` and :attr:`active_surface_guid` from
+    the highlighted UIList row.
+
+    Without this, clicking a row in :class:`CIVIL_UL_surfaces` only changes
+    the visually-highlighted row — the operator-targeting fields stay
+    pointed at whichever surface was last *created*, which makes editing
+    any earlier surface impossible through the panel. With this callback,
+    the active GUID always matches the selected list row.
+
+    Empty / out-of-range indices clear the active state so downstream
+    polls (``CIVIL_PT_surface_active.poll``) hide the active panel rather
+    than running against stale references.
+    """
+    if 0 <= self.active_surface_index < len(self.surfaces):
+        item = self.surfaces[self.active_surface_index]
+        self.active_surface_id = item.ifc_id
+        self.active_surface_guid = item.guid
+    else:
+        self.active_surface_id = 0
+        self.active_surface_guid = ""
+
+
 def _on_decorator_toggle_change(self, context: bpy.types.Context) -> None:
     """Install / uninstall :class:`SurfaceDecorator` based on the two
     decorator-toggle booleans.
@@ -200,8 +225,12 @@ class CivilSurfaceProperties(PropertyGroup):
 
     active_surface_index: IntProperty(
         name="Active Surface Index",
-        description="Index into :attr:`surfaces` of the highlighted UIList row",
+        description="Index into :attr:`surfaces` of the highlighted UIList row. "
+        "Selecting a different row updates :attr:`active_surface_id` and "
+        ":attr:`active_surface_guid` via the update callback so subsequent "
+        "edit operators target the correct surface",
         default=0,
+        update=_on_active_surface_index_change,
     )
 
     # ----------------------------------------------------------------------

@@ -1380,6 +1380,113 @@ class TestSurfaceDataCache(NewIfc4X3):
         assert summary["name"] == "(missing)"
 
 
+class TestActiveSurfaceIndexSync(NewIfc4X3):
+    """Tests for the :func:`_on_active_surface_index_change` update callback.
+
+    Without this callback, clicking a different UIList row only changes the
+    visually-highlighted row — :attr:`active_surface_guid` would stay
+    pointed at whichever surface was last created, blocking the user from
+    editing earlier surfaces.
+    """
+
+    def _create_two_surfaces(self, tmp_path) -> tuple[str, str]:
+        """Create two surfaces and return (guid_A, guid_B). After this
+        helper, B is the active surface (last created)."""
+        path_a = tmp_path / "a.csv"
+        path_a.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Surf A"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path_a)
+        )
+        guid_a = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        path_b = tmp_path / "b.csv"
+        path_b.write_text("10,10,0\n11,10,0\n10,11,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Surf B"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path_b)
+        )
+        guid_b = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        return guid_a, guid_b
+
+    def test_selecting_first_row_makes_first_surface_active(self, tmp_path) -> None:
+        guid_a, guid_b = self._create_two_surfaces(tmp_path)
+        props = bpy.context.scene.CivilSurfaceProperties
+
+        # Sanity: after creation the second surface is active.
+        assert props.active_surface_guid == guid_b
+
+        # Click the first row.
+        props.active_surface_index = 0
+        assert props.active_surface_guid == guid_a
+        assert props.active_surface_id == props.surfaces[0].ifc_id
+
+    def test_selecting_second_row_makes_second_surface_active(
+        self, tmp_path
+    ) -> None:
+        guid_a, guid_b = self._create_two_surfaces(tmp_path)
+        props = bpy.context.scene.CivilSurfaceProperties
+
+        # Switch to first, then back to second.
+        props.active_surface_index = 0
+        assert props.active_surface_guid == guid_a
+        props.active_surface_index = 1
+        assert props.active_surface_guid == guid_b
+
+    def test_out_of_range_index_clears_active_state(self, tmp_path) -> None:
+        self._create_two_surfaces(tmp_path)
+        props = bpy.context.scene.CivilSurfaceProperties
+
+        # An index beyond the list bounds clears active state instead of
+        # leaving stale values around.
+        props.active_surface_index = 99
+        assert props.active_surface_id == 0
+        assert props.active_surface_guid == ""
+
+    def test_row_selection_routes_edits_to_first_surface(self, tmp_path) -> None:
+        """End-to-end: after switching active row, add_breakline targets
+        the correct surface — proves the operator sees the synced GUID."""
+        # Use 4-corner squares so the diagonal breakline (corner-to-corner)
+        # doesn't introduce Steiner points.
+        path_a = tmp_path / "a.csv"
+        path_a.write_text("0,0,0\n1,0,0\n1,1,0\n0,1,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Surf A"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path_a)
+        )
+        guid_a = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        path_b = tmp_path / "b.csv"
+        path_b.write_text("10,10,0\n11,10,0\n11,11,0\n10,11,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Surf B"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path_b)
+        )
+        guid_b = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        props = bpy.context.scene.CivilSurfaceProperties
+
+        # Switch active to A via UIList row index.
+        props.active_surface_index = 0
+        assert props.active_surface_guid == guid_a
+
+        # Add a breakline; it should land on A, not on B.
+        bl_path = tmp_path / "bl.csv"
+        bl_path.write_text("0,0,0\n1,1,0\n")
+        bpy.ops.civil.surface_add_breakline(
+            "EXEC_DEFAULT",
+            csv_filepath=str(bl_path),
+            breakline_name="bl-on-A",
+        )
+
+        surface_a = tool.Surface.get(tool.Ifc.get(), guid_a)
+        surface_b = tool.Surface.get(tool.Ifc.get(), guid_b)
+        assert len(surface_a.breaklines) == 1
+        assert surface_a.breaklines[0].name == "bl-on-A"
+        assert len(surface_b.breaklines) == 0
+
+
 class TestSurfaceDecorator(NewIfc4X3):
     """Tests for :class:`bonsai.bim.module.surface.decorator.SurfaceDecorator`.
 

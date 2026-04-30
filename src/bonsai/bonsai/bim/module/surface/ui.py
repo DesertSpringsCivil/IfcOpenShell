@@ -99,8 +99,9 @@ class CIVIL_PT_surface_list(Panel):
             icon="INFO",
         )
 
-        # The UIList drives active_surface_index; the row-selection callback
-        # (commit 14.1+) writes back to active_surface_id / _guid.
+        # The UIList drives active_surface_index; the prop's update= callback
+        # writes back to active_surface_id / _guid (see prop.py
+        # _on_active_surface_index_change).
         layout.template_list(
             "CIVIL_UL_surfaces",
             "",
