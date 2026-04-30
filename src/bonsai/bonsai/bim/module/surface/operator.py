@@ -49,7 +49,6 @@ Each operator follows the Bonsai standard pattern:
 
 import bpy
 import ifcopenshell.guid
-import shapely
 from bpy.props import EnumProperty, StringProperty
 from bpy.types import Operator
 
@@ -256,31 +255,9 @@ class CIVIL_OT_surface_set_boundary(Operator, tool.Ifc.Operator):
 
         try:
             ring_points = tool.Surface.load_points_from_csv(self.csv_filepath)
+            polygon = tool.Surface.build_boundary_polygon_from_ring(ring_points)
         except tool_surface.SaikeiSurfaceError as exc:
             self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
-
-        if ring_points.shape[0] < 3:
-            self.report(
-                {"ERROR"},
-                f"boundary polygon needs ≥ 3 vertices; got {ring_points.shape[0]}",
-            )
-            return {"CANCELLED"}
-
-        try:
-            polygon = shapely.Polygon(
-                [(float(p[0]), float(p[1])) for p in ring_points]
-            )
-        except (ValueError, shapely.errors.GEOSException) as exc:
-            self.report({"ERROR"}, f"could not build polygon from ring: {exc}")
-            return {"CANCELLED"}
-
-        if not polygon.is_valid:
-            self.report(
-                {"ERROR"},
-                f"polygon is not topologically valid: "
-                f"{shapely.is_valid_reason(polygon)}",
-            )
             return {"CANCELLED"}
 
         try:
@@ -401,13 +378,8 @@ class CIVIL_OT_surface_add_breakline(Operator, tool.Ifc.Operator):
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
 
-        if polyline_points.shape[0] < 2:
-            self.report(
-                {"ERROR"},
-                f"breakline polyline must have ≥ 2 points; got {polyline_points.shape[0]}",
-            )
-            return {"CANCELLED"}
-
+        # core_surface.add_breakline_to_surface enforces the ≥ 2-point rule
+        # (business validation belongs in core, not the UI layer).
         breakline = tool_surface.Breakline(
             guid=ifcopenshell.guid.new(),
             name=self.breakline_name,

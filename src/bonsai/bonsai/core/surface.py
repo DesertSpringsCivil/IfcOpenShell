@@ -214,6 +214,13 @@ def add_breakline_to_surface(
 
     _warn_multi_site(ifc_file)
 
+    polyline = getattr(breakline, "polyline", None)
+    if polyline is None or len(polyline) < 2:
+        raise ValueError(
+            f"breakline polyline must have ≥ 2 points; got "
+            f"{0 if polyline is None else len(polyline)}"
+        )
+
     surface = surface_tool.get(ifc_file, surface_guid)
     # Link the annotation to the host surface via IfcRelAssignsToProduct
     # so multi-surface files can disambiguate breakline ownership on

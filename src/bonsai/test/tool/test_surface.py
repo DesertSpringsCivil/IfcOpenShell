@@ -2443,6 +2443,66 @@ class TestLoadPointsFromCsv:
             tool_surface.Surface.load_points_from_csv(str(path))
 
 
+class TestBuildBoundaryPolygonFromRing:
+    """Tests for :meth:`Surface.build_boundary_polygon_from_ring` — the
+    XYZ-ring → shapely.Polygon helper that lets operators stay in the
+    UI layer without importing shapely."""
+
+    def test_happy_path_returns_polygon(self) -> None:
+        ring = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        polygon = tool_surface.Surface.build_boundary_polygon_from_ring(ring)
+        assert isinstance(polygon, shapely.Polygon)
+        assert polygon.area == pytest.approx(1.0)
+
+    def test_drops_z_coordinate(self) -> None:
+        ring = np.array(
+            [
+                (0.0, 0.0, 99.0),
+                (10.0, 0.0, 50.0),
+                (10.0, 10.0, -1.5),
+                (0.0, 10.0, 0.0),
+            ]
+        )
+        polygon = tool_surface.Surface.build_boundary_polygon_from_ring(ring)
+        assert polygon.area == pytest.approx(100.0)
+        # Polygon is XY only — no Z dimension surfaces.
+        assert not polygon.has_z
+
+    def test_too_few_vertices_raises(self) -> None:
+        ring = np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
+        with pytest.raises(
+            tool_surface.SaikeiSurfaceError,
+            match=r"≥\s*3 vertices",
+        ):
+            tool_surface.Surface.build_boundary_polygon_from_ring(ring)
+
+    def test_wrong_shape_raises(self) -> None:
+        ring = np.array([(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)])  # 2D ring
+        with pytest.raises(
+            tool_surface.SaikeiSurfaceError, match=r"\(N, 3\)"
+        ):
+            tool_surface.Surface.build_boundary_polygon_from_ring(ring)
+
+    def test_self_intersecting_polygon_raises(self) -> None:
+        """Bowtie polygon: (0,0) → (1,1) → (1,0) → (0,1) → close.
+        This crosses itself and shapely flags it as invalid."""
+        ring = np.array(
+            [
+                (0.0, 0.0, 0.0),
+                (1.0, 1.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+            ]
+        )
+        with pytest.raises(
+            tool_surface.SaikeiSurfaceError,
+            match="not topologically valid",
+        ):
+            tool_surface.Surface.build_boundary_polygon_from_ring(ring)
+
+
 class TestSurfaceCreateFromPointsOperator(NewIfc4X3):
     """Tests for :class:`CIVIL_OT_surface_create_from_points` headless path.
 

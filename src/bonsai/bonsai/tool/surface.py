@@ -598,6 +598,49 @@ class Surface:
     :meth:`retriangulate`, then restore the default in teardown."""
 
     @staticmethod
+    def build_boundary_polygon_from_ring(
+        ring_points: np.ndarray,
+    ) -> shapely.Polygon:
+        """Build a 2D :class:`shapely.Polygon` from an XYZ ring.
+
+        Inputs come from CSV ring files (open or closed); Z is dropped
+        before polygon construction. Validates topologically before
+        returning so callers don't have to.
+
+        :param ring_points: ``(N, 3)`` XYZ array; ``N >= 3``.
+        :returns: a topologically-valid :class:`shapely.Polygon`.
+        :raises SaikeiSurfaceError: if the ring has fewer than 3 vertices,
+            cannot be assembled into a polygon, or is not topologically
+            valid (self-intersecting, etc.).
+        """
+        if not isinstance(ring_points, np.ndarray):
+            ring_points = np.asarray(ring_points, dtype=float)
+        if ring_points.ndim != 2 or ring_points.shape[1] != 3:
+            raise SaikeiSurfaceError(
+                f"boundary ring must be (N, 3); got shape {ring_points.shape}"
+            )
+        if ring_points.shape[0] < 3:
+            raise SaikeiSurfaceError(
+                f"boundary polygon needs ≥ 3 vertices; got {ring_points.shape[0]}"
+            )
+
+        try:
+            polygon = shapely.Polygon(
+                [(float(p[0]), float(p[1])) for p in ring_points]
+            )
+        except (ValueError, shapely.errors.GEOSException) as exc:
+            raise SaikeiSurfaceError(
+                f"could not build polygon from ring: {exc}"
+            ) from exc
+
+        if not polygon.is_valid:
+            raise SaikeiSurfaceError(
+                f"polygon is not topologically valid: "
+                f"{shapely.is_valid_reason(polygon)}"
+            )
+        return polygon
+
+    @staticmethod
     def load_points_from_csv(filepath: str) -> np.ndarray:
         """Load an ``(N, 3)`` XYZ point cloud from a CSV file.
 

@@ -61,8 +61,18 @@ class FakeCivilSurface(dict):
 class FakeBreakline(dict):
     """Stand-in for :class:`Breakline`."""
 
-    def __init__(self, guid: str = "bl-guid", name: str = "test-breakline") -> None:
+    def __init__(
+        self,
+        guid: str = "bl-guid",
+        name: str = "test-breakline",
+        polyline=None,
+    ) -> None:
         super().__init__(guid=guid, name=name)
+        # Minimum-viable polyline so core's ≥ 2-point validation passes.
+        self.polyline = polyline if polyline is not None else [
+            (0.0, 0.0, 0.0),
+            (1.0, 1.0, 0.0),
+        ]
 
 
 class FakePolygon(dict):
@@ -318,6 +328,16 @@ class TestAddBreaklineToSurface:
         assert result is fake_surface
         # Breakline got appended to the dataclass list.
         assert breakline in fake_surface.breaklines
+
+    def test_raises_when_polyline_too_short(self, ifc, surface):
+        """Core enforces the ≥ 2-point business rule for breakline
+        polylines. UI layer should not need to duplicate the check."""
+        ifc.get().should_be_called().will_return(FakeIfcFile())
+        breakline = FakeBreakline(polyline=[(0.0, 0.0, 0.0)])  # only 1 point
+        with pytest.raises(ValueError, match="≥ 2 points"):
+            subject.add_breakline_to_surface(
+                ifc, surface, surface_guid="g", breakline=breakline
+            )
 
     def test_grading_group_guid_passes_through(self, ifc, surface):
         fake_file = FakeIfcFile()
