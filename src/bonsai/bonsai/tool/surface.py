@@ -1058,6 +1058,15 @@ class Surface:
             triangle_flags=surface.triangle_flags,
         )
         surface.ifc_tin_representation_id = new_tin.id()
+        # Refresh Pset_SaikeiGradingSurface so BreaklineCount /
+        # VertexCount stay consistent with the rebuilt TIN. Without this,
+        # the pset reflects only the values at create_terrain /
+        # create_proposed_surface time and goes stale after every edit.
+        ifcopenshell.api.surface.apply_saikei_pset(
+            ifc_file,
+            host,
+            breakline_count=len(surface.breaklines),
+        )
         return new_tin
 
     @classmethod

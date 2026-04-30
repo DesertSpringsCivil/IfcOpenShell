@@ -41,6 +41,23 @@ import bonsai.tool.surface as tool_surface
 from test.bim.bootstrap import NewIfc4X3
 
 
+def _read_breakline_count(
+    ifc_file: ifcopenshell.file, host: ifcopenshell.entity_instance
+) -> int:
+    """Read ``Pset_SaikeiGradingSurface.BreaklineCount`` off the host
+    entity. Returns 0 if the pset or property is missing."""
+    for rel in ifc_file.by_type("IfcRelDefinesByProperties"):
+        if host not in (rel.RelatedObjects or []):
+            continue
+        pset = rel.RelatingPropertyDefinition
+        if pset is None or pset.Name != "Pset_SaikeiGradingSurface":
+            continue
+        for prop in pset.HasProperties or []:
+            if prop.Name == "BreaklineCount" and prop.NominalValue is not None:
+                return int(prop.NominalValue.wrappedValue)
+    return 0
+
+
 def _make_ifc_file_with_site() -> ifcopenshell.file:
     """Build a minimal IFC4X3 file with an IfcProject + IfcSite container.
 
@@ -1020,6 +1037,59 @@ class TestSurfaceUpdateIfcTin:
         tins = ifc_file.by_type("IfcTriangulatedIrregularNetwork")
         assert len(tins) == 1
         assert tins[0].id() == new_tin.id()
+
+    def test_refreshes_breakline_count_pset(self) -> None:
+        """``Pset_SaikeiGradingSurface.BreaklineCount`` should reflect
+        ``len(surface.breaklines)`` after every ``update_ifc_tin``. Without
+        this refresh, the pset goes stale after every edit (it was set
+        once at create_terrain / create_proposed_surface time).
+        """
+        ifc_file = _make_ifc_file_with_site()
+        # Centerpoint vertex lets two non-crossing breaklines share an
+        # endpoint without introducing Steiner points.
+        points = np.array(
+            [
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (1.0, 1.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.5, 0.5, 0.0),
+            ]
+        )
+        surface = tool_surface.Surface.build_tin_from_points("BLCount", points)
+        host = tool_surface.Surface.author_ifc_host(ifc_file, surface)
+
+        assert _read_breakline_count(ifc_file, host) == 0
+
+        # First breakline: (0,0) → (0.5,0.5).
+        surface.breaklines.append(
+            tool_surface.Breakline(
+                guid=ifcopenshell.guid.new(),
+                name="bl",
+                polyline=[(0.0, 0.0, 0.0), (0.5, 0.5, 0.0)],
+                kind="standard",
+                source="manual",
+            )
+        )
+        tool_surface.Surface.retriangulate(surface)
+        tool_surface.Surface.update_ifc_tin(ifc_file, surface)
+        assert _read_breakline_count(ifc_file, host) == 1
+
+        # Second breakline: (0.5,0.5) → (1,1). Shares the endpoint with
+        # the first so the two segments form a continuous polyline path
+        # without crossing.
+        surface.breaklines.append(
+            tool_surface.Breakline(
+                guid=ifcopenshell.guid.new(),
+                name="bl-2",
+                polyline=[(0.5, 0.5, 0.0), (1.0, 1.0, 0.0)],
+                kind="standard",
+                source="manual",
+            )
+        )
+        tool_surface.Surface.retriangulate(surface)
+        tool_surface.Surface.update_ifc_tin(ifc_file, surface)
+        assert _read_breakline_count(ifc_file, host) == 2
 
 
 class TestSurfaceAuthorIfcBreakline:
