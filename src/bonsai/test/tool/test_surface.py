@@ -1277,3 +1277,43 @@ class TestSurfaceBlenderMesh(NewIfc4X3):
         # No create_blender_mesh call — no object linked.
         result = tool_surface.Surface.update_blender_mesh(tool.Ifc.get(), surface)
         assert result is None
+
+
+class TestSurfaceModuleRegistration:
+    """Smoke tests verifying :func:`bonsai.bim.module.surface.register`
+    attached the property groups to ``bpy.types.Scene``.
+
+    These tests live here (test/tool/) rather than test/bim/module/surface/
+    because the latter directory triggers a pytest-bdd conftest that the
+    current environment's parse_type version can't load. Move them once
+    the bdd-conftest dependency is fixed upstream.
+    """
+
+    def test_civil_surface_properties_attached_to_scene(self) -> None:
+        scene_props = bpy.types.Scene.bl_rna.properties
+        assert "CivilSurfaceProperties" in scene_props, (
+            "CivilSurfaceProperties not registered on bpy.types.Scene"
+        )
+
+    def test_default_property_values(self) -> None:
+        import bonsai.bim.module.surface.prop as surface_prop
+
+        # bpy.context.scene may not exist in some pytest contexts; defaults
+        # are fixed by the PropertyGroup definition itself.
+        rna = surface_prop.CivilSurfaceProperties.bl_rna
+        assert rna.properties["new_surface_name"].default == "Existing Ground"
+        assert rna.properties["new_surface_kind"].default == "existing"
+        assert rna.properties["triangulation_tolerance"].default == 0.0
+        assert rna.properties["show_triangles"].default is False
+        assert rna.properties["show_elevation_banding"].default is False
+
+    def test_kind_enum_has_three_options(self) -> None:
+        import bonsai.bim.module.surface.prop as surface_prop
+
+        rna = surface_prop.CivilSurfaceProperties.bl_rna
+        kind_prop = rna.properties["new_surface_kind"]
+        identifiers = {item.identifier for item in kind_prop.enum_items}
+        assert identifiers == {"existing", "proposed_group", "proposed_site"}
+
+    def test_uilist_class_registered(self) -> None:
+        assert hasattr(bpy.types, "CIVIL_UL_surfaces")

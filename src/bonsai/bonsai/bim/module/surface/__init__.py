@@ -24,34 +24,36 @@ Phase 4 of the Saikei grading/earthwork sprint. Wraps Phase 1's
 object/mesh linkage, and the UI surface (panels, operators, GPU
 decorators) that gives users a working terrain modeler.
 
-Subsequent commits add the operator / panel / decorator / property
-classes and register them here. This scaffold establishes the package
-shell and the parent-module wiring at ``bim/__init__.py``.
+Subsequent commits add the operator / panel / decorator classes and
+register them here. This commit (10) lands the property groups and
+UIList; commit 11 adds the create operator, etc.
 """
 
 import bpy
 
-# Operator / panel / UIList / PropertyGroup classes are added in later
-# commits as the surface module fills out. The empty tuple lets the
-# package register cleanly today; the bonsai.bim.__init__ batch
-# registration loop simply has nothing to register for surface yet.
-classes: tuple[type, ...] = ()
+from . import prop
+
+
+classes: tuple[type, ...] = (
+    prop.CivilSurfaceListItem,
+    prop.CIVIL_UL_surfaces,
+    prop.CivilSurfaceProperties,
+)
 
 
 def register() -> None:
     """Module-level registration hook.
 
     Called by ``bonsai.bim`` after the parent has registered all module
-    classes. PointerProperty registration on ``bpy.types.Scene`` and any
-    keymap setup happen here in subsequent commits.
+    classes. Attaches :class:`CivilSurfaceProperties` to ``bpy.types.Scene``
+    as a ``PointerProperty`` so the UI panel can read / write surface state
+    via ``context.scene.CivilSurfaceProperties``.
     """
-    # Future: bpy.types.Scene.CivilSurfaceProperties = bpy.props.PointerProperty(
-    #     type=prop.CivilSurfaceProperties
-    # )
-    pass
+    bpy.types.Scene.CivilSurfaceProperties = bpy.props.PointerProperty(
+        type=prop.CivilSurfaceProperties
+    )
 
 
 def unregister() -> None:
     """Module-level teardown hook (mirror of :func:`register`)."""
-    # Future: del bpy.types.Scene.CivilSurfaceProperties
-    pass
+    del bpy.types.Scene.CivilSurfaceProperties
