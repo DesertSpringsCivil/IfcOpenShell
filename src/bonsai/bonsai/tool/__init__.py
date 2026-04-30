@@ -65,6 +65,7 @@ from bonsai.tool.snap import Snap
 from bonsai.tool.spatial import Spatial
 from bonsai.tool.structural import Structural
 from bonsai.tool.style import Style
+from bonsai.tool.surface import Surface
 from bonsai.tool.surveyor import Surveyor
 from bonsai.tool.system import System
 from bonsai.tool.tester import Tester

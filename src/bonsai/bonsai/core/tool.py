@@ -1118,6 +1118,7 @@ class Surface:
     def clear(cls): pass
     def create_blender_mesh(cls, ifc_file, surface): pass
     def update_blender_mesh(cls, ifc_file, surface): pass
+    def load_points_from_csv(cls, filepath): pass
 
 
 @interface

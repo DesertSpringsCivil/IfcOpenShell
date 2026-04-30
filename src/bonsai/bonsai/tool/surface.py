@@ -504,6 +504,49 @@ class Surface:
     stub before exercising :meth:`build_tin_from_points` /
     :meth:`retriangulate`, then restore the default in teardown."""
 
+    @staticmethod
+    def load_points_from_csv(filepath: str) -> np.ndarray:
+        """Load an ``(N, 3)`` XYZ point cloud from a CSV file.
+
+        Accepts comma- or whitespace-separated rows of three floats. Skips
+        blank lines and lines beginning with ``#``. Per Phase 4 MVP, the
+        tool layer owns CSV parsing because :func:`numpy.loadtxt` is
+        math-adjacent — the UI operator delegates here rather than parsing
+        inline.
+
+        :param filepath: absolute path to a ``.csv`` (or ``.txt``,
+            ``.xyz``) file.
+        :returns: ``(N, 3)`` float numpy array of XYZ coordinates.
+        :raises SaikeiSurfaceError: if the file cannot be parsed as
+            ``(N, 3)`` floats.
+        """
+        try:
+            data = np.loadtxt(
+                filepath,
+                comments="#",
+                delimiter=None,  # any whitespace
+                ndmin=2,
+            )
+        except Exception:
+            # Retry with comma delimiter for CSV exports that aren't
+            # whitespace-separable.
+            try:
+                data = np.loadtxt(
+                    filepath, comments="#", delimiter=",", ndmin=2
+                )
+            except Exception as exc:
+                raise SaikeiSurfaceError(
+                    f"could not parse {filepath!r} as a CSV/whitespace point "
+                    f"cloud: {exc}"
+                ) from exc
+
+        if data.ndim != 2 or data.shape[1] != 3:
+            raise SaikeiSurfaceError(
+                f"point file {filepath!r} must have exactly 3 columns "
+                f"(x, y, z); got shape {data.shape}"
+            )
+        return data.astype(float, copy=False)
+
     _registry: dict[tuple[int, str], "CivilSurface"] = {}
     """Per spec §4.6: lazy-rehydrating cache keyed by ``(id(ifc_file), guid)``.
     IFC is the source of truth; this cache avoids re-reading the IFC entity on

@@ -1317,3 +1317,122 @@ class TestSurfaceModuleRegistration:
 
     def test_uilist_class_registered(self) -> None:
         assert hasattr(bpy.types, "CIVIL_UL_surfaces")
+
+
+class TestLoadPointsFromCsv:
+    """Tests for :meth:`bonsai.tool.surface.Surface.load_points_from_csv`."""
+
+    def test_loads_whitespace_separated_xyz(self, tmp_path) -> None:
+        path = tmp_path / "points.txt"
+        path.write_text("0.0 0.0 0.0\n1.0 0.0 0.0\n0.0 1.0 0.5\n")
+        points = tool_surface.Surface.load_points_from_csv(str(path))
+        assert points.shape == (3, 3)
+        assert points[2, 2] == pytest.approx(0.5)
+
+    def test_loads_comma_separated_csv(self, tmp_path) -> None:
+        path = tmp_path / "points.csv"
+        path.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        points = tool_surface.Surface.load_points_from_csv(str(path))
+        assert points.shape == (3, 3)
+
+    def test_skips_comment_lines(self, tmp_path) -> None:
+        path = tmp_path / "points.txt"
+        path.write_text(
+            "# header\n0 0 0\n1 0 0\n# another comment\n0 1 1.5\n"
+        )
+        points = tool_surface.Surface.load_points_from_csv(str(path))
+        assert points.shape == (3, 3)
+
+    def test_wrong_column_count_raises(self, tmp_path) -> None:
+        path = tmp_path / "bad.txt"
+        path.write_text("0 0\n1 0\n0 1\n")  # only 2 columns
+        with pytest.raises(
+            tool_surface.SaikeiSurfaceError, match="must have exactly 3 columns"
+        ):
+            tool_surface.Surface.load_points_from_csv(str(path))
+
+    def test_unparseable_file_raises(self, tmp_path) -> None:
+        path = tmp_path / "bad.txt"
+        path.write_text("hello world\nfoo bar baz\n")
+        with pytest.raises(
+            tool_surface.SaikeiSurfaceError, match="could not parse"
+        ):
+            tool_surface.Surface.load_points_from_csv(str(path))
+
+
+class TestSurfaceCreateFromPointsOperator(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_surface_create_from_points` headless path.
+
+    Inherits :class:`NewIfc4X3` so each test starts from a Bonsai-bootstrapped
+    project (collection hierarchy needed by ``tool.Collector.assign``).
+    """
+
+    def test_headless_create_from_csv(self, tmp_path) -> None:
+        # Write a 4-corner unit-square point file.
+        points_path = tmp_path / "square.csv"
+        points_path.write_text("0,0,0\n1,0,0\n1,1,0\n0,1,0\n")
+
+        props = bpy.context.scene.CivilSurfaceProperties
+        props.new_surface_name = "OpTest Existing"
+        props.new_surface_kind = "existing"
+        props.triangulation_tolerance = 0.001
+
+        result = bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        terrains = ifc_file.by_type("IfcGeographicElement")
+        assert len(terrains) == 1
+        assert terrains[0].Name == "OpTest Existing"
+        assert terrains[0].PredefinedType == "TERRAIN"
+
+        # The new surface was added to the panel UIList.
+        assert len(props.surfaces) == 1
+        assert props.surfaces[0].name == "OpTest Existing"
+        assert props.active_surface_id == terrains[0].id()
+        assert props.active_surface_guid == terrains[0].GlobalId
+
+    def test_headless_create_proposed(self, tmp_path) -> None:
+        points_path = tmp_path / "square.csv"
+        points_path.write_text("0,0,0\n10,0,0\n10,10,0\n0,10,0\n5,5,1\n")
+
+        props = bpy.context.scene.CivilSurfaceProperties
+        props.new_surface_name = "OpTest Proposed"
+        props.new_surface_kind = "proposed_group"
+
+        result = bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        fills = ifc_file.by_type("IfcEarthworksFill")
+        assert len(fills) == 1
+        assert fills[0].PredefinedType == "SUBGRADE"
+
+    def test_invalid_csv_path_raises_and_does_not_create_surface(self) -> None:
+        """Blender converts an ``ERROR``-level report into a ``RuntimeError``
+        at the ``bpy.ops`` boundary. We assert both: the call raises, and no
+        IFC entity was authored."""
+        ifc_file = tool.Ifc.get()
+        before = len(ifc_file.by_type("IfcGeographicElement"))
+        with pytest.raises(RuntimeError, match="could not parse"):
+            bpy.ops.civil.surface_create_from_points(
+                "EXEC_DEFAULT", csv_filepath="/nonexistent/path/bogus.csv"
+            )
+        assert len(ifc_file.by_type("IfcGeographicElement")) == before
+
+    def test_too_few_points_raises_and_does_not_create_surface(
+        self, tmp_path
+    ) -> None:
+        ifc_file = tool.Ifc.get()
+        points_path = tmp_path / "two.csv"
+        points_path.write_text("0,0,0\n1,0,0\n")
+        before = len(ifc_file.by_type("IfcGeographicElement"))
+        with pytest.raises(RuntimeError, match="at least 3 points"):
+            bpy.ops.civil.surface_create_from_points(
+                "EXEC_DEFAULT", csv_filepath=str(points_path)
+            )
+        assert len(ifc_file.by_type("IfcGeographicElement")) == before

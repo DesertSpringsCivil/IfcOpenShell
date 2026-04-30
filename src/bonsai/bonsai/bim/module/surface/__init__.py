@@ -31,13 +31,14 @@ UIList; commit 11 adds the create operator, etc.
 
 import bpy
 
-from . import prop
+from . import operator, prop
 
 
 classes: tuple[type, ...] = (
     prop.CivilSurfaceListItem,
     prop.CIVIL_UL_surfaces,
     prop.CivilSurfaceProperties,
+    operator.CIVIL_OT_surface_create_from_points,
 )
 
 
