@@ -154,10 +154,12 @@ python -m pytest <test path> `
   -o "addopts=" `
   -p pytest-blender `
   -v `
-  --blender-executable="C:\Program Files\Blender Foundation\Blender_5\blender.exe"
+  --blender-executable "C:\Program Files\Blender Foundation\Blender_5\blender.exe"
 ```
 
 The `-o "addopts="` flag is **load-bearing**: it clobbers `pytest.ini`'s `addopts`, which would otherwise auto-load `pytest-bdd` and trigger an `AttributeError` from `parse-type`. Re-add `pytest-blender` explicitly with `-p pytest-blender`. Without these two flags, the harness fails at collection time on Windows.
+
+**Harness gotcha — `--blender-executable` must be space-separated, not `=`-joined.** pytest-blender's CLI-arg parser (`plugin.py:105`) strips its own flags from the outer pytest invocation only when they appear as separate tokens. The `=`-joined form `--blender-executable=...` is a single token that fails the exact-match check, falls through to the inner pytest invocation as a positional arg, and errors with "file or directory not found" — collection finds zero tests because the test path can't even be parsed. Always use the space-separated form: `--blender-executable "C:\Program Files\..."`.
 
 Pure-Python core tests (no Blender) use the simpler invocation that already works for the alignment module:
 
@@ -235,7 +237,7 @@ Findings from the review feed into a follow-up cleanup commit (between 7 and 8) 
     -o "addopts=" `
     -p pytest-blender `
     -v `
-    --blender-executable="C:\Program Files\Blender Foundation\Blender_5\blender.exe"
+    --blender-executable "C:\Program Files\Blender Foundation\Blender_5\blender.exe"
   ```
 - A user can:
   1. Load XYZ point data via `CIVIL_OT_surface_create_from_points`.
