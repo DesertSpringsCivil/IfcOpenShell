@@ -1206,7 +1206,59 @@ class Surface:
             host,
             breakline_count=len(surface.breaklines),
         )
+        # Refresh the Box LOD bounding box so viewers using it for
+        # culling / extents queries see the current geometry. Without
+        # this, set_outer_boundary's narrower clip leaves the bbox
+        # pointing at the original (larger) extents.
+        cls._refresh_bounding_box(host, surface.points)
         return new_tin
+
+    @staticmethod
+    def _refresh_bounding_box(
+        host: "ifcopenshell.entity_instance",
+        points: np.ndarray,
+    ) -> None:
+        """Update the host's :class:`IfcBoundingBox` ``Corner`` /
+        ``XDim`` / ``YDim`` / ``ZDim`` in place from the current points.
+
+        No-op if the host has no Box representation. Updates the existing
+        entity rather than replacing it so the IfcShapeRepresentation
+        link stays intact and no orphan entities accumulate.
+        """
+        representation = host.Representation
+        if representation is None:
+            return
+        bbox = None
+        for shape_rep in representation.Representations or []:
+            if shape_rep.RepresentationIdentifier != "Box":
+                continue
+            for item in shape_rep.Items or []:
+                if item.is_a("IfcBoundingBox"):
+                    bbox = item
+                    break
+            if bbox is not None:
+                break
+        if bbox is None:
+            return
+
+        if len(points) == 0:
+            return
+        xs = [float(p[0]) for p in points]
+        ys = [float(p[1]) for p in points]
+        zs = [float(p[2]) for p in points]
+        min_xyz = (min(xs), min(ys), min(zs))
+        max_xyz = (max(xs), max(ys), max(zs))
+        # Match Phase 1 add_bounding_box_representation's positive-dim
+        # nudge for axis-aligned degenerate surfaces.
+        epsilon = 1e-6
+        x_dim = max(max_xyz[0] - min_xyz[0], epsilon)
+        y_dim = max(max_xyz[1] - min_xyz[1], epsilon)
+        z_dim = max(max_xyz[2] - min_xyz[2], epsilon)
+
+        bbox.Corner.Coordinates = (min_xyz[0], min_xyz[1], min_xyz[2])
+        bbox.XDim = x_dim
+        bbox.YDim = y_dim
+        bbox.ZDim = z_dim
 
     @classmethod
     def author_ifc_breakline(

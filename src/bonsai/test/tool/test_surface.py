@@ -1147,6 +1147,51 @@ class TestSurfaceUpdateIfcTin:
         assert len(tins) == 1
         assert tins[0].id() == new_tin.id()
 
+    def test_refreshes_bounding_box_after_point_change(self) -> None:
+        """Closes the cold-review-flagged stale-bbox bug. After the
+        points array shrinks (e.g., set_boundary clips the surface), the
+        IfcBoundingBox in the host's Box representation must update in
+        place — viewers using it for LOD / culling rely on the current
+        extents.
+        """
+        ifc_file = _make_ifc_file_with_site()
+        # Original surface spans (0..10, 0..10, 0..0).
+        big_points = np.array(
+            [
+                (0.0, 0.0, 0.0),
+                (10.0, 0.0, 0.0),
+                (10.0, 10.0, 0.0),
+                (0.0, 10.0, 0.0),
+            ]
+        )
+        surface = tool_surface.Surface.build_tin_from_points("BBoxTest", big_points)
+        host = tool_surface.Surface.author_ifc_host(ifc_file, surface)
+
+        original_bbox_id = surface.ifc_bbox_representation_id
+        bbox = ifc_file.by_id(original_bbox_id)
+        assert bbox.XDim == pytest.approx(10.0)
+        assert bbox.YDim == pytest.approx(10.0)
+
+        # Replace the points with a smaller subset and update_ifc_tin.
+        small_points = np.array(
+            [(0.0, 0.0, 0.0), (5.0, 0.0, 0.0), (0.0, 5.0, 0.0)]
+        )
+        surface.points = small_points
+        surface.triangles = np.array([(0, 1, 2)], dtype=int)
+        surface.triangle_flags = np.zeros(1, dtype=int)
+        tool_surface.Surface.update_ifc_tin(ifc_file, surface)
+
+        # Same bbox entity (in-place update, no orphan).
+        assert surface.ifc_bbox_representation_id == original_bbox_id
+        bbox_after = ifc_file.by_id(original_bbox_id)
+        assert bbox_after.id() == original_bbox_id
+        # New extents.
+        assert bbox_after.XDim == pytest.approx(5.0)
+        assert bbox_after.YDim == pytest.approx(5.0)
+        assert tuple(bbox_after.Corner.Coordinates) == pytest.approx((0.0, 0.0, 0.0))
+        # Only one IfcBoundingBox in the file (no orphans).
+        assert len(ifc_file.by_type("IfcBoundingBox")) == 1
+
     def test_refreshes_breakline_count_pset(self) -> None:
         """``Pset_SaikeiGradingSurface.BreaklineCount`` should reflect
         ``len(surface.breaklines)`` after every ``update_ifc_tin``. Without
