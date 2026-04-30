@@ -773,8 +773,19 @@ class Surface:
             ``"proposed_site"``; once Phase 5 authors grading groups, the
             same helper classifies pre-existing fills correctly.
         """
+        # Targeted lookup — only the two entity types Saikei surfaces ever
+        # host as. Avoids the full-file scan of by_type("IfcRoot") which
+        # would walk every IfcAlignment, IfcAnnotation, etc. on every
+        # rehydration cache miss.
         host = next(
-            (e for e in ifc_file.by_type("IfcRoot") if e.GlobalId == guid),
+            (
+                e
+                for e in (
+                    *ifc_file.by_type("IfcGeographicElement"),
+                    *ifc_file.by_type("IfcEarthworksFill"),
+                )
+                if e.GlobalId == guid
+            ),
             None,
         )
         if host is None:
@@ -1077,7 +1088,7 @@ class Surface:
         points = surface.points
         epsilon = 1e-9
 
-        tree, triangle_polys = cls._get_or_build_z_at_index(surface)
+        tree = cls._get_or_build_z_at_index(surface)
         candidate_indices = tree.query(shapely.Point(px, py))
 
         for index in candidate_indices:
@@ -1098,39 +1109,50 @@ class Surface:
     @staticmethod
     def _get_or_build_z_at_index(
         surface: CivilSurface,
-    ) -> tuple["shapely.STRtree", list[shapely.Polygon]]:
-        """Return the cached STRtree + triangle-polygon list for
-        :meth:`z_at` queries, building it on first use.
+    ) -> "shapely.STRtree":
+        """Return the cached STRtree for :meth:`z_at` queries, building it
+        on first use.
 
-        Cache key: ``surface.metadata["_z_at_index"]``. Stored as a 4-tuple
-        ``(fingerprint, strtree, triangle_polys, _padding)`` where
-        ``fingerprint`` is a content hash of the points and triangles
-        arrays. Using a content fingerprint rather than ``id()`` defeats
-        the CPython id-reuse hazard: when an old array is GC'd and a new
-        one allocated at the same address, an ``id()``-keyed cache would
-        silently serve the stale tree. The fingerprint also catches
-        in-place numpy mutations that ``id()`` would miss.
+        Cache key: ``surface.metadata["_z_at_index"]``. Stored as a 5-tuple
+        ``(points_id, points_shape, triangles_id, triangles_shape,
+        strtree)``. Using ``id()`` + ``shape`` keys is fast (no per-call
+        memcmp) while still defending against the common Phase 5 mutation
+        patterns:
 
-        The fingerprint is :class:`numpy.ndarray.tobytes`-based, hashed
-        through Python's ``hash``. For typical surfaces (≤ 10⁵ points)
-        this is ~1 ms — fast enough to run on every ``z_at`` lookup.
-        :meth:`retriangulate` still pops the cache eagerly so the common
-        path doesn't pay the fingerprint cost; this guards Phase 5
-        callers that mutate surfaces without going through retriangulate.
+        - **Reallocation** — caller does ``surface.triangles = new_array``;
+          the new array has a different id, cache rebuilds.
+        - **Reshape** — caller appends rows; the shape changes, cache
+          rebuilds.
+        - **CPython id reuse** — old array is GC'd and a new array
+          allocated at the same address with the same shape. This rare
+          case can serve a stale tree, but the documented contract is
+          that callers route mutations through :meth:`retriangulate`
+          (which eagerly pops the cache). The id+shape key is the
+          performance/safety balance per the spec §4.4 perf budget.
 
         Triangles are 2D (XY only) for the spatial-index step; the Z
         component is recovered from ``surface.points[triangle[i]][2]``
-        in the barycentric step.
+        in the barycentric step. The triangle-polygon list is intentionally
+        not retained on the cache (the STRtree is keyed to indices into
+        the original ``surface.triangles`` array, which is the source of
+        truth for barycentric).
         """
         cached = surface.metadata.get("_z_at_index")
-        fingerprint = (
-            surface.points.tobytes(),
-            surface.triangles.tobytes(),
+        current_key = (
+            id(surface.points),
+            surface.points.shape,
+            id(surface.triangles),
+            surface.triangles.shape,
         )
         if cached is not None:
-            cached_fp, tree, polys, _ = cached
-            if cached_fp == fingerprint:
-                return tree, polys
+            cached_pts_id, cached_pts_shape, cached_tri_id, cached_tri_shape, tree = cached
+            if (
+                cached_pts_id == current_key[0]
+                and cached_pts_shape == current_key[1]
+                and cached_tri_id == current_key[2]
+                and cached_tri_shape == current_key[3]
+            ):
+                return tree
 
         triangle_polys: list[shapely.Polygon] = []
         for triangle in surface.triangles:
@@ -1146,13 +1168,8 @@ class Surface:
                 )
             )
         tree = shapely.STRtree(triangle_polys)
-        surface.metadata["_z_at_index"] = (
-            fingerprint,
-            tree,
-            triangle_polys,
-            None,
-        )
-        return tree, triangle_polys
+        surface.metadata["_z_at_index"] = (*current_key, tree)
+        return tree
 
     @classmethod
     def author_ifc_host(
