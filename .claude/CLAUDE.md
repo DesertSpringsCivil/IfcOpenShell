@@ -145,8 +145,9 @@ extensions site-packages (`%APPDATA%\Blender Foundation\Blender\5.0\extensions\.
   `CIVIL_OT_surface_{create_from_points,add_breakline,set_boundary,
   retriangulate}`, panel `BIM_PT_tab_surface_modeler` with four
   sub-panels, `SurfaceDecorator` GPU drawing, registry with breakline
-  recovery from IfcAnnotation on rehydration). 149 surface tests
-  (132 tool + 17 core) + bSI validator integration green.
+  recovery from IfcAnnotation on rehydration scoped via
+  IfcRelAssignsToProduct). 175 surface tests (155 tool + 20 core) +
+  bSI validator integration (single + multi-surface) green.
 
 **Not done:** Vertical alignment, corridor generation, cross-sections,
 earthwork (volumes), drainage.

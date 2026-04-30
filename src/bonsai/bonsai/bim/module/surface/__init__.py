@@ -18,15 +18,31 @@
 
 """Saikei surface module — Bonsai-side terrain modeler.
 
-Phase 4 of the Saikei grading/earthwork sprint. Wraps Phase 1's
-``ifcopenshell.api.surface`` for IFC authoring, adds the math layer
-(TIN construction, retriangulation, Z-at-XY interpolation), Blender
-object/mesh linkage, and the UI surface (panels, operators, GPU
-decorators) that gives users a working terrain modeler.
+Phase 4 of the Saikei grading/earthwork sprint (shipped). Wraps
+Phase 1's ``ifcopenshell.api.surface`` for IFC authoring, adds the
+math layer (TIN construction, retriangulation, STRtree-accelerated
+Z-at-XY interpolation), Blender object/mesh linkage, and the UI
+surface that gives users a working terrain modeler.
 
-Subsequent commits add the operator / panel / decorator classes and
-register them here. This commit (10) lands the property groups and
-UIList; commit 11 adds the create operator, etc.
+Module contents:
+
+- :mod:`prop` — :class:`CivilSurfaceProperties` scene PointerProperty,
+  the :class:`CIVIL_UL_surfaces` UIList, and the
+  :class:`CivilSurfaceListItem` collection element.
+- :mod:`operator` — four operators
+  (``CIVIL_OT_surface_create_from_points``,
+  ``_add_breakline`` [M+H], ``_set_boundary`` [M+H],
+  ``_retriangulate`` [H]).
+- :mod:`ui` — four sub-panels under
+  :class:`BIM_PT_tab_surface_modeler` (CIVIL > Terrain / Surface).
+- :mod:`decorator` — :class:`SurfaceDecorator` GPU draw handler
+  (triangle wireframe + elevation banding).
+- :mod:`data` — :class:`SurfaceData` UI cache with IFC-tree sync.
+
+Wires up a ``@persistent load_post`` handler to uninstall the
+:class:`SurfaceDecorator` on file open (the decorator's draw handler
+captures context in a closure; uninstall on load prevents handler
+leaks across .blend reloads).
 """
 
 import bpy
