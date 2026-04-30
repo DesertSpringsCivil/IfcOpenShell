@@ -229,6 +229,13 @@ def style():
 
 
 @pytest.fixture
+def surface():
+    prophet = Prophecy(bonsai.core.tool.Surface)
+    yield prophet
+    prophet.verify()
+
+
+@pytest.fixture
 def surveyor():
     prophet = Prophecy(bonsai.core.tool.Surveyor)
     yield prophet

@@ -1104,6 +1104,23 @@ class Style:
 
 
 @interface
+class Surface:
+    # Saikei surface tool — Phase 4. Math + IFC authoring + Blender linkage.
+    def build_tin_from_points(cls, name, points, kind="existing", guid=None): pass
+    def author_ifc_host(cls, ifc_file, surface, site=None, triangulation_tolerance=0.0): pass
+    def update_ifc_tin(cls, ifc_file, surface): pass
+    def author_ifc_breakline(cls, ifc_file, breakline, site=None, grading_group_guid=None): pass
+    def retriangulate(cls, surface): pass
+    def z_at(cls, surface, x, y): pass
+    def register(cls, ifc_file, surface): pass
+    def get(cls, ifc_file, guid): pass
+    def invalidate(cls, ifc_file, guid): pass
+    def clear(cls): pass
+    def create_blender_mesh(cls, ifc_file, surface): pass
+    def update_blender_mesh(cls, ifc_file, surface): pass
+
+
+@interface
 class Surveyor:
     def get_absolute_matrix(cls, obj): pass
 
