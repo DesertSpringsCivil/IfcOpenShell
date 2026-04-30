@@ -844,6 +844,37 @@ class TestSurfaceZAt:
         assert z == pytest.approx(0.0)
         assert "_z_at_index" in surface.metadata
 
+    def test_direct_mutation_of_triangles_forces_cache_rebuild(self) -> None:
+        """Closes a cold-review concern: the cache only invalidates on
+        retriangulate. If a caller (likely Phase 5 grading) replaces
+        ``surface.triangles`` directly, the cache key catches the array
+        identity change and rebuilds on the next z_at.
+        """
+        surface = self._flat_unit_square()
+        tool_surface.Surface.z_at(surface, 0.5, 0.5)
+        original_cache = surface.metadata["_z_at_index"]
+
+        # Replace the triangles array directly (simulating Phase 5
+        # grading mutating the surface without going through retriangulate).
+        surface.triangles = surface.triangles.copy()
+
+        # Cache entry still present, but the next z_at must detect the
+        # id() mismatch and rebuild.
+        tool_surface.Surface.z_at(surface, 0.5, 0.5)
+        new_cache = surface.metadata["_z_at_index"]
+        # Different cache tuple (rebuilt).
+        assert new_cache is not original_cache
+
+    def test_direct_mutation_of_points_forces_cache_rebuild(self) -> None:
+        """Mirror of the triangles-mutation test for the points array."""
+        surface = self._flat_unit_square()
+        tool_surface.Surface.z_at(surface, 0.5, 0.5)
+        original_cache = surface.metadata["_z_at_index"]
+
+        surface.points = surface.points.copy()
+        tool_surface.Surface.z_at(surface, 0.5, 0.5)
+        assert surface.metadata["_z_at_index"] is not original_cache
+
     def test_z_at_correctness_unchanged_with_strtree(self) -> None:
         """Sanity: regression on the existing z_at correctness suite. The
         STRtree path must produce identical results to the linear scan
