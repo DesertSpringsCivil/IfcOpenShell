@@ -877,36 +877,61 @@ class TestSurfaceZAt:
         assert z == pytest.approx(0.0)
         assert "_z_at_index" in surface.metadata
 
-    def test_direct_mutation_of_triangles_forces_cache_rebuild(self) -> None:
-        """Closes a cold-review concern: the cache only invalidates on
-        retriangulate. If a caller (likely Phase 5 grading) replaces
-        ``surface.triangles`` directly, the cache key catches the array
-        identity change and rebuilds on the next z_at.
+    def test_array_copy_does_not_force_rebuild_when_content_matches(
+        self,
+    ) -> None:
+        """Content-fingerprint cache: copying the array (which changes
+        ``id()``) but keeping identical content does NOT force a rebuild.
+        This is the perf benefit of the fingerprint approach over an
+        ``id()``-keyed cache."""
+        surface = self._flat_unit_square()
+        tool_surface.Surface.z_at(surface, 0.5, 0.5)
+        original_cache = surface.metadata["_z_at_index"]
+
+        # Replace with a content-identical copy — id() differs.
+        surface.triangles = surface.triangles.copy()
+        surface.points = surface.points.copy()
+        tool_surface.Surface.z_at(surface, 0.5, 0.5)
+
+        # Cache reused: same fingerprint, same tree.
+        new_cache = surface.metadata["_z_at_index"]
+        assert new_cache is original_cache
+
+    def test_content_change_forces_cache_rebuild(self) -> None:
+        """Mutating the actual content of points or triangles must force
+        a rebuild — the fingerprint changes when the bytes change."""
+        surface = self._flat_unit_square()
+        tool_surface.Surface.z_at(surface, 0.5, 0.5)
+        original_cache = surface.metadata["_z_at_index"]
+
+        # Mutate one Z value. Same array id, different content.
+        surface.points = surface.points.copy()
+        surface.points[0, 2] = 99.0
+
+        tool_surface.Surface.z_at(surface, 0.5, 0.5)
+        new_cache = surface.metadata["_z_at_index"]
+        assert new_cache is not original_cache
+
+    def test_id_reuse_does_not_serve_stale_cache(self) -> None:
+        """The hazard the fingerprint defends against: CPython may reuse
+        an ``id()`` after GC. With an id-keyed cache, a freshly
+        allocated array at the same address would serve a stale tree.
+        With the content fingerprint, the byte-level change is detected
+        even if id() happens to match.
         """
         surface = self._flat_unit_square()
         tool_surface.Surface.z_at(surface, 0.5, 0.5)
         original_cache = surface.metadata["_z_at_index"]
 
-        # Replace the triangles array directly (simulating Phase 5
-        # grading mutating the surface without going through retriangulate).
-        surface.triangles = surface.triangles.copy()
-
-        # Cache entry still present, but the next z_at must detect the
-        # id() mismatch and rebuild.
+        # Synthesize an id-collision scenario by replacing in-place
+        # (numpy lets us swap the underlying buffer via slicing while
+        # keeping the same id, which is the worst case for an id-keyed
+        # cache): mutate just one point's Z.
+        surface.points[0, 2] = 50.0
         tool_surface.Surface.z_at(surface, 0.5, 0.5)
         new_cache = surface.metadata["_z_at_index"]
-        # Different cache tuple (rebuilt).
+        # In-place mutation must trigger a rebuild via the fingerprint.
         assert new_cache is not original_cache
-
-    def test_direct_mutation_of_points_forces_cache_rebuild(self) -> None:
-        """Mirror of the triangles-mutation test for the points array."""
-        surface = self._flat_unit_square()
-        tool_surface.Surface.z_at(surface, 0.5, 0.5)
-        original_cache = surface.metadata["_z_at_index"]
-
-        surface.points = surface.points.copy()
-        tool_surface.Surface.z_at(surface, 0.5, 0.5)
-        assert surface.metadata["_z_at_index"] is not original_cache
 
     def test_z_at_correctness_unchanged_with_strtree(self) -> None:
         """Sanity: regression on the existing z_at correctness suite. The
