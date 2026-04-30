@@ -48,7 +48,6 @@ Each operator follows the Bonsai standard pattern:
 """
 
 import bpy
-import ifcopenshell.guid
 from bpy.props import EnumProperty, StringProperty
 from bpy.types import Operator
 
@@ -131,15 +130,23 @@ class CIVIL_OT_surface_create_from_points(Operator, tool.Ifc.Operator):
                 f"surface authored to IFC but Blender mesh creation failed: {exc}",
             )
 
-        # Append the new surface to the panel's UIList.
-        list_item = props.surfaces.add()
-        list_item.name = surface.name
-        list_item.guid = surface.guid
-        list_item.ifc_id = surface.ifc_host_entity_id or 0
-        list_item.kind = surface.kind
-        props.active_surface_index = len(props.surfaces) - 1
-        props.active_surface_id = list_item.ifc_id
-        props.active_surface_guid = list_item.guid
+        # The UIList rebuilds itself via SurfaceData._sync_uilist_from_ifc
+        # which Bonsai's refresh_ui_data hook fires after every IFC
+        # mutation (this operator inherits tool.Ifc.Operator → triggers
+        # the refresh). We only set the active selection here so the
+        # user sees the new surface highlighted — the row itself will
+        # appear via the refresh.
+        from bonsai.bim.module.surface.data import SurfaceData
+
+        SurfaceData.is_loaded = False
+        SurfaceData.load()
+        # SurfaceData.load preserves the previously-selected GUID if it's
+        # still in the list. Override to make the freshly-created surface
+        # the active selection.
+        for index, item in enumerate(props.surfaces):
+            if item.guid == surface.guid:
+                props.active_surface_index = index
+                break
 
         self.report(
             {"INFO"},
@@ -380,8 +387,9 @@ class CIVIL_OT_surface_add_breakline(Operator, tool.Ifc.Operator):
 
         # core_surface.add_breakline_to_surface enforces the ≥ 2-point rule
         # (business validation belongs in core, not the UI layer).
+        # Breakline.guid defaults via ifcopenshell.guid.new() — no need to
+        # mint one in the UI layer.
         breakline = tool_surface.Breakline(
-            guid=ifcopenshell.guid.new(),
             name=self.breakline_name,
             polyline=[
                 (float(p[0]), float(p[1]), float(p[2])) for p in polyline_points

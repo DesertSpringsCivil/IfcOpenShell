@@ -66,27 +66,32 @@ class Breakline:
     possible.
     """
 
-    guid: str
-    """Stable identifier for cross-session reference; matches the IFC GlobalId."""
+    guid: str = field(default_factory=ifcopenshell.guid.new)
+    """Stable identifier for cross-session reference; matches the IFC GlobalId.
+    Defaults to a fresh ``ifcopenshell.guid.new()`` when not supplied — keeps
+    GUID minting in the data layer, not in operators."""
 
-    name: str
+    name: str = ""
     """Human-readable label."""
 
-    polyline: list[tuple[float, float, float]]
-    """Ordered ``(x, y, z)`` vertex sequence; at least two points required."""
+    polyline: list[tuple[float, float, float]] = field(default_factory=list)
+    """Ordered ``(x, y, z)`` vertex sequence; at least two points required
+    when used by :meth:`Surface.retriangulate`."""
 
-    kind: Literal["standard", "wall", "non_destructive", "proximity"]
+    kind: Literal["standard", "wall", "non_destructive", "proximity"] = "standard"
     """Breakline category. Drives triangulation behavior:
 
     - ``standard``: edges added to the TIN at this polyline's segments.
     - ``wall``: edges added; downstream code may render a vertical face.
     - ``non_destructive``: edges added but original triangles are preserved
-      where possible (no mid-edge splits).
+      where possible (no mid-edge splits) — note: Phase 4 implementation
+      treats this identically to ``standard``; the kind is round-tripped
+      through IFC for forward compatibility.
     - ``proximity``: triangles are flagged near this polyline but no
       edges are forced through it (informational only).
     """
 
-    source: str
+    source: str = "manual"
     """Free-form provenance label: ``manual``, ``feature_line``,
     ``corridor_extract``, etc."""
 
