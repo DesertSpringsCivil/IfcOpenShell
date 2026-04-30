@@ -1951,6 +1951,33 @@ class TestSurfaceDataCache(NewIfc4X3):
         assert surfaces[0].guid != ""
         assert surfaces[0].ifc_id > 0
 
+    def test_uilist_kind_reflects_spatial_parent(self, tmp_path) -> None:
+        """``SurfaceData._sync_uilist_from_ifc`` must classify each
+        IfcEarthworksFill via ``infer_kind_from_spatial_parent`` rather
+        than hardcoding ``"proposed_group"``. Phase-4 files (no grading
+        group) should land as ``"proposed_site"`` in the UIList.
+        """
+        from bonsai.bim.module.surface.data import SurfaceData
+
+        path = tmp_path / "p.csv"
+        path.write_text("0,0,0\n10,0,0\n10,10,0\n0,10,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_kind = (
+            "proposed_site"
+        )
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "PSite"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        # Force a reload so the UIList is rebuilt from IFC, not from the
+        # in-memory authoring path.
+        bpy.context.scene.CivilSurfaceProperties.surfaces.clear()
+        SurfaceData.is_loaded = False
+        SurfaceData.load()
+
+        surfaces = bpy.context.scene.CivilSurfaceProperties.surfaces
+        assert len(surfaces) == 1
+        assert surfaces[0].kind == "proposed_site"
+
     def test_load_preserves_active_selection_if_guid_still_present(
         self, tmp_path
     ) -> None:

@@ -98,10 +98,11 @@ class SurfaceData:
             item.name = entity.Name or ""
             item.guid = entity.GlobalId
             item.ifc_id = entity.id()
-            # Disambiguation between proposed_group / proposed_site
-            # happens in tool.Surface.infer_kind_from_spatial_parent;
-            # the UIList just shows the icon for "proposed of some kind."
-            item.kind = "proposed_group"
+            # Disambiguation between proposed_group / proposed_site via
+            # spatial-parent inspection. Phase 4 files (no IfcGroup yet)
+            # always classify as proposed_site; Phase 5 files with grading
+            # groups classify proposed_group correctly without code change.
+            item.kind = tool.Surface.infer_kind_from_spatial_parent(entity)
 
         # Restore the previous selection if its GUID is still in the list.
         for index, item in enumerate(props.surfaces):
