@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional, Protocol
 
 import numpy as np
+import scipy.spatial
 import shapely
 
 
@@ -218,3 +219,176 @@ class Triangulator(Protocol):
             (-2, -1, or 0–7 breakline-edge bitmask).
         """
         ...
+
+
+class _ScipyShapelyTriangulator:
+    """Default :class:`Triangulator` backend per spec §4.4.
+
+    - ``unconstrained()`` uses :func:`scipy.spatial.Delaunay` (Qhull).
+    - ``constrained()`` uses :func:`shapely.constrained_delaunay_triangles`
+      on the outer boundary unioned with breakline line strings — shapely
+      respects polygon edges, so the unioned input forces breakline
+      segments into the triangulation as edges.
+
+    Output triangle indices are reverse-mapped from shapely's coordinate-
+    space output to the input ``points`` array via a rounded-coordinate
+    lookup. The lookup tolerance is :data:`COORDINATE_PRECISION` decimal
+    places (default 6 ≈ micrometre precision in metric project units).
+
+    Returned ``flags`` are zeros at this layer; commit 5 implements the
+    centroid-in-polygon hole/void translation and the breakline-edge
+    bitmask.
+
+    Pinned dependency versions per spec §4.4: ``scipy >= 1.11, < 2.0`` and
+    ``shapely >= 2.1, < 3.0``.
+    """
+
+    COORDINATE_PRECISION = 6
+    """Decimal places used when rounding XY coordinates for the
+    triangle-vertex → input-point-index lookup. Six decimals ≈
+    1 micrometre in metric project units, well below typical civil-
+    engineering survey accuracy. Increase only if a test fixture uses
+    sub-micrometre vertex spacing."""
+
+    def unconstrained(self, points: np.ndarray) -> np.ndarray:
+        if points.ndim != 2 or points.shape[1] not in (2, 3):
+            raise ValueError(
+                f"points must be (N, 2) or (N, 3), got shape {points.shape}"
+            )
+        if points.shape[0] < 3:
+            raise ValueError(
+                f"unconstrained Delaunay requires at least 3 points, got {points.shape[0]}"
+            )
+        xy = points[:, :2] if points.shape[1] == 3 else points
+        delaunay = scipy.spatial.Delaunay(xy)
+        return delaunay.simplices.astype(int).copy()
+
+    def constrained(
+        self,
+        points: np.ndarray,
+        breakline_segments: list[tuple[int, int]],
+        outer_boundary: shapely.Polygon,
+        holes: list[shapely.Polygon],
+        voids: list[shapely.Polygon],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError(
+                f"points must be (N, 3), got shape {points.shape}"
+            )
+        if not isinstance(outer_boundary, shapely.Polygon):
+            raise ValueError(
+                f"outer_boundary must be a shapely.Polygon, got {type(outer_boundary).__name__}"
+            )
+
+        coord_to_index = self._build_coord_index(points)
+        constrained_geom = self._build_constrained_geometry(
+            points, breakline_segments, outer_boundary
+        )
+        triangle_geoms = shapely.constrained_delaunay_triangles(constrained_geom)
+        triangles = self._extract_triangle_indices(triangle_geoms, coord_to_index)
+        # Flags are zeros at this layer; commit 5 fills in hole/void/breakline-bitmask.
+        flags = np.zeros(len(triangles), dtype=int)
+        return triangles, flags
+
+    @classmethod
+    def _build_coord_index(
+        cls, points: np.ndarray
+    ) -> dict[tuple[float, float], int]:
+        """Return a ``(rounded_x, rounded_y) -> point_index`` dict.
+
+        Used to reverse-map shapely's output triangle coordinates back to
+        indices in the original ``points`` array. Rounding tolerance is
+        :attr:`COORDINATE_PRECISION` decimals.
+        """
+        precision = cls.COORDINATE_PRECISION
+        return {
+            (round(float(x), precision), round(float(y), precision)): i
+            for i, (x, y, *_) in enumerate(points)
+        }
+
+    @staticmethod
+    def _build_constrained_geometry(
+        points: np.ndarray,
+        breakline_segments: list[tuple[int, int]],
+        outer_boundary: shapely.Polygon,
+    ) -> shapely.geometry.base.BaseGeometry:
+        """Split the outer boundary along breakline segments to force breakline
+        edges into the constrained Delaunay triangulation.
+
+        Shapely's :func:`constrained_delaunay_triangles` respects polygon edges
+        but ignores interior line strings, so a naive
+        :func:`shapely.unary_union` of polygon + breakline doesn't enforce the
+        breakline as a triangulation edge. Splitting the polygon along the
+        breakline produces sub-polygons whose shared edge IS the breakline,
+        which the CDT then preserves.
+
+        Limitation: breaklines that don't fully cross the (sub-)polygon are
+        silently ignored — :func:`shapely.ops.split` returns the polygon
+        unchanged in that case. Internal breaklines (Civil 3D's "ridge that
+        ends inside the surface" case) need a proper CDT library to enforce.
+        Phase 4 MVP fixtures use breaklines that fully cross; later phases
+        may upgrade this backend.
+
+        With no breaklines, returns the outer boundary unchanged.
+        """
+        if not breakline_segments:
+            return outer_boundary
+        polygons: list[shapely.Polygon] = [outer_boundary]
+        for a, b in breakline_segments:
+            line = shapely.LineString(
+                [
+                    (float(points[a, 0]), float(points[a, 1])),
+                    (float(points[b, 0]), float(points[b, 1])),
+                ]
+            )
+            new_polygons: list[shapely.Polygon] = []
+            for poly in polygons:
+                split_result = shapely.ops.split(poly, line)
+                if hasattr(split_result, "geoms"):
+                    new_polygons.extend(
+                        g for g in split_result.geoms if isinstance(g, shapely.Polygon)
+                    )
+                elif isinstance(split_result, shapely.Polygon):
+                    new_polygons.append(split_result)
+            polygons = new_polygons or polygons
+        return shapely.MultiPolygon(polygons) if len(polygons) > 1 else polygons[0]
+
+    @classmethod
+    def _extract_triangle_indices(
+        cls,
+        triangle_geoms: shapely.GeometryCollection,
+        coord_to_index: dict[tuple[float, float], int],
+    ) -> np.ndarray:
+        """Convert shapely's GeometryCollection-of-polygons output to an
+        ``(M, 3)`` index array referencing the original points.
+
+        Raises :class:`ValueError` if a triangle vertex cannot be matched —
+        which happens when shapely introduces a Steiner point (e.g., where
+        a breakline segment crosses the outer boundary). Future commits may
+        relax this by adding new points to a returned augmented array; the
+        Phase 4 MVP fixtures don't require Steiner points.
+        """
+        precision = cls.COORDINATE_PRECISION
+        indices: list[tuple[int, int, int]] = []
+        geoms = (
+            triangle_geoms.geoms
+            if hasattr(triangle_geoms, "geoms")
+            else [triangle_geoms]
+        )
+        for triangle in geoms:
+            if not isinstance(triangle, shapely.Polygon):
+                continue
+            coords = list(triangle.exterior.coords)
+            # First three coords are the triangle vertices; the fourth closes the ring.
+            triangle_indices: list[int] = []
+            for x, y in coords[:3]:
+                key = (round(float(x), precision), round(float(y), precision))
+                if key not in coord_to_index:
+                    raise ValueError(
+                        f"triangle vertex {key} not found in input points; "
+                        "shapely may have introduced a Steiner point — supply "
+                        "breakline endpoints that match input vertices exactly"
+                    )
+                triangle_indices.append(coord_to_index[key])
+            indices.append(tuple(triangle_indices))  # type: ignore[arg-type]
+        return np.array(indices, dtype=int)

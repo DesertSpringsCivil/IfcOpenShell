@@ -29,6 +29,7 @@ Run via the canonical Phase 4 invocation (PowerShell, from src/bonsai)::
 """
 
 import numpy as np
+import pytest
 import shapely
 
 import bonsai.tool.surface as tool_surface
@@ -208,3 +209,135 @@ class TestTriangulatorProtocol:
         assert triangles.shape == (2, 3)
         assert flags.shape == (2,)
         assert (flags == 0).all()
+
+
+class TestScipyShapelyTriangulator:
+    """Tests for :class:`bonsai.tool.surface._ScipyShapelyTriangulator`."""
+
+    def _make(self) -> tool_surface._ScipyShapelyTriangulator:
+        return tool_surface._ScipyShapelyTriangulator()
+
+    def test_unconstrained_unit_square_produces_two_triangles(self) -> None:
+        """Four corners of a unit square should triangulate to exactly two triangles
+        covering the whole square — sum of triangle areas = 1.0."""
+        triangulator = self._make()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        triangles = triangulator.unconstrained(points)
+        assert triangles.shape == (2, 3)
+        # Verify it covers the unit square (sum of triangle areas = 1.0).
+        total_area = 0.0
+        for a, b, c in triangles:
+            ax, ay = points[a, 0], points[a, 1]
+            bx, by = points[b, 0], points[b, 1]
+            cx, cy = points[c, 0], points[c, 1]
+            total_area += abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) / 2.0
+        assert abs(total_area - 1.0) < 1e-9
+
+    def test_unconstrained_accepts_2d_points(self) -> None:
+        triangulator = self._make()
+        points_2d = np.array([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)])
+        triangles = triangulator.unconstrained(points_2d)
+        assert triangles.shape == (2, 3)
+
+    def test_unconstrained_3x3_grid_produces_8_triangles(self) -> None:
+        """A 3×3 vertex grid should triangulate to 8 triangles (2 per cell × 4 cells)."""
+        triangulator = self._make()
+        points = np.array(
+            [(float(i * 50), float(j * 50), 100.0) for j in range(3) for i in range(3)]
+        )
+        triangles = triangulator.unconstrained(points)
+        assert triangles.shape == (8, 3)
+        # All indices must be in [0, 9).
+        assert (triangles >= 0).all() and (triangles < 9).all()
+
+    def test_unconstrained_indices_are_int(self) -> None:
+        triangulator = self._make()
+        points = np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)])
+        triangles = triangulator.unconstrained(points)
+        assert triangles.dtype == np.dtype("int64") or triangles.dtype == np.dtype("int32")
+
+    def test_unconstrained_too_few_points_raises(self) -> None:
+        triangulator = self._make()
+        with pytest.raises(ValueError, match="at least 3 points"):
+            triangulator.unconstrained(np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]))
+
+    def test_unconstrained_wrong_shape_raises(self) -> None:
+        triangulator = self._make()
+        with pytest.raises(ValueError, match=r"\(N, 2\) or \(N, 3\)"):
+            triangulator.unconstrained(np.array([(0.0, 0.0, 0.0, 0.0)]))
+
+    def test_constrained_unit_square_no_breaklines(self) -> None:
+        """Same domain as unconstrained, no breaklines — should produce 2 triangles."""
+        triangulator = self._make()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        outer = shapely.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        triangles, flags = triangulator.constrained(points, [], outer, [], [])
+        assert triangles.shape == (2, 3)
+        assert flags.shape == (2,)
+        assert (flags == 0).all()  # Commit 5 fills in flags; commit 3 returns zeros.
+
+    def test_constrained_breakline_forces_diagonal_edge(self) -> None:
+        """A breakline along the diagonal of a unit square should force both triangles
+        to share that diagonal as a common edge."""
+        triangulator = self._make()
+        # Add the diagonal-midpoint endpoints to the points array so the breakline
+        # endpoints match input vertices (no Steiner points).
+        points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        outer = shapely.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        # Breakline from (0,0) to (1,1) — vertices 0 and 2.
+        triangles, flags = triangulator.constrained(points, [(0, 2)], outer, [], [])
+        assert triangles.shape == (2, 3)
+        # Each unordered edge should be counted once per triangle that contains it.
+        # An internal edge appears in 2 triangles; a boundary edge in 1.
+        edges_count: dict[tuple[int, int], int] = {}
+        for a, b, c in triangles:
+            for edge in ((a, b), (b, c), (a, c)):
+                key = tuple(sorted((int(edge[0]), int(edge[1]))))
+                edges_count[key] = edges_count.get(key, 0) + 1
+        # The diagonal (0, 2) must appear in both triangles as an internal edge.
+        assert edges_count.get((0, 2)) == 2, (
+            f"diagonal edge (0, 2) should be shared by both triangles, "
+            f"got count {edges_count.get((0, 2))}; full edges: {edges_count}"
+        )
+
+    def test_constrained_flags_zeros_for_now(self) -> None:
+        """Holes/voids polygons are accepted but flags are still zeros at this commit;
+        commit 5 implements centroid-in-polygon flag translation."""
+        triangulator = self._make()
+        points = np.array(
+            [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (10.0, 10.0, 0.0), (0.0, 10.0, 0.0)]
+        )
+        outer = shapely.Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+        hole = shapely.Polygon([(2, 2), (4, 2), (4, 4), (2, 4)])
+        void = shapely.Polygon([(6, 6), (8, 6), (8, 8), (6, 8)])
+        triangles, flags = triangulator.constrained(points, [], outer, [hole], [void])
+        assert (flags == 0).all()  # Will be -1 / -2 after commit 5.
+
+    def test_constrained_wrong_outer_type_raises(self) -> None:
+        triangulator = self._make()
+        points = np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0)])
+        with pytest.raises(ValueError, match="outer_boundary must be a shapely.Polygon"):
+            triangulator.constrained(points, [], "not a polygon", [], [])  # type: ignore[arg-type]
+
+    def test_constrained_2d_points_raises(self) -> None:
+        triangulator = self._make()
+        with pytest.raises(ValueError, match=r"\(N, 3\)"):
+            triangulator.constrained(
+                np.array([(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]),
+                [],
+                shapely.Polygon([(0, 0), (1, 0), (0, 1)]),
+                [],
+                [],
+            )
+
+    def test_satisfies_triangulator_protocol(self) -> None:
+        """Verify the default backend duck-types as :class:`Triangulator`."""
+        backend: tool_surface.Triangulator = self._make()  # type: ignore[assignment]
+        assert hasattr(backend, "unconstrained")
+        assert hasattr(backend, "constrained")
