@@ -396,6 +396,18 @@ class _ScipyShapelyTriangulator:
         Phase 4 MVP fixtures use breaklines that fully cross; later phases
         may upgrade this backend.
 
+        **Interaction with `_compute_flags`.** When a breakline is silently
+        dropped here, :meth:`_compute_flags` still receives the original
+        ``breakline_segments`` list. If the unconstrained Delaunay output
+        happens to contain an edge geometrically equal to ``(a, b)``, that
+        edge's flag bit is set — which is *correct* per IFC §2.1 (the bit
+        encodes "this edge is at a breakline," not "the triangulator forced
+        this edge"). If Delaunay chose a different diagonal, no flag bit is
+        set and the breakline is recoverable only via the separate
+        ``IfcAnnotation`` polyline. Callers that need a guarantee the
+        bitmask reflects forced edges must validate the breakline crosses
+        the boundary before calling.
+
         With no breaklines, returns the outer boundary unchanged.
         """
         if not breakline_segments:
@@ -555,6 +567,20 @@ class Surface:
         the authoring polygons. ``breaklines``, ``holes``, and ``voids`` start
         empty — recovery from annotation set + flags is approximate and
         deferred to a later phase.
+
+        .. note::
+
+            **proposed_group / proposed_site round-trip ambiguity.** Both
+            ``proposed_group`` and ``proposed_site`` host as
+            ``IfcEarthworksFill[SUBGRADE]`` (per spec §2.2 host-entity table)
+            with identical IFC structure — the distinction is only meaningful
+            at the Bonsai authoring layer (where it determines spatial parent:
+            grading group vs site). On read-back this method always returns
+            ``kind="proposed_group"``; callers in the core layer must not
+            branch on ``surface.kind == "proposed_site"`` for any
+            schema-consequential decision after a rehydration path. The
+            authored-then-cached path (via :meth:`register`) preserves the
+            original kind verbatim.
         """
         host = next(
             (e for e in ifc_file.by_type("IfcRoot") if e.GlobalId == guid),
@@ -756,6 +782,13 @@ class Surface:
         Linear scan over triangles. Sufficient for Phase 4 fixtures (≤ a few
         thousand triangles); STRtree-accelerated lookup is a Phase 4.1+
         optimization for larger surfaces.
+
+        The inside-test ``epsilon`` is intentionally **absolute**, not relative
+        to triangle size. At civil-engineering project scales (1 m to 10 km
+        extents in metric units), ``1e-9`` corresponds to nanometre-precision
+        leakage at the boundary — well below survey accuracy and small enough
+        that its effect on interpolated Z is negligible for any practical
+        triangle.
         """
         px, py = float(x), float(y)
         points = surface.points
@@ -798,6 +831,15 @@ class Surface:
         entity carry the same identifier. Step ids of the host, the
         :class:`IfcTriangulatedIrregularNetwork`, and the
         :class:`IfcBoundingBox` representations are stamped onto the surface.
+
+        .. note::
+
+            The GlobalId overwrite happens *after* all psets and inverse
+            references are attached (the underlying API does its work first).
+            Inverse references are by step id, not GlobalId, so they survive
+            the overwrite intact. Callers must read ``host.GlobalId`` *after*
+            this method returns — the value the API minted internally is
+            discarded.
 
         :param ifc_file: target IFC file (typically ``tool.Ifc.get()``).
         :param surface: :class:`CivilSurface` to persist; ``points``,
@@ -986,9 +1028,9 @@ class Surface:
         if existing_obj:
             return existing_obj
 
-        mesh = cls._build_mesh_data(surface, mesh_name=f"{host.is_a()}/{host.Name or surface.guid}")
-        obj_name = f"{host.is_a()}/{host.Name or surface.guid}"
-        obj = bpy.data.objects.new(obj_name, mesh)
+        display_name = f"{host.is_a()}/{host.Name or surface.guid}"
+        mesh = cls._build_mesh_data(surface, mesh_name=display_name)
+        obj = bpy.data.objects.new(display_name, mesh)
 
         tool.Ifc.link(host, obj)
         tool.Collector.assign(obj)
