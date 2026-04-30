@@ -85,10 +85,17 @@ Run from `src/bonsai/`.
 ```bash
 # Core tests — pure Python, no Blender required
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/core/test_alignment.py -o "addopts=" -v
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/core/test_surface.py -o "addopts=" -v
 
 # Tool tests — requires Blender headless (pytest-blender)
-python -m pytest test/tool/test_alignment.py -v \
-  --blender-executable="/c/Program Files/Blender Foundation/Blender_5/blender.exe"
+# Phase 4 canonical invocation (use space-separated --blender-executable, NOT =-joined):
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_alignment.py \
+  -o "addopts=" -p pytest-blender \
+  --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
+
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_surface.py \
+  -o "addopts=" -p pytest-blender \
+  --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
 
 # Operator tests — requires Blender headless (pytest-blender)
 python -m pytest test/bim/module/alignment/test_alignment_operators.py -m "alignment" -v \
@@ -98,6 +105,13 @@ python -m pytest test/bim/module/alignment/test_alignment_operators.py -m "align
 python -m pytest test/tool/test_alignment.py test/bim/module/alignment/ -m "alignment or not alignment" -v \
   --blender-executable="/c/Program Files/Blender Foundation/Blender_5/blender.exe"
 ```
+
+**Phase 4 surface module note:** the tool tests at `test/tool/test_surface.py`
+include both the pure-math tool tests and operator-layer tests
+(via `NewIfc4X3` base class) since the `test/bim/module/surface/` directory
+is currently blocked by an env-level pytest-bdd / parse-type compat issue
+in `test/bim/conftest.py`. Move the operator tests back to
+`test/bim/module/surface/` once that's fixed upstream.
 
 **Prerequisites:** `pytest-blender` and `pytest-bdd` must be installed in Blender's
 extensions site-packages (`%APPDATA%\Blender Foundation\Blender\5.0\extensions\.local\lib\python3.11\site-packages\`).
@@ -112,8 +126,20 @@ extensions site-packages (`%APPDATA%\Blender Foundation\Blender\5.0\extensions\.
 - PEP 8 naming with long descriptive variable names
 - Blender 5.0+, Python 3.11
 
-## Current State (March 2026)
+## Current State (April 2026)
 
-**Done:** Horizontal alignment (PI method), segment visualization, PI picker, PI edit mode (G key), georef, CSV import, stationing, Add Element dialog integration.
+**Done:**
+- Horizontal alignment (PI method), segment visualization, PI picker, PI edit
+  mode (G key), georef, CSV import, stationing, Add Element dialog integration.
+- **Phase 4 — Bonsai surface module:** `tool.Surface` math layer (TIN
+  construction, retriangulation, Z-at-XY interpolation, IFC authoring
+  via `ifcopenshell.api.surface`, Blender mesh linkage), `core.surface`
+  orchestration (`create_surface_from_points`, `add_breakline_to_surface`,
+  `set_outer_boundary`, `retriangulate_surface`), UI (operators
+  `CIVIL_OT_surface_{create_from_points,add_breakline,set_boundary,
+  retriangulate}`, panel `BIM_PT_tab_surface_modeler` with four
+  sub-panels, `SurfaceDecorator` GPU drawing, registry / lazy
+  rehydration). 134 surface tests + bSI validator integration green.
 
-**Not done:** Vertical alignment, corridor generation, cross-sections, earthwork, drainage.
+**Not done:** Vertical alignment, corridor generation, cross-sections,
+earthwork (volumes), drainage.

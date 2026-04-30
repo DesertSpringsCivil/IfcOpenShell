@@ -1479,6 +1479,102 @@ class TestSurfaceDecorator(NewIfc4X3):
         assert result == pytest.approx(expected)
 
 
+class TestSurfaceBSIIntegration(NewIfc4X3):
+    """End-to-end integration test mirroring the spec §16 'done' criterion.
+
+    Drives the full operator chain (create → add breakline → set boundary
+    → retriangulate) through ``bpy.ops``, writes the result to disk,
+    reopens via :func:`ifcopenshell.open`, and runs
+    :func:`ifcopenshell.validate.validate` to assert no schema warnings.
+
+    This is the Phase 4 acceptance test — when this passes, end users can
+    load XYZ data, add breaklines, set boundaries, and round-trip the
+    result through IFC with a clean validator report.
+    """
+
+    def test_full_workflow_round_trip_and_validate(self, tmp_path) -> None:
+        import logging
+
+        import ifcopenshell
+        import ifcopenshell.validate
+
+        # 1. Create a 3x3 grid surface so all subsequent operators work
+        #    against existing vertices (no Steiner points).
+        points_path = tmp_path / "grid.csv"
+        rows = []
+        for y in (0, 5, 10):
+            for x in (0, 5, 10):
+                z = (x * 0.1) + (y * 0.05)  # gentle slope for varied Z
+                rows.append(f"{x},{y},{z:.2f}")
+        points_path.write_text("\n".join(rows) + "\n")
+
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = (
+            "bSI Validation Surface"
+        )
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+
+        # 2. Add a breakline along an interior edge of the grid.
+        breakline_path = tmp_path / "ridge.csv"
+        breakline_path.write_text("0,5,0.25\n10,5,0.75\n")
+        bpy.ops.civil.surface_add_breakline(
+            "EXEC_DEFAULT",
+            csv_filepath=str(breakline_path),
+            kind="standard",
+            breakline_name="ridge",
+        )
+
+        # 3. Set a quarter-square boundary using existing grid vertices.
+        boundary_path = tmp_path / "boundary.csv"
+        boundary_path.write_text("0,0,0\n5,0,0.5\n5,5,0.75\n0,5,0.25\n")
+        bpy.ops.civil.surface_set_boundary(
+            "EXEC_DEFAULT", csv_filepath=str(boundary_path)
+        )
+
+        # 4. Force-retriangulate (no-op semantically, but exercises the path).
+        bpy.ops.civil.surface_retriangulate("EXEC_DEFAULT")
+
+        # 5. Write to disk and reopen as a fresh file (not via Bonsai).
+        ifc_path = tmp_path / "phase4_acceptance.ifc"
+        tool.Ifc.get().write(str(ifc_path))
+        reopened = ifcopenshell.open(str(ifc_path))
+
+        # 6. Verify the IFC structure round-tripped: terrain entity, TIN
+        #    representation, breakline annotation, all the right psets.
+        terrains = reopened.by_type("IfcGeographicElement")
+        assert len(terrains) == 1
+        assert terrains[0].Name == "bSI Validation Surface"
+
+        tins = reopened.by_type("IfcTriangulatedIrregularNetwork")
+        assert len(tins) == 1
+        assert tins[0].Closed is False
+
+        annotations = [
+            a
+            for a in reopened.by_type("IfcAnnotation")
+            if a.ObjectType == "BREAKLINE"
+        ]
+        assert len(annotations) == 1
+        assert annotations[0].Name == "ridge"
+
+        # 7. Run the bSI validator on the reopened file. Collect WARNING+
+        #    log records into a list so the assertion message is helpful.
+        records: list[logging.LogRecord] = []
+
+        class _CollectingHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.Logger("phase4-acceptance-validate")
+        logger.addHandler(_CollectingHandler(level=logging.DEBUG))
+
+        ifcopenshell.validate.validate(reopened, logger)
+
+        errors = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+        assert errors == [], f"ifcopenshell.validate() reported: {errors}"
+
+
 class TestLoadPointsFromCsv:
     """Tests for :meth:`bonsai.tool.surface.Surface.load_points_from_csv`."""
 
