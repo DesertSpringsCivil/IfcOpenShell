@@ -336,10 +336,16 @@ class _ScipyShapelyTriangulator:
             centroid = shapely.Point(float(centroid_x), float(centroid_y))
 
             # Voids take precedence over holes per spec §6.3.
-            if any(centroid.within(void) for void in voids):
+            # ``intersects`` (rather than ``within``) handles the
+            # boundary case: a triangle whose centroid lands exactly on
+            # a hole/void edge (common when a breakline is coincident
+            # with a hole boundary) gets the correct flag instead of
+            # silently classifying as "visible" via ``within``'s
+            # strict-interior semantics.
+            if any(centroid.intersects(void) for void in voids):
                 flags[triangle_index] = -2
                 continue
-            if any(centroid.within(hole) for hole in holes):
+            if any(centroid.intersects(hole) for hole in holes):
                 flags[triangle_index] = -1
                 continue
 

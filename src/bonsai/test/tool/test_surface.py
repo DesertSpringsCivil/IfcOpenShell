@@ -492,6 +492,39 @@ class TestFlagsTranslation:
                     f"diagonal (0, 2); flags={flags.tolist()}"
                 )
 
+    def test_centroid_on_hole_boundary_flagged_as_hole(self) -> None:
+        """Closes the cold-review-flagged boundary edge case: a centroid
+        that lands exactly on a hole polygon's boundary must be flagged
+        ``-1``, not silently classified as visible. This happens when a
+        breakline runs coincident with a hole edge — a common pattern in
+        survey data where curb/gutter lines define both breaklines and
+        no-fill regions.
+
+        Constructs a triangle whose centroid lies exactly on a polygon
+        boundary line, then asserts the flag is ``-1`` (hole), not ``0``.
+        """
+        triangulator = self._make()
+        # Triangle with vertices (0,0), (3,0), (0,3) — centroid at (1, 1).
+        # The hole polygon is a triangle (0,0)-(2,0)-(0,2); its edge from
+        # (2,0) to (0,2) passes through (1, 1) exactly.
+        points = np.array(
+            [
+                (0.0, 0.0, 0.0),
+                (3.0, 0.0, 0.0),
+                (0.0, 3.0, 0.0),
+            ]
+        )
+        outer = shapely.Polygon([(0, 0), (3, 0), (0, 3)])
+        hole = shapely.Polygon([(0, 0), (2, 0), (0, 2)])
+        triangles, flags = triangulator.constrained(points, [], outer, [hole], [])
+        # Verify centroid (1, 1) lies on the hole edge (sanity).
+        centroid = shapely.Point(1.0, 1.0)
+        assert centroid.intersects(hole.boundary)
+        assert not centroid.within(hole)
+        # The single triangle's flag must be -1, not 0.
+        assert len(flags) == 1
+        assert flags[0] == -1
+
     def test_breakline_segments_passed_directly_to_triangulator(self) -> None:
         """Bypass Surface.retriangulate and pass breakline_segments directly —
         verify the triangulator translates them into bitmask flags."""
