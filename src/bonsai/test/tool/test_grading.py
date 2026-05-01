@@ -32,6 +32,7 @@ import numpy as np
 import pytest
 
 import bonsai.tool.grading as tool_grading
+import bonsai.tool.surface as tool_surface
 
 
 # ---------------------------------------------------------------------------
@@ -291,4 +292,394 @@ class TestExceptions:
         ):
             raise tool_grading.SaikeiSlopeProjectionError(
                 "marching loop hit max-iter"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Slope projection — unit tests
+# ---------------------------------------------------------------------------
+
+
+def _flat_existing_surface_at_z(z: float, extent: float = 100.0) -> tool_surface.CivilSurface:
+    """Helper: build a flat ``CivilSurface`` at the given Z, large enough
+    that the test slope-projection samples don't walk off the edge."""
+    half = extent / 2.0
+    points = np.array(
+        [
+            (-half, -half, z),
+            (half, -half, z),
+            (half, half, z),
+            (-half, half, z),
+        ]
+    )
+    return tool_surface.Surface.build_tin_from_points(
+        f"flat-z={z}", points
+    )
+
+
+class TestSlopeProjectionDistance:
+    """Tests for ``criteria.target_kind == "distance"`` — closed-form
+    projection at fixed horizontal offset."""
+
+    def test_distance_projection_offsets_by_horizontal_amount(self) -> None:
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="distance",
+            target_ref=5.0,
+            fill_slope=3.0,
+        )
+        result = tool_grading.Grading.compute_grading_object(
+            feature_line, criteria, side="right"
+        )
+        # Outward at side="right" of a +X-direction segment is -Y.
+        # 5m at fill_slope 3:1 → drops 5/3 ≈ 1.667 m.
+        for tie_x, tie_y, tie_z in result.daylight_line:
+            assert tie_y == pytest.approx(-5.0)
+            assert tie_z == pytest.approx(100.0 - 5.0 / 3.0)
+
+
+class TestSlopeProjectionElevation:
+    """Tests for ``criteria.target_kind == "elevation"`` — closed-form
+    projection to an absolute Z."""
+
+    def test_elevation_fill_drops_to_target(self) -> None:
+        """Feature line at z=100, target z=99, fill_slope=3 → projection
+        runs 3m horizontal and 1m vertical to reach z=99."""
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="elevation",
+            target_ref=99.0,
+            fill_slope=3.0,
+        )
+        result = tool_grading.Grading.compute_grading_object(
+            feature_line, criteria, side="right"
+        )
+        for tie_x, tie_y, tie_z in result.daylight_line:
+            # Outward = -Y, fill drops 1m at 3:1 → Y=-3, Z=99.
+            assert tie_y == pytest.approx(-3.0)
+            assert tie_z == pytest.approx(99.0)
+
+    def test_elevation_cut_rises_to_target(self) -> None:
+        """Feature line at z=99, target z=100, cut_slope=2 → 2m horizontal
+        and 1m vertical to reach z=100."""
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 99.0), (10.0, 0.0, 99.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="elevation",
+            target_ref=100.0,
+            cut_slope=2.0,
+        )
+        result = tool_grading.Grading.compute_grading_object(
+            feature_line, criteria, side="right"
+        )
+        for tie_x, tie_y, tie_z in result.daylight_line:
+            assert tie_y == pytest.approx(-2.0)
+            assert tie_z == pytest.approx(100.0)
+
+    def test_elevation_at_grade_returns_footprint(self) -> None:
+        """When footprint Z == target Z, daylight is the footprint itself
+        (no projection needed)."""
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="elevation",
+            target_ref=100.0,
+        )
+        result = tool_grading.Grading.compute_grading_object(
+            feature_line, criteria, side="right"
+        )
+        for footprint, tie in zip(result.daylight_line, result.daylight_line):
+            assert footprint == tie  # at-grade
+
+    def test_elevation_max_distance_raises_without_wall(self) -> None:
+        """Cap exceeded with no retaining-wall fallback raises."""
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        # 5m drop at 3:1 needs 15m horizontal; cap at 5m.
+        criteria = tool_grading.GradingCriteria(
+            target_kind="elevation",
+            target_ref=95.0,
+            fill_slope=3.0,
+            max_distance=5.0,
+            retaining_wall_at_limit=False,
+        )
+        with pytest.raises(
+            tool_grading.SaikeiSlopeProjectionError, match="max_distance"
+        ):
+            tool_grading.Grading.compute_grading_object(
+                feature_line, criteria, side="right"
+            )
+
+    def test_elevation_max_distance_with_retaining_wall(self) -> None:
+        """Cap exceeded with retaining_wall_at_limit=True returns the
+        cap-XY at target_z (vertical-wall close)."""
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="elevation",
+            target_ref=95.0,
+            fill_slope=3.0,
+            max_distance=5.0,
+            retaining_wall_at_limit=True,
+        )
+        result = tool_grading.Grading.compute_grading_object(
+            feature_line, criteria, side="right"
+        )
+        for tie_x, tie_y, tie_z in result.daylight_line:
+            assert tie_y == pytest.approx(-5.0)  # cap horizontal offset
+            assert tie_z == pytest.approx(95.0)  # at target
+
+
+class TestSlopeProjectionRelativeElevation:
+    """Tests for ``criteria.target_kind == "relative_elevation"`` — same
+    as elevation but the target is relative to the footprint Z."""
+
+    def test_relative_elevation_drop(self) -> None:
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        # delta_z = -1: drop 1m relative to footprint.
+        criteria = tool_grading.GradingCriteria(
+            target_kind="relative_elevation",
+            target_ref=-1.0,
+            fill_slope=3.0,
+        )
+        result = tool_grading.Grading.compute_grading_object(
+            feature_line, criteria, side="right"
+        )
+        for tie_x, tie_y, tie_z in result.daylight_line:
+            assert tie_z == pytest.approx(99.0)
+            assert tie_y == pytest.approx(-3.0)
+
+
+class TestSlopeProjectionSurface:
+    """Tests for ``criteria.target_kind == "surface"`` — marching-loop
+    projection against a target :class:`CivilSurface`."""
+
+    def test_fill_to_flat_existing_below_feature_line(self) -> None:
+        """Feature line at z=100, flat existing at z=99, 3:1 fill →
+        daylight at horizontal offset 3m, z=99."""
+        existing = _flat_existing_surface_at_z(99.0)
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="surface",
+            target_ref=existing.guid,
+            fill_slope=3.0,
+        )
+        result = tool_grading.Grading.compute_grading_object(
+            feature_line,
+            criteria,
+            target_surface=existing,
+            side="right",
+        )
+        # Tolerance loosened to march_step granularity (0.5m) since the
+        # marching loop bisects to ~daylight_epsilon precision but the
+        # crossing might land on a boundary between iterations.
+        for tie_x, tie_y, tie_z in result.daylight_line:
+            assert tie_y == pytest.approx(-3.0, abs=0.5)
+            assert tie_z == pytest.approx(99.0, abs=0.05)
+
+    def test_cut_to_flat_existing_above_feature_line(self) -> None:
+        """Feature line at z=99, flat existing at z=100, 2:1 cut →
+        daylight at horizontal offset 2m, z=100."""
+        existing = _flat_existing_surface_at_z(100.0)
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 99.0), (10.0, 0.0, 99.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="surface",
+            target_ref=existing.guid,
+            cut_slope=2.0,
+        )
+        result = tool_grading.Grading.compute_grading_object(
+            feature_line,
+            criteria,
+            target_surface=existing,
+            side="right",
+        )
+        for tie_x, tie_y, tie_z in result.daylight_line:
+            assert tie_y == pytest.approx(-2.0, abs=0.5)
+            assert tie_z == pytest.approx(100.0, abs=0.05)
+
+    def test_at_grade_footprint_returns_footprint_xyz(self) -> None:
+        existing = _flat_existing_surface_at_z(100.0)
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="surface", target_ref=existing.guid
+        )
+        result = tool_grading.Grading.compute_grading_object(
+            feature_line,
+            criteria,
+            target_surface=existing,
+            side="right",
+        )
+        # Daylight is the footprint sample itself.
+        for sample in result.daylight_line:
+            assert sample[2] == pytest.approx(100.0)
+
+    def test_missing_target_surface_raises(self) -> None:
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="surface", target_ref="some-guid"
+        )
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="requires a target_surface"
+        ):
+            tool_grading.Grading.compute_grading_object(
+                feature_line, criteria, side="right"
+            )
+
+
+class TestOutwardDirection:
+    """Tests for outward-direction computation (CCW closed loop, CW closed
+    loop, open with explicit side)."""
+
+    def test_ccw_closed_polygon_outward_is_right_of_traversal(self) -> None:
+        # Square traversed CCW: (0,0) → (10,0) → (10,10) → (0,10).
+        # First edge is +X direction; outward (right) = -Y.
+        feature_line = tool_grading.FeatureLine(
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (10.0, 0.0, 100.0),
+                (10.0, 10.0, 100.0),
+                (0.0, 10.0, 100.0),
+            ],
+            closed=True,
+        )
+        outward = tool_grading.Grading._compute_outward_per_segment(
+            feature_line, side="auto"
+        )
+        # Bottom edge (0,0)→(10,0): outward = (0, -1).
+        assert outward[0] == pytest.approx((0.0, -1.0))
+        # Right edge (10,0)→(10,10): outward = (1, 0).
+        assert outward[1] == pytest.approx((1.0, 0.0))
+
+    def test_open_feature_line_with_explicit_side(self) -> None:
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)],
+            closed=False,
+        )
+        outward_right = tool_grading.Grading._compute_outward_per_segment(
+            feature_line, side="right"
+        )
+        assert outward_right[0] == pytest.approx((0.0, -1.0))
+        outward_left = tool_grading.Grading._compute_outward_per_segment(
+            feature_line, side="left"
+        )
+        assert outward_left[0] == pytest.approx((0.0, 1.0))
+
+    def test_open_feature_line_auto_side_raises(self) -> None:
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)],
+            closed=False,
+        )
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="explicit side"
+        ):
+            tool_grading.Grading._compute_outward_per_segment(
+                feature_line, side="auto"
+            )
+
+
+class TestRibbonTriangulation:
+    """Tests for :meth:`Grading._triangulate_ribbon`."""
+
+    def test_two_triangles_per_sample_pair(self) -> None:
+        footprint = [(0.0, 0.0, 100.0), (1.0, 0.0, 100.0), (2.0, 0.0, 100.0)]
+        daylight = [(0.0, -3.0, 99.0), (1.0, -3.0, 99.0), (2.0, -3.0, 99.0)]
+        points, triangles = tool_grading.Grading._triangulate_ribbon(
+            footprint, daylight
+        )
+        # 3 footprint + 3 daylight = 6 points; 2 triangles per consecutive
+        # pair × 2 pairs = 4 triangles.
+        assert points.shape == (6, 3)
+        assert triangles.shape == (4, 3)
+
+    def test_empty_input_returns_empty_arrays(self) -> None:
+        points, triangles = tool_grading.Grading._triangulate_ribbon([], [])
+        assert points.shape == (0, 3)
+        assert triangles.shape == (0, 3)
+
+    def test_mismatched_lengths_returns_empty_arrays(self) -> None:
+        points, triangles = tool_grading.Grading._triangulate_ribbon(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
+            [(0.0, -1.0, 0.0)],  # only 1 daylight for 2 footprint
+        )
+        assert points.shape == (0, 3)
+        assert triangles.shape == (0, 3)
+
+
+class TestComputeGradingObjectIntegration:
+    """End-to-end tests for :meth:`Grading.compute_grading_object`."""
+
+    def test_returns_grading_object_with_populated_outputs(self) -> None:
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="distance", target_ref=3.0
+        )
+        result = tool_grading.Grading.compute_grading_object(
+            feature_line, criteria, side="right", name="test"
+        )
+        assert isinstance(result, tool_grading.GradingObject)
+        assert result.name == "test"
+        assert result.footprint is feature_line
+        assert result.criteria is criteria
+        assert len(result.daylight_line) > 0
+        assert result.projection_points.shape[0] > 0
+        assert result.projection_triangles.shape[0] > 0
+        assert result.projection_triangles.shape[1] == 3
+
+    def test_too_short_feature_line_raises(self) -> None:
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 0.0)], closed=False
+        )
+        criteria = tool_grading.GradingCriteria(target_kind="distance", target_ref=1.0)
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="≥ 2 vertices"
+        ):
+            tool_grading.Grading.compute_grading_object(
+                feature_line, criteria, side="right"
+            )
+
+    def test_unknown_target_kind_raises(self) -> None:
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        # Bypass the dataclass Literal check by constructing then mutating.
+        criteria = tool_grading.GradingCriteria(target_kind="distance", target_ref=1.0)
+        criteria.target_kind = "bogus"  # type: ignore[assignment]
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="unknown target_kind"
+        ):
+            tool_grading.Grading.compute_grading_object(
+                feature_line, criteria, side="right"
             )
