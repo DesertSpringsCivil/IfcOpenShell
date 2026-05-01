@@ -70,6 +70,18 @@ For an excavation+fill scenario:
     buildingSMART standard)
   - ``Pset_SaikeiGradingShrinkSwell``
 
+Coordinate system
+=================
+
+Cut and fill body geometry is written in the project's local engineering
+frame. Geodetic positioning (lat/lon, projected CRS, true north
+rotation) is **not** the responsibility of this API; the caller must
+author :class:`IfcMapConversion` at project setup before creating
+earthwork entities. Bonsai exposes ``tool.Georeference`` for this. The
+deprecated ``IfcSite.RefLatitude``/``RefLongitude`` pattern is not
+supported (per the SURFACES_GRADING_EARTHWORKS reference doc,
+Principle #4).
+
 Idempotency contract
 ====================
 

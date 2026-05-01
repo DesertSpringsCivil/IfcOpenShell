@@ -87,6 +87,16 @@ and interior-fill triangulations; this API persists what it's given.
 Triangle indices on the API surface are 0-based; conversion to IFC's
 1-based convention happens internally via the Phase 1 surface API.
 
+Coordinate system
+=================
+
+Slope-fill ribbons, interior-fill TINs, and feature-line polylines are
+written in the project's local engineering frame. Geodetic positioning
+is the caller's responsibility via :class:`IfcMapConversion` (see
+:mod:`ifcopenshell.api.surface` for the canonical pattern); Bonsai
+exposes ``tool.Georeference``. Deprecated
+``IfcSite.RefLatitude``/``RefLongitude`` is not supported.
+
 Currently supported
 ===================
 

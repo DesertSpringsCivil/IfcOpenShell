@@ -63,6 +63,21 @@ Triangle indices are 0-based on the API surface; the API converts to the IFC
 1-based convention internally. Triangle flags are an optional integer per
 triangle, defaulting to all zeros.
 
+Coordinate system
+=================
+
+TIN points and breakline polylines are written in the project's local
+engineering frame. Geodetic positioning (lat/lon, projected CRS, true
+north rotation) is **not** the responsibility of this API. The doc-
+sanctioned IFC 4.3 pattern is :class:`IfcMapConversion` — the caller
+is responsible for authoring the map-conversion entity once at project
+setup before any surfaces are created. Bonsai exposes
+``tool.Georeference`` for this. The deprecated
+``IfcSite.RefLatitude``/``RefLongitude`` pattern is **not** supported
+and must not be relied on by new authoring code (per buildingSMART
+2017 Infra Overall Architecture Guidelines and the
+SURFACES_GRADING_EARTHWORKS reference doc, Principle #4).
+
 Currently supported
 ===================
 
