@@ -89,7 +89,7 @@ def add_slope_fill_to_group(
 
     Representations and psets attached:
 
-    - SurfaceModel :class:`IfcTriangulatedIrregularNetwork` (via
+    - Body :class:`IfcTriangulatedIrregularNetwork` (via
       :func:`ifcopenshell.api.surface.add_tin_representation`)
     - Box :class:`IfcBoundingBox` (via
       :func:`ifcopenshell.api.surface.add_bounding_box_representation`),

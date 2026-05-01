@@ -770,7 +770,7 @@ class Surface:
         """Reconstruct a :class:`CivilSurface` from the IFC entity identified
         by ``guid``.
 
-        Reads the host's SurfaceModel :class:`IfcTriangulatedIrregularNetwork`
+        Reads the host's Body :class:`IfcTriangulatedIrregularNetwork`
         for ``points`` (from ``Coordinates.CoordList``), ``triangles`` (from
         ``CoordIndex`` minus 1 to convert IFC's 1-based to 0-based), and
         ``triangle_flags``. The ``outer_boundary`` defaults to the convex hull
@@ -835,7 +835,7 @@ class Surface:
         if tin_id is None:
             raise SaikeiSurfaceError(
                 f"host #{host.id()} has no IfcTriangulatedIrregularNetwork "
-                "in its SurfaceModel representation"
+                "in its Body representation"
             )
         tin = ifc_file.by_id(tin_id)
 
@@ -1273,7 +1273,7 @@ class Surface:
         ifc_file: "ifcopenshell.file",
         surface: CivilSurface,
     ) -> "ifcopenshell.entity_instance":
-        """Replace the host entity's existing SurfaceModel TIN with one freshly
+        """Replace the host entity's existing Body TIN with one freshly
         built from ``surface.points``, ``surface.triangles``, and
         ``surface.triangle_flags``.
 
@@ -1284,7 +1284,7 @@ class Surface:
 
         :raises SaikeiSurfaceError: if ``surface.ifc_host_entity_id`` is unset
             (call :meth:`author_ifc_host` first) or if the host entity has no
-            existing SurfaceModel representation.
+            existing Body representation.
         """
         if surface.ifc_host_entity_id is None:
             raise SaikeiSurfaceError(
@@ -1440,13 +1440,13 @@ class Surface:
 
     @staticmethod
     def _find_tin_id(host: "ifcopenshell.entity_instance") -> Optional[int]:
-        """Return the step id of the host's SurfaceModel
+        """Return the step id of the host's Body
         :class:`IfcTriangulatedIrregularNetwork`, or ``None`` if absent."""
         representation = host.Representation
         if representation is None:
             return None
         for shape_rep in representation.Representations or []:
-            if shape_rep.RepresentationIdentifier == "SurfaceModel":
+            if shape_rep.RepresentationIdentifier == "Body":
                 for item in shape_rep.Items or []:
                     if item.is_a("IfcTriangulatedIrregularNetwork"):
                         return item.id()

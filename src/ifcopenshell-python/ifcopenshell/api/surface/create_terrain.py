@@ -94,7 +94,7 @@ def create_terrain(
 
     The new element is contained in :class:`IfcSite` via
     :func:`ifcopenshell.api.spatial.assign_container`. A
-    :class:`IfcTriangulatedIrregularNetwork` SurfaceModel representation is
+    :class:`IfcTriangulatedIrregularNetwork` Body representation is
     attached, alongside an :class:`IfcBoundingBox` LOD representation derived
     from the point cloud's axis-aligned extents. The standard
     ``Pset_GeographicElementCommon`` (``Status="NEW"``) and the Saikei

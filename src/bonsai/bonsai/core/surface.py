@@ -189,7 +189,7 @@ def add_breakline_to_surface(
        outer boundary; see ``_build_constrained_geometry`` docstring for the
        documented limitation).
     5. :meth:`tool.Surface.update_ifc_tin` — replace the host's existing
-       SurfaceModel TIN with the rebuilt one. Old TIN + CoordList are GC'd.
+       Body TIN with the rebuilt one. Old TIN + CoordList are GC'd.
 
     Cache invalidation is intentionally deferred: the in-memory ``surface``
     instance was mutated in place (breakline appended, points / triangles /

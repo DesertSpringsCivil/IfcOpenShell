@@ -42,14 +42,14 @@ def _find_existing_pset(
 
 
 def _infer_vertex_count_from_tin(product: ifcopenshell.entity_instance) -> Optional[int]:
-    """Return the number of points on the host's SurfaceModel TIN, or None if absent."""
+    """Return the number of points on the host's Body TIN, or None if absent."""
     representation = product.Representation
     if representation is None:
         return None
     for shape_rep in representation.Representations or []:
         if not shape_rep.is_a("IfcShapeRepresentation"):
             continue
-        if shape_rep.RepresentationIdentifier != "SurfaceModel":
+        if shape_rep.RepresentationIdentifier != "Body":
             continue
         for item in shape_rep.Items or []:
             if item.is_a("IfcTriangulatedIrregularNetwork"):
@@ -76,7 +76,7 @@ def apply_saikei_pset(
       to the triangulation (defaults to 0; the API never overwrites this with
       a stale value — pass it explicitly when retriangulating)
     - ``VertexCount``: the number of TIN points; if ``None``, inferred from
-      the host's existing SurfaceModel representation
+      the host's existing Body representation
     - ``BoundaryPolygonReference``: GUID-like reference to the outer boundary
       polygon used during triangulation (or None if the boundary was the
       convex hull of the points)
@@ -89,7 +89,7 @@ def apply_saikei_pset(
         or IfcEarthworksFill)
     :param triangulation_tolerance: stored as ``TriangulationTolerance``
     :param breakline_count: stored as ``BreaklineCount``
-    :param vertex_count: stored as ``VertexCount``; inferred from the SurfaceModel
+    :param vertex_count: stored as ``VertexCount``; inferred from the Body
         TIN when ``None``
     :param boundary_polygon_reference: stored as ``BoundaryPolygonReference``;
         omitted from the pset when ``None``

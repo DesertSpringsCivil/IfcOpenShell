@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Sequence, Union
 
 import ifcopenshell
 
-from ._representation_context import get_surface_model_subcontext
+from ._representation_context import get_body_subcontext
 
 if TYPE_CHECKING:
     import numpy as np
@@ -84,18 +84,18 @@ def add_tin_representation(
     triangles: "TriangleArray",
     triangle_flags: "FlagArray" = None,
 ) -> ifcopenshell.entity_instance:
-    """Attach an IfcTriangulatedIrregularNetwork to ``product.Representation`` as a SurfaceModel.
+    """Attach an IfcTriangulatedIrregularNetwork to ``product.Representation`` as a Body.
 
     Creates an :class:`IfcCartesianPointList3D`, an
     :class:`IfcTriangulatedIrregularNetwork` with 1-based ``CoordIndex`` and a
     per-triangle ``Flags`` list, wraps them in an :class:`IfcShapeRepresentation`
-    with ``RepresentationIdentifier='SurfaceModel'`` and
+    with ``RepresentationIdentifier='Body'`` and
     ``RepresentationType='Tessellation'``, and appends the shape representation
     to the product's :class:`IfcProductDefinitionShape`.
 
     If the product has no ``ProductDefinitionShape``, one is created. If a
-    ``SurfaceModel`` representation is already present, ``ValueError`` is
-    raised — use :func:`update_tin_representation` to replace it.
+    ``Body`` representation is already present, ``ValueError`` is raised —
+    use :func:`update_tin_representation` to replace it.
 
     :param file: the IFC file to author into
     :param product: any :class:`IfcProduct` host (typically an IfcGeographicElement
@@ -107,7 +107,7 @@ def add_tin_representation(
         to all zeros
     :returns: the created :class:`IfcTriangulatedIrregularNetwork` entity
     :raises ValueError: if ``points`` or ``triangles`` are empty, if any triangle index
-        is out of range, or if the product already has a SurfaceModel representation
+        is out of range, or if the product already has a Body representation
     """
     point_list = _to_point_list(points)
     if not point_list:
@@ -119,9 +119,9 @@ def add_tin_representation(
 
     shape = _get_or_create_product_definition_shape(file, product)
     for existing in shape.Representations:
-        if existing.is_a("IfcShapeRepresentation") and existing.RepresentationIdentifier == "SurfaceModel":
+        if existing.is_a("IfcShapeRepresentation") and existing.RepresentationIdentifier == "Body":
             raise ValueError(
-                f"product {product.is_a()} #{product.id()} already has a SurfaceModel "
+                f"product {product.is_a()} #{product.id()} already has a Body "
                 "representation; use update_tin_representation instead"
             )
 
@@ -135,8 +135,8 @@ def add_tin_representation(
     )
     representation = file.create_entity(
         "IfcShapeRepresentation",
-        ContextOfItems=get_surface_model_subcontext(file),
-        RepresentationIdentifier="SurfaceModel",
+        ContextOfItems=get_body_subcontext(file),
+        RepresentationIdentifier="Body",
         RepresentationType="Tessellation",
         Items=[tin],
     )

@@ -112,14 +112,14 @@ def test_package_importable() -> None:
 class TestRepresentationContext:
     """Tests for the internal subcontext resolver (``_representation_context``)."""
 
-    def test_creates_surface_model_subcontext_on_empty_file(
+    def test_creates_body_subcontext_on_empty_file(
         self, empty_project_file: ifcopenshell.file
     ) -> None:
         from ifcopenshell.api.surface import _representation_context
 
-        sub = _representation_context.get_surface_model_subcontext(empty_project_file)
+        sub = _representation_context.get_body_subcontext(empty_project_file)
         assert sub.is_a("IfcGeometricRepresentationSubContext")
-        assert sub.ContextIdentifier == "SurfaceModel"
+        assert sub.ContextIdentifier == "Body"
         assert sub.TargetView == "MODEL_VIEW"
         assert sub.ParentContext.is_a("IfcGeometricRepresentationContext")
         assert sub.ParentContext.ContextType == "Model"
@@ -128,15 +128,15 @@ class TestRepresentationContext:
         """Calling twice must return the same subcontext entity, not a duplicate."""
         from ifcopenshell.api.surface import _representation_context
 
-        first = _representation_context.get_surface_model_subcontext(empty_project_file)
-        second = _representation_context.get_surface_model_subcontext(empty_project_file)
+        first = _representation_context.get_body_subcontext(empty_project_file)
+        second = _representation_context.get_body_subcontext(empty_project_file)
         assert first.id() == second.id()
-        # Only one Model context, only one SurfaceModel subcontext.
+        # Only one Model context, only one Body subcontext.
         contexts = empty_project_file.by_type("IfcGeometricRepresentationContext", include_subtypes=False)
         subcontexts = [
             c
             for c in empty_project_file.by_type("IfcGeometricRepresentationSubContext")
-            if c.ContextIdentifier == "SurfaceModel"
+            if c.ContextIdentifier == "Body"
         ]
         assert len(contexts) == 1
         assert len(subcontexts) == 1
@@ -148,8 +148,7 @@ class TestRepresentationContext:
 
         body = _representation_context.get_body_subcontext(empty_project_file)
         box = _representation_context.get_box_subcontext(empty_project_file)
-        surface = _representation_context.get_surface_model_subcontext(empty_project_file)
-        assert body.ParentContext.id() == box.ParentContext.id() == surface.ParentContext.id()
+        assert body.ParentContext.id() == box.ParentContext.id()
         assert body.ContextIdentifier == "Body"
         assert box.ContextIdentifier == "Box"
 
@@ -182,7 +181,7 @@ class TestAddTinRepresentation:
         assert shape.is_a("IfcProductDefinitionShape")
         assert len(shape.Representations) == 1
         rep = shape.Representations[0]
-        assert rep.RepresentationIdentifier == "SurfaceModel"
+        assert rep.RepresentationIdentifier == "Body"
         assert rep.RepresentationType == "Tessellation"
         assert rep.Items[0].id() == tin.id()
 
@@ -238,7 +237,7 @@ class TestAddTinRepresentation:
         add_tin_representation(empty_project_file, host, points, triangles)
 
         rep_identifiers = {r.RepresentationIdentifier for r in host.Representation.Representations}
-        assert rep_identifiers == {"Box", "SurfaceModel"}
+        assert rep_identifiers == {"Box", "Body"}
 
     def test_double_add_raises_value_error(self, empty_project_file: ifcopenshell.file) -> None:
         from ifcopenshell.api.surface import add_tin_representation
@@ -247,7 +246,7 @@ class TestAddTinRepresentation:
         points, triangles = _flat_pad_geometry()
         add_tin_representation(empty_project_file, host, points, triangles)
 
-        with pytest.raises(ValueError, match="SurfaceModel"):
+        with pytest.raises(ValueError, match="Body"):
             add_tin_representation(empty_project_file, host, points, triangles)
 
     def test_empty_points_raises(self, empty_project_file: ifcopenshell.file) -> None:
@@ -405,7 +404,7 @@ class TestApplySaikeiPset:
         properties = self._read_back_properties(pset)
         assert properties["TriangulationTolerance"] == 0.0
         assert properties["BreaklineCount"] == 0
-        # VertexCount is omitted when no SurfaceModel rep exists.
+        # VertexCount is omitted when no Body rep exists.
         assert "VertexCount" not in properties
         assert "BoundaryPolygonReference" not in properties
 
@@ -431,7 +430,7 @@ class TestApplySaikeiPset:
     def test_vertex_count_inferred_from_existing_tin(
         self, empty_project_file: ifcopenshell.file
     ) -> None:
-        """If vertex_count is None, the function reads the SurfaceModel TIN's point count."""
+        """If vertex_count is None, the function reads the Body TIN's point count."""
         from ifcopenshell.api.surface import add_tin_representation, apply_saikei_pset
 
         host = _make_geographic_element(empty_project_file)
@@ -541,11 +540,11 @@ class TestCreateTerrain:
         assert terrain.PredefinedType == "TERRAIN"
         assert terrain.Name == "Existing Ground"
 
-        # Has both SurfaceModel and Box reps.
+        # Has both Body and Box reps.
         rep_identifiers = {
             r.RepresentationIdentifier for r in terrain.Representation.Representations
         }
-        assert rep_identifiers == {"SurfaceModel", "Box"}
+        assert rep_identifiers == {"Body", "Box"}
 
         # Contained in the site.
         containers = [
@@ -652,7 +651,7 @@ class TestCreateTerrain:
         rep_identifiers = {
             r.RepresentationIdentifier for r in terrain.Representation.Representations
         }
-        assert rep_identifiers == {"SurfaceModel", "Box"}
+        assert rep_identifiers == {"Body", "Box"}
         saikei_pset = self._read_pset(terrain, "Pset_SaikeiGradingSurface")
         assert saikei_pset["TriangulationTolerance"] == 0.01
         assert saikei_pset["BreaklineCount"] == 3
@@ -697,7 +696,7 @@ class TestCreateProposedSurface:
         rep_identifiers = {
             r.RepresentationIdentifier for r in proposed.Representation.Representations
         }
-        assert rep_identifiers == {"SurfaceModel", "Box"}
+        assert rep_identifiers == {"Body", "Box"}
 
         rel = (proposed.ContainedInStructure or [None])[0]
         assert rel is not None and rel.RelatingStructure.is_a("IfcSite")
@@ -938,13 +937,13 @@ class TestUpdateTinRepresentation:
 
         # Park the old TIN inside a second (unrelated) shape representation so it has another inverse.
         from ifcopenshell.api.surface._representation_context import (
-            get_surface_model_subcontext,
+            get_body_subcontext,
         )
 
         unrelated_rep = empty_project_file.create_entity(
             "IfcShapeRepresentation",
-            ContextOfItems=get_surface_model_subcontext(empty_project_file),
-            RepresentationIdentifier="SurfaceModel",
+            ContextOfItems=get_body_subcontext(empty_project_file),
+            RepresentationIdentifier="Body",
             RepresentationType="Tessellation",
             Items=[old_tin],
         )
@@ -955,14 +954,14 @@ class TestUpdateTinRepresentation:
         # Old TIN still alive because unrelated_rep references it.
         assert len(empty_project_file.by_type("IfcTriangulatedIrregularNetwork")) == 2
 
-    def test_raises_when_no_existing_surface_model(
+    def test_raises_when_no_existing_body_rep(
         self, empty_project_file: ifcopenshell.file
     ) -> None:
         from ifcopenshell.api.surface import update_tin_representation
 
         host = _make_geographic_element(empty_project_file)
         points, triangles = _flat_pad_geometry()
-        with pytest.raises(ValueError, match="no SurfaceModel"):
+        with pytest.raises(ValueError, match="no Body"):
             update_tin_representation(empty_project_file, host, points, triangles)
 
     def test_round_trip_through_disk(
@@ -989,7 +988,7 @@ class TestUpdateTinRepresentation:
         rep = [
             r
             for r in host_again.Representation.Representations
-            if r.RepresentationIdentifier == "SurfaceModel"
+            if r.RepresentationIdentifier == "Body"
         ][0]
         tin = rep.Items[0]
         assert len(tin.Coordinates.CoordList) == len(new_points)

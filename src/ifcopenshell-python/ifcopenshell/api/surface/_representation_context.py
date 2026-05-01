@@ -19,11 +19,13 @@
 """Internal: resolve or create the geometric representation subcontexts the
 surface API authors into.
 
-Surfaces use four subcontexts under the project's "Model" context:
+Surfaces use three subcontexts under the project's "Model" context:
 
-- ``Body`` (MODEL_VIEW) — fallback identifier for arbitrary 3D geometry.
-- ``SurfaceModel`` (MODEL_VIEW) — identifier for IfcTriangulatedIrregularNetwork
-  TIN geometry.
+- ``Body`` (MODEL_VIEW) — identifier for the IfcTriangulatedIrregularNetwork
+  TIN geometry. Standard IFC convention: 3D body representations live in
+  the ``Body`` subcontext with ``RepresentationIdentifier='Body'``; the
+  ``RepresentationType`` distinguishes the geometric kind (``Tessellation``
+  for TINs).
 - ``Box`` (MODEL_VIEW) — identifier for the bounding-box LOD representation.
 - ``Annotation`` (MODEL_VIEW) — identifier for 3D annotations such as breakline
   polylines.
@@ -69,13 +71,13 @@ def _get_or_create_subcontext(
 
 
 def get_body_subcontext(file: ifcopenshell.file) -> ifcopenshell.entity_instance:
-    """Return the Model/Body/MODEL_VIEW subcontext, creating it if absent."""
+    """Return the Model/Body/MODEL_VIEW subcontext, creating it if absent.
+
+    The TIN body representation lives here with
+    ``RepresentationIdentifier='Body'`` and
+    ``RepresentationType='Tessellation'`` per IFC 4.3 convention.
+    """
     return _get_or_create_subcontext(file, "Body", "MODEL_VIEW")
-
-
-def get_surface_model_subcontext(file: ifcopenshell.file) -> ifcopenshell.entity_instance:
-    """Return the Model/SurfaceModel/MODEL_VIEW subcontext, creating it if absent."""
-    return _get_or_create_subcontext(file, "SurfaceModel", "MODEL_VIEW")
 
 
 def get_box_subcontext(file: ifcopenshell.file) -> ifcopenshell.entity_instance:

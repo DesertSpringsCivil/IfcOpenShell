@@ -1455,7 +1455,7 @@ class TestGradingAddObjectAndRebuildOperators(NewIfc4X3):
         composite = composites[0]
         assert composite.Representation is not None
         assert any(
-            r.RepresentationIdentifier == "SurfaceModel"
+            r.RepresentationIdentifier == "Body"
             for r in composite.Representation.Representations
         )
 

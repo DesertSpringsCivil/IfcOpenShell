@@ -1151,7 +1151,7 @@ class TestAddSlopeFillToGroup:
         )
 
         identifiers = {r.RepresentationIdentifier for r in slope.Representation.Representations}
-        assert identifiers == {"SurfaceModel", "Box"}
+        assert identifiers == {"Body", "Box"}
 
     def test_added_to_group_as_member(
         self, empty_project_file: ifcopenshell.file
@@ -1376,7 +1376,7 @@ class TestAddSlopeFillToGroup:
         assert len(slopes) == 1
         slope = slopes[0]
         identifiers = {r.RepresentationIdentifier for r in slope.Representation.Representations}
-        assert identifiers == {"SurfaceModel", "Box"}
+        assert identifiers == {"Body", "Box"}
         # Aggregated under the composite (which is named "RTPad").
         composite = slope.Decomposes[0].RelatingObject
         assert composite.Name == "RTPad"
@@ -1572,7 +1572,7 @@ class TestAddInteriorFillToGroup:
         floor = floors[0]
         assert floor.PredefinedType == "SUBGRADE"
         identifiers = {r.RepresentationIdentifier for r in floor.Representation.Representations}
-        assert identifiers == {"SurfaceModel", "Box"}
+        assert identifiers == {"Body", "Box"}
 
 
 class TestLinkAlignmentToGroup:

@@ -1634,7 +1634,7 @@ class Grading:
         The composite surface is authored to IFC as a host
         :class:`IfcEarthworksFill[SUBGRADE]` (the per-group composite
         already created by :meth:`author_group`) with a fresh
-        SurfaceModel TIN representation. Its ``ifc_host_entity_id``
+        Body TIN representation. Its ``ifc_host_entity_id``
         points at the existing composite fill — we don't author a
         second one.
 
@@ -1737,7 +1737,7 @@ class Grading:
             ifc_host_entity_id=group.ifc_composite_fill_id,
         )
         # The composite fill was created by author_group as a bare
-        # shell (no SurfaceModel representation yet). On first rebuild
+        # shell (no Body representation yet). On first rebuild
         # we add a fresh TIN; on subsequent rebuilds we update the
         # existing one. Same for the BoundingBox rep.
         cls._add_or_update_composite_tin(ifc_file, composite_surface)
@@ -1906,10 +1906,10 @@ class Grading:
         ifc_file: "ifcopenshell.file",
         composite_surface: "CivilSurface",
     ) -> None:
-        """Author or refresh the composite fill's SurfaceModel +
+        """Author or refresh the composite fill's Body +
         BoundingBox representations.
 
-        On first rebuild the composite has no SurfaceModel rep —
+        On first rebuild the composite has no Body rep —
         :func:`ifcopenshell.api.surface.add_tin_representation` and
         :func:`add_bounding_box_representation` author them. On
         subsequent rebuilds :meth:`bonsai.tool.surface.Surface.update_ifc_tin`

@@ -60,7 +60,7 @@ def create_proposed_surface(
     Companion to :func:`create_terrain`. Same triangulation contract — the
     function persists pre-triangulated data; callers handle the constrained
     Delaunay step. The new element is contained in :class:`IfcSite` via
-    :func:`ifcopenshell.api.spatial.assign_container`. A SurfaceModel TIN
+    :func:`ifcopenshell.api.spatial.assign_container`. A Body TIN
     representation, a Box LOD representation, the standard
     ``Pset_EarthworksFillCommon`` (``Status="NEW"``), and the Saikei
     ``Pset_SaikeiGradingSurface`` are attached.

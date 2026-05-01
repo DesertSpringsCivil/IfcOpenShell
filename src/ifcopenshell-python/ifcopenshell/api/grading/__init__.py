@@ -54,14 +54,14 @@ A complete grading group as authored by this API:
 
 - :class:`IfcEarthworksFill[SLOPEFILL]` per slope projection ribbon
 
-  - SurfaceModel TIN representation (via Phase 1 reuse)
+  - Body TIN representation (via Phase 1 reuse)
   - Box LOD representation (via Phase 1 reuse)
   - ``Pset_EarthworksFillCommon`` + OmniClass ``22-07 31 23`` (Fill)
 
 - :class:`IfcEarthworksFill[SUBGRADE]` interior fill (one per group, when
   ``interior_fill != "none"``)
 
-  - SurfaceModel TIN + Box LOD + standard pset
+  - Body TIN + Box LOD + standard pset
   - OmniClass ``22-07 31 16`` (Excavation and Fill — the standard takeoff
     code for pad subgrade, distinct from slope fills)
 

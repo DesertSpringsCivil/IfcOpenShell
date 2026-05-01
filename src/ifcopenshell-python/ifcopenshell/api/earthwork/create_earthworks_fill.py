@@ -51,7 +51,7 @@ def create_earthworks_fill(
 
     Distinct from Phase 2 surface fills authored by
     :mod:`ifcopenshell.api.grading`: those use ``PredefinedType=SLOPEFILL``
-    or ``SUBGRADE`` and carry SurfaceModel TIN representations. Phase 3
+    or ``SUBGRADE`` and carry Body TIN representations. Phase 3
     fills are volume-bearing — closed solid bodies representing actual
     earthwork material with computable volumes — and use the
     ``BACKFILL`` / ``COUNTERWEIGHT`` / ``EMBANKMENT`` / ``SUBGRADEBED`` /

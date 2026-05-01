@@ -16,7 +16,7 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with IfcOpenShell.  If not, see <http://www.gnu.org/licenses/>.
 
-"""Replace the existing SurfaceModel TIN on a host product with a new one."""
+"""Replace the existing Body TIN on a host product with a new one."""
 
 from __future__ import annotations
 
@@ -34,17 +34,17 @@ if TYPE_CHECKING:
     from .add_tin_representation import FlagArray, PointArray, TriangleArray
 
 
-def _find_surface_model_rep(
+def _find_body_rep(
     product: ifcopenshell.entity_instance,
 ) -> Optional[ifcopenshell.entity_instance]:
-    """Return the host's IfcShapeRepresentation with RepresentationIdentifier='SurfaceModel', or None."""
+    """Return the host's IfcShapeRepresentation with RepresentationIdentifier='Body', or None."""
     representation = product.Representation
     if representation is None:
         return None
     for shape_rep in representation.Representations or []:
         if (
             shape_rep.is_a("IfcShapeRepresentation")
-            and shape_rep.RepresentationIdentifier == "SurfaceModel"
+            and shape_rep.RepresentationIdentifier == "Body"
         ):
             return shape_rep
     return None
@@ -65,11 +65,11 @@ def update_tin_representation(
     triangles: "TriangleArray",
     triangle_flags: "FlagArray" = None,
 ) -> ifcopenshell.entity_instance:
-    """Replace the existing SurfaceModel TIN on ``product`` with a freshly built one.
+    """Replace the existing Body TIN on ``product`` with a freshly built one.
 
     Used by retriangulation, breakline-add, and boundary-edit flows. The
-    function looks up the host's existing ``SurfaceModel`` representation,
-    creates a new :class:`IfcCartesianPointList3D` and
+    function looks up the host's existing ``Body`` representation, creates
+    a new :class:`IfcCartesianPointList3D` and
     :class:`IfcTriangulatedIrregularNetwork` from the supplied data, swaps the
     representation's ``Items`` to point at the new TIN, and then removes the
     old TIN and its CoordList — but only if they have no other inverse
@@ -80,14 +80,14 @@ def update_tin_representation(
     remain valid.
 
     :param file: the IFC file to author into
-    :param product: the host product whose SurfaceModel rep is being updated
+    :param product: the host product whose Body rep is being updated
     :param points: ``(N, 3)`` array of XYZ coordinates in project coordinates
     :param triangles: ``(M, 3)`` 0-based vertex indices, counterclockwise from above
     :param triangle_flags: optional per-triangle IFC ``Flags`` integers; defaults
         to all zeros
     :returns: the newly created :class:`IfcTriangulatedIrregularNetwork`
     :raises ValueError: if ``points`` or ``triangles`` are empty, if any triangle
-        index is out of range, or if the product has no existing SurfaceModel rep
+        index is out of range, or if the product has no existing Body rep
     """
     point_list = _to_point_list(points)
     if not point_list:
@@ -97,10 +97,10 @@ def update_tin_representation(
         raise ValueError("triangles must not be empty")
     flag_list = _to_flag_list(triangle_flags, len(triangle_list))
 
-    shape_rep = _find_surface_model_rep(product)
+    shape_rep = _find_body_rep(product)
     if shape_rep is None:
         raise ValueError(
-            f"product {product.is_a()} #{product.id()} has no SurfaceModel "
+            f"product {product.is_a()} #{product.id()} has no Body "
             "representation; use add_tin_representation to create one"
         )
 

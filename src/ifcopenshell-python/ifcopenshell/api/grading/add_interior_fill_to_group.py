@@ -87,7 +87,7 @@ def add_interior_fill_to_group(
 
     Wiring (identical to slope fill):
 
-    - SurfaceModel TIN representation (via Phase 1
+    - Body TIN representation (via Phase 1
       :func:`ifcopenshell.api.surface.add_tin_representation`)
     - Box LOD representation (via
       :func:`ifcopenshell.api.surface.add_bounding_box_representation`)

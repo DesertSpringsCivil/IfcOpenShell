@@ -32,9 +32,9 @@ For an existing-ground TIN, ``create_terrain`` produces:
 - ``IfcGeographicElement`` (PredefinedType=TERRAIN, Name as supplied)
   - contained in IfcSite via IfcRelContainedInSpatialStructure
   - has IfcProductDefinitionShape with two representations:
-    - SurfaceModel ``IfcShapeRepresentation`` containing
-      ``IfcTriangulatedIrregularNetwork`` (Coordinates, CoordIndex 1-based,
-      Flags) and an ``IfcCartesianPointList3D``
+    - Body ``IfcShapeRepresentation`` (RepresentationType=Tessellation)
+      containing ``IfcTriangulatedIrregularNetwork`` (Coordinates,
+      CoordIndex 1-based, Flags) and an ``IfcCartesianPointList3D``
     - Box ``IfcShapeRepresentation`` containing ``IfcBoundingBox``
   - has ``Pset_GeographicElementCommon`` (standard, Status="NEW")
   - has ``Pset_SaikeiGradingSurface`` (Saikei-specific:
@@ -85,7 +85,7 @@ Future versions of this API may support
    [VEGETATION]``) and survey points (``IfcGeographicElement[SOIL_BORING_POINT]``).
 2. Round-tripping through the bSI reference validator as a built-in
    precondition rather than only as a CI test.
-3. Selective rebuild of only the SurfaceModel rep when the bounding-box rep
+3. Selective rebuild of only the Body rep when the bounding-box rep
    does not need updating, and vice versa.
 
 Quick example
