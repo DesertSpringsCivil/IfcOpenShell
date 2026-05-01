@@ -589,6 +589,71 @@ class TestSlopeProjectionSurface:
                 feature_line, criteria, side="right"
             )
 
+    def test_fill_over_valley_finds_daylight_on_climbing_side(self) -> None:
+        """Pin the first-sign-flip semantics on non-monotonic terrain.
+
+        Existing surface dips into a valley (z=97 at Y=-2) before
+        climbing to the daylight intersection at Y=-3.75. The fill
+        slope starts from a feature line above existing, descends
+        outward, dips into the valley region (where it's well above
+        the local existing), then meets the climbing existing surface
+        on the far side of the valley. The marching loop's first
+        sign-flip detector returns the geometrically correct
+        intersection on the climbing side, NOT a false daylight at
+        the valley bottom (proposed and existing are still
+        non-equal there)."""
+        # Valley-shaped existing TIN: a strip 6m wide, 20m long in X.
+        # Y=0 at z=99, Y=-2 at z=97 (valley), Y=-5 at z=100, Y=-10 at z=105.
+        valley_points = np.array(
+            [
+                (-10.0, 0.0, 99.0),
+                (20.0, 0.0, 99.0),
+                (-10.0, -2.0, 97.0),
+                (20.0, -2.0, 97.0),
+                (-10.0, -5.0, 100.0),
+                (20.0, -5.0, 100.0),
+                (-10.0, -10.0, 105.0),
+                (20.0, -10.0, 105.0),
+            ]
+        )
+        existing = tool_surface.Surface.build_tin_from_points(
+            "valley_existing", valley_points
+        )
+
+        # Feature line at z=100 along the X axis, project right (-Y).
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="surface",
+            target_ref=existing.guid,
+            fill_slope=3.0,
+        )
+
+        result = tool_grading.Grading.compute_grading_object(
+            feature_line,
+            criteria,
+            target_surface=existing,
+            side="right",
+        )
+
+        # The fill slope (z = 100 - |Y|/3) crosses the climbing-back
+        # existing piecewise-linear (z = 97 - (Y+2) for Y in [-5, -2])
+        # at Y ≈ -3.75, z ≈ 98.75. Tolerances loose enough for the
+        # 0.5m march step's bisection precision.
+        for tie_x, tie_y, tie_z in result.daylight_line:
+            assert tie_y == pytest.approx(-3.75, abs=0.5), (
+                f"daylight Y={tie_y} should be on the climbing side "
+                "of the valley (~-3.75), not at the valley bottom"
+            )
+            assert tie_z == pytest.approx(98.75, abs=0.1)
+            # Sanity: daylight must be ABOVE the valley floor (z=97).
+            assert tie_z > 97.5, (
+                f"daylight Z={tie_z} fell into the valley — first "
+                "sign-flip detector returned a false daylight"
+            )
+
 
 class TestOutwardDirection:
     """Tests for outward-direction computation (CCW closed loop, CW closed
