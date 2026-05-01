@@ -1251,3 +1251,204 @@ class TestBlenderGroupEmpty(NewIfc4X3):
             tool_grading.SaikeiGradingError, match="no IFC entity"
         ):
             tool_grading.Grading.create_blender_empty_for_group(ifc_file, group)
+
+
+# ---------------------------------------------------------------------------
+# Group composite surface — rebuild_group_surface (spec §6.3 skeleton)
+# ---------------------------------------------------------------------------
+
+
+class TestRebuildGroupSurface:
+    """Tests for :meth:`Grading.rebuild_group_surface` — the merge
+    skeleton. Interior-fill strategies land in commit 7."""
+
+    @staticmethod
+    def _populate_group_with_one_grading_object(
+        ifc_file,
+    ) -> tuple[tool_grading.GradingGroup, tool_grading.GradingObject]:
+        """Helper: create a group with a single SLOPEFILL member ready
+        for rebuild."""
+        group = tool_grading.GradingGroup(
+            name="rebuild-test", interior_fill="none"
+        )
+        tool_grading.Grading.author_group(ifc_file, group)
+
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="distance", target_ref=3.0, fill_slope=3.0
+        )
+        grading_object = tool_grading.Grading.compute_grading_object(
+            feature_line, criteria, side="right", name="member-1"
+        )
+        tool_grading.Grading.author_slope_fill(
+            ifc_file, group, grading_object
+        )
+        group.members.append(grading_object)
+        return group, grading_object
+
+    def test_rebuild_with_one_member_produces_composite_surface(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group, member = self._populate_group_with_one_grading_object(ifc_file)
+        composite = tool_grading.Grading.rebuild_group_surface(ifc_file, group)
+        assert composite is not None
+        assert composite.kind == "proposed_group"
+        assert composite.points.shape[0] == member.projection_points.shape[0]
+        assert composite.triangles.shape[0] == member.projection_triangles.shape[0]
+
+    def test_rebuild_stamps_output_surface_guid(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group, _ = self._populate_group_with_one_grading_object(ifc_file)
+        composite = tool_grading.Grading.rebuild_group_surface(ifc_file, group)
+        assert group.output_surface_guid == composite.guid
+
+    def test_rebuild_updates_existing_composite_fill_tin(self) -> None:
+        """rebuild_group_surface should NOT author a new composite fill
+        — it updates the in-place TIN representation of the composite
+        already created by author_group."""
+        ifc_file = _make_ifc_file_with_site()
+        group, _ = self._populate_group_with_one_grading_object(ifc_file)
+        before_count = len(ifc_file.by_type("IfcEarthworksFill"))
+        tool_grading.Grading.rebuild_group_surface(ifc_file, group)
+        # No new IfcEarthworksFill — only the slope fill (1) and the
+        # composite (1) authored earlier.
+        assert (
+            len(ifc_file.by_type("IfcEarthworksFill"))
+            == before_count
+        )
+
+    def test_rebuild_with_two_members_concatenates_geometry(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup(interior_fill="none")
+        tool_grading.Grading.author_group(ifc_file, group)
+        # Two non-overlapping segments → two grading objects → two
+        # ribbons that concatenate into one composite.
+        for offset_x, offset_y in [(0.0, 0.0), (0.0, 30.0)]:
+            feature_line = tool_grading.FeatureLine(
+                vertices=[
+                    (offset_x, offset_y, 100.0),
+                    (offset_x + 10.0, offset_y, 100.0),
+                ],
+                closed=False,
+            )
+            criteria = tool_grading.GradingCriteria(
+                target_kind="distance", target_ref=3.0
+            )
+            grading_object = tool_grading.Grading.compute_grading_object(
+                feature_line, criteria, side="right"
+            )
+            tool_grading.Grading.author_slope_fill(
+                ifc_file, group, grading_object
+            )
+            group.members.append(grading_object)
+
+        composite = tool_grading.Grading.rebuild_group_surface(ifc_file, group)
+        # Each member contributes some points; merged is the sum (no
+        # vertex deduplication in the skeleton — that's a future
+        # optimization).
+        expected_point_count = sum(
+            m.projection_points.shape[0] for m in group.members
+        )
+        assert composite.points.shape[0] == expected_point_count
+
+    def test_rebuild_no_group_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup()  # no ifc ids
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="no IFC entities"
+        ):
+            tool_grading.Grading.rebuild_group_surface(ifc_file, group)
+
+    def test_rebuild_no_members_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup(interior_fill="none")
+        tool_grading.Grading.author_group(ifc_file, group)
+        # No members appended.
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="no members"
+        ):
+            tool_grading.Grading.rebuild_group_surface(ifc_file, group)
+
+    @pytest.mark.parametrize(
+        "strategy", ["flat", "interpolate_from_boundary"]
+    )
+    def test_rebuild_unimplemented_interior_fill_raises(self, strategy: str) -> None:
+        """Commit 6 only honors interior_fill='none'; the other strategies
+        land in commit 7 and currently raise NotImplementedError.
+
+        ``from_surface`` is omitted from this parametrization because
+        Phase 2's create_grading_group rejects it without an
+        ``interior_fill_source`` — the test would fail at author time,
+        before reaching the rebuild logic."""
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup(interior_fill=strategy)  # type: ignore[arg-type]
+        tool_grading.Grading.author_group(ifc_file, group)
+        # Add a dummy member so we get past the "no members" guard.
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)]
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="distance", target_ref=3.0
+        )
+        grading_object = tool_grading.Grading.compute_grading_object(
+            feature_line, criteria, side="right"
+        )
+        tool_grading.Grading.author_slope_fill(ifc_file, group, grading_object)
+        group.members.append(grading_object)
+
+        with pytest.raises(NotImplementedError, match="commit 7"):
+            tool_grading.Grading.rebuild_group_surface(ifc_file, group)
+
+
+class TestMergeMemberGeometry:
+    """Direct tests for :meth:`Grading._merge_member_geometry`."""
+
+    def test_empty_members_returns_empty_arrays(self) -> None:
+        points, triangles = tool_grading.Grading._merge_member_geometry([])
+        assert points.shape == (0, 3)
+        assert triangles.shape == (0, 3)
+
+    def test_single_member_returns_its_arrays(self) -> None:
+        member = tool_grading.GradingObject(
+            projection_points=np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]),
+            projection_triangles=np.array([(0, 1, 2)]),
+        )
+        points, triangles = tool_grading.Grading._merge_member_geometry([member])
+        assert points.shape == (3, 3)
+        assert triangles.shape == (1, 3)
+        assert tuple(triangles[0]) == (0, 1, 2)
+
+    def test_multi_member_offsets_triangle_indices(self) -> None:
+        """Member-2's triangle index 0 must become member-1's
+        len(points) in the merged array."""
+        member1 = tool_grading.GradingObject(
+            projection_points=np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]),
+            projection_triangles=np.array([(0, 1, 2)]),
+        )
+        member2 = tool_grading.GradingObject(
+            projection_points=np.array([(10.0, 0.0, 0.0), (11.0, 0.0, 0.0), (10.0, 1.0, 0.0)]),
+            projection_triangles=np.array([(0, 1, 2)]),
+        )
+        points, triangles = tool_grading.Grading._merge_member_geometry(
+            [member1, member2]
+        )
+        assert points.shape == (6, 3)
+        assert triangles.shape == (2, 3)
+        assert tuple(triangles[0]) == (0, 1, 2)
+        # Member-2's triangle indices offset by 3 (member-1's point count).
+        assert tuple(triangles[1]) == (3, 4, 5)
+
+    def test_empty_member_skipped(self) -> None:
+        empty_member = tool_grading.GradingObject()  # default empty arrays
+        normal_member = tool_grading.GradingObject(
+            projection_points=np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]),
+            projection_triangles=np.array([(0, 1, 2)]),
+        )
+        points, triangles = tool_grading.Grading._merge_member_geometry(
+            [empty_member, normal_member]
+        )
+        assert points.shape == (3, 3)
+        # No offset since empty member contributed 0 points.
+        assert tuple(triangles[0]) == (0, 1, 2)

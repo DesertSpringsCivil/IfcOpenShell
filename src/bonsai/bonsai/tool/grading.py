@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Literal, Optional, Union
 
 import bpy
 import ifcopenshell.api.grading
+import ifcopenshell.api.surface
 import ifcopenshell.guid
 import numpy as np
 import shapely
@@ -1477,3 +1478,189 @@ class Grading:
         tool.Ifc.link(ifc_group, obj)
         tool.Collector.assign(obj)
         return obj
+
+    # ------------------------------------------------------------------
+    # Group composite surface (spec §6.3)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def rebuild_group_surface(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        group: GradingGroup,
+    ) -> "CivilSurface":
+        """Compose all of ``group``'s grading objects (and the interior
+        fill, when ``group.interior_fill != "none"``) into a single
+        ``proposed_group`` :class:`bonsai.tool.surface.CivilSurface`.
+
+        Per spec §6.3 the composite is built from:
+
+        1. All feature-line vertices at their authored elevations.
+        2. All daylight-line vertices at their computed elevations.
+        3. All projection-ribbon triangles (one set per grading object).
+        4. Interior-fill triangles per the ``interior_fill`` strategy
+           (commit 7 of Phase 5 — currently only ``"none"`` is honored).
+
+        The composite surface is authored to IFC as a host
+        :class:`IfcEarthworksFill[SUBGRADE]` (the per-group composite
+        already created by :meth:`author_group`) with a fresh
+        SurfaceModel TIN representation. Its ``ifc_host_entity_id``
+        points at the existing composite fill — we don't author a
+        second one.
+
+        :returns: the assembled :class:`CivilSurface` with
+            ``kind="proposed_group"`` and IFC step ids stamped.
+        :raises SaikeiGradingError: when the group has no IFC entities
+            (call :meth:`author_group` first), no members to compose,
+            or an interior-fill strategy that hasn't been implemented yet.
+        """
+        from .surface import (
+            CivilSurface,
+            Surface as _SurfaceTool,
+            _ScipyShapelyTriangulator,
+        )
+
+        if group.ifc_group_id is None or group.ifc_composite_fill_id is None:
+            raise SaikeiGradingError(
+                "group has no IFC entities; call author_group first"
+            )
+        if not group.members:
+            raise SaikeiGradingError(
+                "group has no members; call author_slope_fill on at least "
+                "one grading object before rebuilding"
+            )
+        if group.interior_fill != "none":
+            raise NotImplementedError(
+                f"interior_fill={group.interior_fill!r} is implemented in "
+                "Phase 5 commit 7; commit 6 only supports 'none'"
+            )
+
+        merged_points, merged_triangles = cls._merge_member_geometry(
+            group.members
+        )
+        if merged_triangles.shape[0] == 0:
+            raise SaikeiGradingError(
+                "merged group geometry is empty; nothing to compose"
+            )
+
+        # Build the proposed_group CivilSurface. Use the un-constrained
+        # default backend to populate triangle_flags as zeros (the
+        # cross-surface composition flag computation for Hole=-1 /
+        # Void=-2 is commit 7 territory).
+        triangle_flags = np.zeros(len(merged_triangles), dtype=int)
+        outer_boundary = shapely.MultiPoint(
+            [(float(p[0]), float(p[1])) for p in merged_points]
+        ).convex_hull
+        composite_surface = CivilSurface(
+            guid=ifcopenshell.guid.new(),
+            name=f"{group.name} composite",
+            kind="proposed_group",
+            points=merged_points,
+            triangles=merged_triangles,
+            triangle_flags=triangle_flags,
+            outer_boundary=(
+                outer_boundary
+                if isinstance(outer_boundary, shapely.Polygon)
+                else None
+            ),
+            ifc_host_entity_id=group.ifc_composite_fill_id,
+        )
+        # The composite fill was created by author_group as a bare
+        # shell (no SurfaceModel representation yet). On first rebuild
+        # we add a fresh TIN; on subsequent rebuilds we update the
+        # existing one. Same for the BoundingBox rep.
+        cls._add_or_update_composite_tin(ifc_file, composite_surface)
+        # Cache the GUID on the group for downstream lookup; the surface
+        # itself is registered in tool.Surface._registry by core
+        # orchestration (commit 9 territory).
+        group.output_surface_guid = composite_surface.guid
+        return composite_surface
+
+    @staticmethod
+    def _add_or_update_composite_tin(
+        ifc_file: "ifcopenshell.file",
+        composite_surface: "CivilSurface",
+    ) -> None:
+        """Author or refresh the composite fill's SurfaceModel +
+        BoundingBox representations.
+
+        On first rebuild the composite has no SurfaceModel rep —
+        :func:`ifcopenshell.api.surface.add_tin_representation` and
+        :func:`add_bounding_box_representation` author them. On
+        subsequent rebuilds :meth:`bonsai.tool.surface.Surface.update_ifc_tin`
+        swaps the existing TIN in place (and refreshes the BoundingBox).
+        """
+        from .surface import Surface as _SurfaceTool
+
+        host = ifc_file.by_id(composite_surface.ifc_host_entity_id)
+        existing_tin_id = _SurfaceTool._find_tin_id(host)
+        if existing_tin_id is not None:
+            _SurfaceTool.update_ifc_tin(ifc_file, composite_surface)
+            return
+
+        # First-rebuild path: add fresh TIN + bbox.
+        point_list = [
+            (float(p[0]), float(p[1]), float(p[2]))
+            for p in composite_surface.points
+        ]
+        new_tin = ifcopenshell.api.surface.add_tin_representation(
+            ifc_file,
+            host,
+            point_list,
+            composite_surface.triangles,
+            triangle_flags=composite_surface.triangle_flags,
+        )
+        composite_surface.ifc_tin_representation_id = new_tin.id()
+
+        # BoundingBox representation. Phase 1's helper checks for an
+        # existing Box rep and raises if found; for a freshly-rebuilt
+        # composite there is none yet.
+        xs = [p[0] for p in point_list]
+        ys = [p[1] for p in point_list]
+        zs = [p[2] for p in point_list]
+        epsilon = 1e-6
+        min_xyz = (min(xs), min(ys), min(zs))
+        max_xyz = (
+            max(xs) if max(xs) > min(xs) else min(xs) + epsilon,
+            max(ys) if max(ys) > min(ys) else min(ys) + epsilon,
+            max(zs) if max(zs) > min(zs) else min(zs) + epsilon,
+        )
+        bbox = ifcopenshell.api.surface.add_bounding_box_representation(
+            ifc_file, host, min_xyz=min_xyz, max_xyz=max_xyz
+        )
+        composite_surface.ifc_bbox_representation_id = bbox.id()
+
+    @staticmethod
+    def _merge_member_geometry(
+        members: list[GradingObject],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Concatenate the projection geometry of every member into a
+        single ``(points, triangles)`` pair, with triangle indices
+        offset to the merged points array.
+
+        Each member contributes its full ``projection_points`` /
+        ``projection_triangles`` pair; index 0 of member k's triangle
+        array becomes ``offset_k`` in the merged array, where
+        ``offset_k = sum(member_j.projection_points.shape[0] for j < k)``.
+        """
+        merged_points_list: list[np.ndarray] = []
+        merged_triangles_list: list[np.ndarray] = []
+        offset = 0
+        for member in members:
+            if (
+                member.projection_points.shape[0] == 0
+                or member.projection_triangles.shape[0] == 0
+            ):
+                continue
+            merged_points_list.append(member.projection_points)
+            merged_triangles_list.append(member.projection_triangles + offset)
+            offset += member.projection_points.shape[0]
+
+        if not merged_points_list:
+            return (
+                np.zeros((0, 3), dtype=float),
+                np.zeros((0, 3), dtype=int),
+            )
+        merged_points = np.concatenate(merged_points_list, axis=0)
+        merged_triangles = np.concatenate(merged_triangles_list, axis=0)
+        return merged_points, merged_triangles
