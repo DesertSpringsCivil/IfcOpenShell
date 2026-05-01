@@ -1371,35 +1371,6 @@ class TestRebuildGroupSurface:
         ):
             tool_grading.Grading.rebuild_group_surface(ifc_file, group)
 
-    @pytest.mark.parametrize(
-        "strategy", ["flat", "interpolate_from_boundary"]
-    )
-    def test_rebuild_unimplemented_interior_fill_raises(self, strategy: str) -> None:
-        """Commit 6 only honors interior_fill='none'; the other strategies
-        land in commit 7 and currently raise NotImplementedError.
-
-        ``from_surface`` is omitted from this parametrization because
-        Phase 2's create_grading_group rejects it without an
-        ``interior_fill_source`` — the test would fail at author time,
-        before reaching the rebuild logic."""
-        ifc_file = _make_ifc_file_with_site()
-        group = tool_grading.GradingGroup(interior_fill=strategy)  # type: ignore[arg-type]
-        tool_grading.Grading.author_group(ifc_file, group)
-        # Add a dummy member so we get past the "no members" guard.
-        feature_line = tool_grading.FeatureLine(
-            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)]
-        )
-        criteria = tool_grading.GradingCriteria(
-            target_kind="distance", target_ref=3.0
-        )
-        grading_object = tool_grading.Grading.compute_grading_object(
-            feature_line, criteria, side="right"
-        )
-        tool_grading.Grading.author_slope_fill(ifc_file, group, grading_object)
-        group.members.append(grading_object)
-
-        with pytest.raises(NotImplementedError, match="commit 7"):
-            tool_grading.Grading.rebuild_group_surface(ifc_file, group)
 
 
 class TestMergeMemberGeometry:
@@ -1452,3 +1423,276 @@ class TestMergeMemberGeometry:
         assert points.shape == (3, 3)
         # No offset since empty member contributed 0 points.
         assert tuple(triangles[0]) == (0, 1, 2)
+
+
+# ---------------------------------------------------------------------------
+# Interior-fill strategies (spec §6.3)
+# ---------------------------------------------------------------------------
+
+
+class TestInteriorFillFlat:
+    """Tests for :meth:`Grading._interior_fill_flat` — pad bottom at
+    average feature-line Z."""
+
+    def test_square_pad_at_average_z(self) -> None:
+        feature_line = tool_grading.FeatureLine(
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (10.0, 0.0, 100.0),
+                (10.0, 10.0, 100.0),
+                (0.0, 10.0, 100.0),
+            ],
+            closed=True,
+        )
+        points, triangles = tool_grading.Grading._interior_fill_flat(feature_line)
+        # 4 vertices, 2 triangles for a square.
+        assert points.shape == (4, 3)
+        assert triangles.shape == (2, 3)
+        # All Z's equal the average (100.0 in this constant-Z case).
+        for p in points:
+            assert p[2] == pytest.approx(100.0)
+
+    def test_average_z_used_for_varied_feature_line(self) -> None:
+        feature_line = tool_grading.FeatureLine(
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (10.0, 0.0, 102.0),
+                (10.0, 10.0, 104.0),
+                (0.0, 10.0, 106.0),
+            ],
+            closed=True,
+        )
+        points, _ = tool_grading.Grading._interior_fill_flat(feature_line)
+        # Average = (100+102+104+106)/4 = 103
+        for p in points:
+            assert p[2] == pytest.approx(103.0)
+
+
+class TestInteriorFillInterpolateFromBoundary:
+    """Tests for :meth:`Grading._interior_fill_interpolate_from_boundary` —
+    Delaunay over feature-line vertices, Z values preserved."""
+
+    def test_preserves_boundary_z(self) -> None:
+        feature_line = tool_grading.FeatureLine(
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (10.0, 0.0, 102.0),
+                (10.0, 10.0, 104.0),
+                (0.0, 10.0, 106.0),
+            ],
+            closed=True,
+        )
+        points, triangles = (
+            tool_grading.Grading._interior_fill_interpolate_from_boundary(
+                feature_line
+            )
+        )
+        assert points.shape == (4, 3)
+        assert triangles.shape == (2, 3)
+        # Each point's Z matches the feature-line input.
+        expected = {(0.0, 0.0, 100.0), (10.0, 0.0, 102.0),
+                    (10.0, 10.0, 104.0), (0.0, 10.0, 106.0)}
+        actual = {tuple(p) for p in points}
+        assert actual == expected
+
+
+class TestInteriorFillFromSurface:
+    """Tests for :meth:`Grading._interior_fill_from_surface` — drape
+    feature-line ring on a source surface."""
+
+    def test_drapes_to_flat_source(self) -> None:
+        # Source surface is a flat existing ground at z=98.
+        source_points = np.array(
+            [(-50.0, -50.0, 98.0), (50.0, -50.0, 98.0),
+             (50.0, 50.0, 98.0), (-50.0, 50.0, 98.0)]
+        )
+        source = tool_surface.Surface.build_tin_from_points("source", source_points)
+        feature_line = tool_grading.FeatureLine(
+            vertices=[
+                (0.0, 0.0, 100.0),  # original Z's get overwritten
+                (10.0, 0.0, 100.0),
+                (10.0, 10.0, 100.0),
+                (0.0, 10.0, 100.0),
+            ],
+            closed=True,
+        )
+        points, triangles = (
+            tool_grading.Grading._interior_fill_from_surface(feature_line, source)
+        )
+        assert points.shape == (4, 3)
+        assert triangles.shape == (2, 3)
+        # All Z's draped to source z=98.
+        for p in points:
+            assert p[2] == pytest.approx(98.0)
+
+    def test_vertex_outside_source_raises(self) -> None:
+        # Tiny source surface; feature line far outside.
+        source_points = np.array(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+        )
+        source = tool_surface.Surface.build_tin_from_points("tiny", source_points)
+        feature_line = tool_grading.FeatureLine(
+            vertices=[
+                (100.0, 100.0, 0.0),
+                (110.0, 100.0, 0.0),
+                (110.0, 110.0, 0.0),
+                (100.0, 110.0, 0.0),
+            ],
+            closed=True,
+        )
+        with pytest.raises(
+            tool_grading.SaikeiGradingError,
+            match="falls outside",
+        ):
+            tool_grading.Grading._interior_fill_from_surface(feature_line, source)
+
+
+class TestComputeInteriorFillDispatcher:
+    """Tests for :meth:`Grading._compute_interior_fill` validation."""
+
+    @staticmethod
+    def _make_group_with_open_member() -> tool_grading.GradingGroup:
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(target_kind="distance", target_ref=3.0)
+        member = tool_grading.GradingObject(
+            footprint=feature_line,
+            criteria=criteria,
+            projection_points=np.zeros((0, 3)),
+            projection_triangles=np.zeros((0, 3), dtype=int),
+        )
+        group = tool_grading.GradingGroup(interior_fill="flat", members=[member])
+        return group
+
+    def test_open_feature_line_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = self._make_group_with_open_member()
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="closed loop"
+        ):
+            tool_grading.Grading._compute_interior_fill(ifc_file, group)
+
+    def test_multi_member_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup(
+            interior_fill="flat",
+            members=[tool_grading.GradingObject(), tool_grading.GradingObject()],
+        )
+        with pytest.raises(
+            NotImplementedError, match="single-member"
+        ):
+            tool_grading.Grading._compute_interior_fill(ifc_file, group)
+
+    def test_from_surface_without_source_guid_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (10.0, 0.0, 100.0),
+                (10.0, 10.0, 100.0),
+                (0.0, 10.0, 100.0),
+            ],
+            closed=True,
+        )
+        member = tool_grading.GradingObject(footprint=feature_line)
+        group = tool_grading.GradingGroup(
+            interior_fill="from_surface",
+            interior_fill_source_guid=None,  # missing!
+            members=[member],
+        )
+        with pytest.raises(
+            tool_grading.SaikeiGradingError,
+            match="interior_fill_source_guid",
+        ):
+            tool_grading.Grading._compute_interior_fill(ifc_file, group)
+
+
+class TestRebuildGroupSurfaceWithInteriorFill:
+    """End-to-end tests for rebuild_group_surface with non-none interior
+    fill. The pre-commit-7 NotImplementedError path is replaced with
+    real interior-fill geometry."""
+
+    @staticmethod
+    def _populate_closed_pad_group(
+        ifc_file, interior_fill: str, source_surface=None
+    ) -> tool_grading.GradingGroup:
+        """Build a group with a closed-pad feature line and one slope-fill
+        member, ready for rebuild."""
+        # Pre-author the source surface (if any) to populate the registry.
+        source_arg = None
+        if source_surface is not None:
+            tool_surface.Surface.author_ifc_host(ifc_file, source_surface)
+            tool_surface.Surface.register(ifc_file, source_surface)
+            source_arg = ifc_file.by_id(source_surface.ifc_host_entity_id)
+
+        group = tool_grading.GradingGroup(
+            name="pad",
+            interior_fill=interior_fill,  # type: ignore[arg-type]
+            interior_fill_source_guid=(
+                source_surface.guid if source_surface is not None else None
+            ),
+        )
+        tool_grading.Grading.author_group(
+            ifc_file, group, interior_fill_source=source_arg
+        )
+
+        feature_line = tool_grading.FeatureLine(
+            name="pad-perimeter",
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (10.0, 0.0, 100.0),
+                (10.0, 10.0, 100.0),
+                (0.0, 10.0, 100.0),
+            ],
+            closed=True,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="distance", target_ref=3.0, fill_slope=3.0
+        )
+        # Compute one slope-fill ribbon (around the perimeter, outward).
+        grading_object = tool_grading.Grading.compute_grading_object(
+            feature_line, criteria, side="auto"
+        )
+        tool_grading.Grading.author_slope_fill(ifc_file, group, grading_object)
+        group.members.append(grading_object)
+        return group
+
+    def test_flat_strategy_produces_interior_geometry(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = self._populate_closed_pad_group(ifc_file, interior_fill="flat")
+        composite = tool_grading.Grading.rebuild_group_surface(ifc_file, group)
+        # Composite has slope-fill triangles + interior triangles.
+        assert composite.triangles.shape[0] > 0
+        # Interior fill was authored as IfcEarthworksFill[SUBGRADE].
+        assert group.ifc_interior_fill_id is not None
+        interior = ifc_file.by_id(group.ifc_interior_fill_id)
+        assert interior.is_a("IfcEarthworksFill")
+        assert interior.PredefinedType == "SUBGRADE"
+
+    def test_interpolate_strategy_produces_interior_geometry(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = self._populate_closed_pad_group(
+            ifc_file, interior_fill="interpolate_from_boundary"
+        )
+        composite = tool_grading.Grading.rebuild_group_surface(ifc_file, group)
+        assert composite.triangles.shape[0] > 0
+        assert group.ifc_interior_fill_id is not None
+
+    def test_from_surface_strategy_drapes_interior(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        # Source surface at z=98 (1 m below pad).
+        source_points = np.array(
+            [(-50.0, -50.0, 98.0), (50.0, -50.0, 98.0),
+             (50.0, 50.0, 98.0), (-50.0, 50.0, 98.0)]
+        )
+        source = tool_surface.Surface.build_tin_from_points(
+            "source", source_points
+        )
+        group = self._populate_closed_pad_group(
+            ifc_file, interior_fill="from_surface", source_surface=source
+        )
+        composite = tool_grading.Grading.rebuild_group_surface(ifc_file, group)
+        assert composite.triangles.shape[0] > 0
+        assert group.ifc_interior_fill_id is not None

@@ -1529,19 +1529,37 @@ class Grading:
                 "group has no members; call author_slope_fill on at least "
                 "one grading object before rebuilding"
             )
-        if group.interior_fill != "none":
-            raise NotImplementedError(
-                f"interior_fill={group.interior_fill!r} is implemented in "
-                "Phase 5 commit 7; commit 6 only supports 'none'"
-            )
-
         merged_points, merged_triangles = cls._merge_member_geometry(
             group.members
         )
-        if merged_triangles.shape[0] == 0:
+        if merged_triangles.shape[0] == 0 and group.interior_fill == "none":
             raise SaikeiGradingError(
                 "merged group geometry is empty; nothing to compose"
             )
+
+        # Interior fill: compute geometry per the chosen strategy and
+        # append to the merged slope-fill geometry. The interior fill is
+        # also authored separately as IfcEarthworksFill[SUBGRADE] under
+        # the group via Phase 2's add_interior_fill_to_group.
+        if group.interior_fill != "none":
+            interior_points, interior_triangles = cls._compute_interior_fill(
+                ifc_file, group
+            )
+            if interior_triangles.shape[0] > 0:
+                cls.author_interior_fill(
+                    ifc_file, group, interior_points, interior_triangles
+                )
+                # Concatenate with offset for the composite TIN.
+                offset = merged_points.shape[0]
+                merged_points = np.concatenate(
+                    [merged_points, interior_points], axis=0
+                ) if merged_points.shape[0] else interior_points
+                if merged_triangles.shape[0]:
+                    merged_triangles = np.concatenate(
+                        [merged_triangles, interior_triangles + offset], axis=0
+                    )
+                else:
+                    merged_triangles = interior_triangles
 
         # Build the proposed_group CivilSurface. Use the un-constrained
         # default backend to populate triangle_flags as zeros (the
@@ -1575,6 +1593,156 @@ class Grading:
         # orchestration (commit 9 territory).
         group.output_surface_guid = composite_surface.guid
         return composite_surface
+
+    # ------------------------------------------------------------------
+    # Interior-fill strategies (spec §6.3)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _compute_interior_fill(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        group: GradingGroup,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Dispatch by ``group.interior_fill`` to one of the three
+        non-trivial strategies. Phase 5 MVP supports only single-member
+        groups (one closed feature line per group) — multi-member /
+        disconnected-ring groups are deferred to Phase 5.1.
+
+        :returns: ``(points, triangles)`` for the interior. Both empty
+            arrays when ``group.interior_fill == "none"`` (caller filters).
+        """
+        empty = (
+            np.zeros((0, 3), dtype=float),
+            np.zeros((0, 3), dtype=int),
+        )
+        if group.interior_fill == "none":
+            return empty
+        if len(group.members) != 1:
+            raise NotImplementedError(
+                "Phase 5 MVP supports interior fill on single-member "
+                f"groups only; got {len(group.members)} members. "
+                "Multi-ring composition lands in Phase 5.1."
+            )
+        member = group.members[0]
+        if member.footprint is None or not member.footprint.closed:
+            raise SaikeiGradingError(
+                f"interior_fill={group.interior_fill!r} requires the group's "
+                "feature line to be a closed loop; got open or missing"
+            )
+        if len(member.footprint.vertices) < 3:
+            raise SaikeiGradingError(
+                "interior fill requires a feature line with ≥ 3 vertices; "
+                f"got {len(member.footprint.vertices)}"
+            )
+
+        if group.interior_fill == "flat":
+            return cls._interior_fill_flat(member.footprint)
+        if group.interior_fill == "interpolate_from_boundary":
+            return cls._interior_fill_interpolate_from_boundary(member.footprint)
+        if group.interior_fill == "from_surface":
+            if group.interior_fill_source_guid is None:
+                raise SaikeiGradingError(
+                    "interior_fill='from_surface' requires "
+                    "group.interior_fill_source_guid to be set"
+                )
+            from .surface import Surface as _SurfaceTool
+
+            source_surface = _SurfaceTool.get(
+                ifc_file, group.interior_fill_source_guid
+            )
+            return cls._interior_fill_from_surface(
+                member.footprint, source_surface
+            )
+        raise SaikeiGradingError(
+            f"unknown interior_fill strategy {group.interior_fill!r}"
+        )
+
+    @staticmethod
+    def _interior_fill_flat(
+        feature_line: FeatureLine,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Triangulate the feature-line ring at the average vertex Z.
+
+        Used when the engineer wants a flat pad bottom. The triangulation
+        reuses :class:`bonsai.tool.surface._ScipyShapelyTriangulator` —
+        same constrained-Delaunay backend, same Steiner-point caveats."""
+        from .surface import _ScipyShapelyTriangulator
+
+        avg_z = sum(float(v[2]) for v in feature_line.vertices) / len(
+            feature_line.vertices
+        )
+        points = np.asarray(
+            [(float(v[0]), float(v[1]), avg_z) for v in feature_line.vertices],
+            dtype=float,
+        )
+        ring_polygon = shapely.Polygon(
+            [(float(v[0]), float(v[1])) for v in feature_line.vertices]
+        )
+        triangulator = _ScipyShapelyTriangulator()
+        triangles, _flags = triangulator.constrained(
+            points, [], ring_polygon, [], []
+        )
+        return points, triangles
+
+    @staticmethod
+    def _interior_fill_interpolate_from_boundary(
+        feature_line: FeatureLine,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Delaunay-triangulate the feature-line ring using only the
+        boundary vertices' Z values — interior triangles inherit Z by
+        the triangulation's barycentric implicit interpolation. The
+        most common Civil 3D default."""
+        from .surface import _ScipyShapelyTriangulator
+
+        points = np.asarray(
+            [(float(v[0]), float(v[1]), float(v[2])) for v in feature_line.vertices],
+            dtype=float,
+        )
+        ring_polygon = shapely.Polygon(
+            [(float(v[0]), float(v[1])) for v in feature_line.vertices]
+        )
+        triangulator = _ScipyShapelyTriangulator()
+        triangles, _flags = triangulator.constrained(
+            points, [], ring_polygon, [], []
+        )
+        return points, triangles
+
+    @staticmethod
+    def _interior_fill_from_surface(
+        feature_line: FeatureLine,
+        source_surface: "CivilSurface",
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Use ``source_surface`` to drape the feature-line ring's vertices
+        (replace each vertex's Z with ``source_surface.z_at(x, y)``),
+        then triangulate the ring. Useful for pit-bottom or
+        pre-designed pad-bottom cases.
+
+        :raises SaikeiGradingError: if any feature-line vertex falls
+            outside the source surface's triangulation.
+        """
+        from .surface import Surface as _SurfaceTool, _ScipyShapelyTriangulator
+
+        draped: list[tuple[float, float, float]] = []
+        for vertex in feature_line.vertices:
+            x, y = float(vertex[0]), float(vertex[1])
+            z = _SurfaceTool.z_at(source_surface, x, y)
+            if z is None:
+                raise SaikeiGradingError(
+                    f"feature-line vertex ({x:.3f}, {y:.3f}) falls outside "
+                    "the interior_fill source surface; cannot drape"
+                )
+            draped.append((x, y, z))
+
+        points = np.asarray(draped, dtype=float)
+        ring_polygon = shapely.Polygon(
+            [(float(v[0]), float(v[1])) for v in feature_line.vertices]
+        )
+        triangulator = _ScipyShapelyTriangulator()
+        triangles, _flags = triangulator.constrained(
+            points, [], ring_polygon, [], []
+        )
+        return points, triangles
 
     @staticmethod
     def _add_or_update_composite_tin(
