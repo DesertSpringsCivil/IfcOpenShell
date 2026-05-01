@@ -960,6 +960,71 @@ class TestUpdateFeatureLineVertices:
             tool_grading.Grading.update_feature_line_vertices(ifc_file, feature_line)
 
 
+class TestGradingModuleRegistration:
+    """Smoke tests verifying :func:`bonsai.bim.module.grading.register`
+    attached the property groups to ``bpy.types.Scene``.
+
+    Mirrors :class:`TestSurfaceModuleRegistration` from
+    ``test/tool/test_surface.py`` — these live in the tool-test
+    directory rather than ``test/bim/module/grading/`` because the
+    latter directory triggers a pytest-bdd conftest the env can't
+    load (documented in CLAUDE.md)."""
+
+    def test_civil_grading_properties_attached_to_scene(self) -> None:
+        scene_props = bpy.types.Scene.bl_rna.properties
+        assert "CivilGradingProperties" in scene_props, (
+            "CivilGradingProperties not registered on bpy.types.Scene"
+        )
+
+    def test_default_property_values(self) -> None:
+        import bonsai.bim.module.grading.prop as grading_prop
+
+        rna = grading_prop.CivilGradingProperties.bl_rna
+        assert (
+            rna.properties["new_feature_line_name"].default == "Pad Perimeter"
+        )
+        assert rna.properties["new_feature_line_closed"].default is True
+        assert rna.properties["new_criteria_target_kind"].default == "surface"
+        assert rna.properties["new_criteria_cut_slope"].default == pytest.approx(2.0)
+        assert rna.properties["new_criteria_fill_slope"].default == pytest.approx(3.0)
+        assert (
+            rna.properties["new_group_interior_fill"].default
+            == "interpolate_from_boundary"
+        )
+        assert rna.properties["feature_line_edit_mode"].default is False
+
+    def test_target_kind_enum_has_four_options(self) -> None:
+        import bonsai.bim.module.grading.prop as grading_prop
+
+        rna = grading_prop.CivilGradingProperties.bl_rna
+        kind_prop = rna.properties["new_criteria_target_kind"]
+        identifiers = {item.identifier for item in kind_prop.enum_items}
+        assert identifiers == {
+            "surface",
+            "elevation",
+            "relative_elevation",
+            "distance",
+        }
+
+    def test_interior_fill_enum_has_four_options(self) -> None:
+        import bonsai.bim.module.grading.prop as grading_prop
+
+        rna = grading_prop.CivilGradingProperties.bl_rna
+        fill_prop = rna.properties["new_group_interior_fill"]
+        identifiers = {item.identifier for item in fill_prop.enum_items}
+        assert identifiers == {
+            "none",
+            "flat",
+            "interpolate_from_boundary",
+            "from_surface",
+        }
+
+    def test_uilists_registered(self) -> None:
+        assert hasattr(bpy.types, "CIVIL_UL_grading_groups")
+        assert hasattr(bpy.types, "CIVIL_UL_grading_criteria")
+        assert hasattr(bpy.types, "CIVIL_UL_grading_members")
+
+
 class TestAuthorCriteriaTemplate:
     """Tests for :meth:`Grading.author_criteria_template`."""
 

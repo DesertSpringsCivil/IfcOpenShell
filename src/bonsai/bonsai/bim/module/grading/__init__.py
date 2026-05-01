@@ -37,28 +37,33 @@ shell and the parent-module wiring at ``bim/__init__.py``.
 
 import bpy
 
-# Operator / panel / UIList / PropertyGroup classes are added in later
-# commits as the grading module fills out. The empty tuple lets the
-# package register cleanly today; the bonsai.bim.__init__ batch
-# registration loop simply has nothing to register for grading yet.
-classes: tuple[type, ...] = ()
+from . import prop
+
+
+classes: tuple[type, ...] = (
+    prop.CivilGradingGroupItem,
+    prop.CivilGradingCriteriaItem,
+    prop.CivilGradingMemberItem,
+    prop.CIVIL_UL_grading_groups,
+    prop.CIVIL_UL_grading_criteria,
+    prop.CIVIL_UL_grading_members,
+    prop.CivilGradingProperties,
+)
 
 
 def register() -> None:
     """Module-level registration hook.
 
     Called by ``bonsai.bim`` after the parent has registered all module
-    classes. PointerProperty registration on ``bpy.types.Scene``, the
-    ``civil`` keymap (per spec §8.4), and any persistent handlers land
-    here in subsequent commits.
+    classes. Attaches :class:`CivilGradingProperties` to ``bpy.types.Scene``
+    as a ``PointerProperty`` so the UI panel can read / write grading
+    state via ``context.scene.CivilGradingProperties``.
     """
-    # Future: bpy.types.Scene.CivilGradingProperties = bpy.props.PointerProperty(
-    #     type=prop.CivilGradingProperties
-    # )
-    pass
+    bpy.types.Scene.CivilGradingProperties = bpy.props.PointerProperty(
+        type=prop.CivilGradingProperties
+    )
 
 
 def unregister() -> None:
     """Module-level teardown hook (mirror of :func:`register`)."""
-    # Future: del bpy.types.Scene.CivilGradingProperties
-    pass
+    del bpy.types.Scene.CivilGradingProperties
