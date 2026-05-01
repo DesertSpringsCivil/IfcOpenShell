@@ -1347,6 +1347,134 @@ class TestGradingCreateGroupOperator(NewIfc4X3):
         assert any(g.Name == "Panel Group" for g in groups)
 
 
+class TestGradingAddObjectAndRebuildOperators(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_grading_add_object` and
+    :class:`CIVIL_OT_grading_rebuild_group` end-to-end. The two
+    operators sit at the core of the Phase 5 happy path: feature
+    line + criteria + group → slope projection → composite proposed
+    surface."""
+
+    def _author_pad_grading_setup(self, tmp_path) -> tuple[str, str, str]:
+        """Helper: author existing-ground surface + closed-loop pad
+        feature line + 3:1-fill criteria + group with target.
+        Returns (group_guid, feature_line_guid, criteria_guid)."""
+        # Existing ground at z=98.
+        eg_path = tmp_path / "eg.csv"
+        eg_path.write_text(
+            "-50,-50,98\n50,-50,98\n50,50,98\n-50,50,98\n"
+        )
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "EG"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(eg_path)
+        )
+        terrain_guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        # Pad perimeter at z=100.
+        fl_path = tmp_path / "fl.csv"
+        fl_path.write_text(
+            "0,0,100\n10,0,100\n10,10,100\n0,10,100\n"
+        )
+        bpy.ops.civil.feature_line_create(
+            "EXEC_DEFAULT", csv_filepath=str(fl_path), closed=True
+        )
+        ifc_file = tool.Ifc.get()
+        fl_guid = ifc_file.by_type("IfcAlignment")[0].GlobalId
+
+        # 3:1 fill / 2:1 cut criteria.
+        bpy.ops.civil.grading_create_criteria(
+            "EXEC_DEFAULT",
+            name="3:1 fill",
+            target_kind="surface",
+            target_ref=terrain_guid,
+            cut_slope=2.0,
+            fill_slope=3.0,
+        )
+        # The criteria's GUID is the singleton template's GlobalId.
+        # Find it via the registered criteria in the registry — the
+        # most recently registered one is ours.
+        criteria_guid = None
+        for (file_id, guid), entity in tool_grading.Grading._registry.items():
+            if isinstance(entity, tool_grading.GradingCriteria):
+                criteria_guid = guid
+                break
+        assert criteria_guid is not None
+
+        # Group targeting the existing ground.
+        bpy.ops.civil.grading_create_group(
+            "EXEC_DEFAULT",
+            name="Pad",
+            target_surface_guid=terrain_guid,
+            interior_fill="none",
+        )
+        ifc_file = tool.Ifc.get()
+        group_guid = next(
+            g.GlobalId
+            for g in ifc_file.by_type("IfcGroup")
+            if getattr(g, "ObjectType", None) == "GradingGroup"
+        )
+
+        return group_guid, fl_guid, criteria_guid
+
+    def test_add_object_then_rebuild_group(self, tmp_path) -> None:
+        group_guid, fl_guid, criteria_guid = self._author_pad_grading_setup(
+            tmp_path
+        )
+
+        # Add the grading object.
+        result = bpy.ops.civil.grading_add_object(
+            "EXEC_DEFAULT",
+            group_guid=group_guid,
+            feature_line_guid=fl_guid,
+            criteria_guid=criteria_guid,
+        )
+        assert result == {"FINISHED"}
+
+        # Slope fill authored.
+        ifc_file = tool.Ifc.get()
+        slope_fills = [
+            f
+            for f in ifc_file.by_type("IfcEarthworksFill")
+            if f.PredefinedType == "SLOPEFILL"
+        ]
+        assert len(slope_fills) == 1
+
+        # Rebuild the group's composite surface.
+        result = bpy.ops.civil.grading_rebuild_group(
+            "EXEC_DEFAULT", group_guid=group_guid
+        )
+        assert result == {"FINISHED"}
+
+        # The composite IfcEarthworksFill[SUBGRADE] now has a
+        # SurfaceModel TIN representation.
+        composites = [
+            f
+            for f in ifc_file.by_type("IfcEarthworksFill")
+            if f.PredefinedType == "SUBGRADE"
+        ]
+        assert len(composites) == 1
+        composite = composites[0]
+        assert composite.Representation is not None
+        assert any(
+            r.RepresentationIdentifier == "SurfaceModel"
+            for r in composite.Representation.Representations
+        )
+
+    def test_add_object_missing_guids_raises(self) -> None:
+        with pytest.raises(RuntimeError, match="required"):
+            bpy.ops.civil.grading_add_object(
+                "EXEC_DEFAULT",
+                group_guid="",
+                feature_line_guid="",
+                criteria_guid="",
+            )
+
+    def test_rebuild_group_missing_guid_raises(self) -> None:
+        with pytest.raises(RuntimeError, match="required"):
+            bpy.ops.civil.grading_rebuild_group(
+                "EXEC_DEFAULT", group_guid=""
+            )
+
+
 class TestAuthorCriteriaTemplate:
     """Tests for :meth:`Grading.author_criteria_template`."""
 

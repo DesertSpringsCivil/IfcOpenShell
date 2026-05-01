@@ -583,3 +583,148 @@ class CIVIL_OT_grading_create_group(Operator, tool.Ifc.Operator):
             f"(interior_fill={group.interior_fill})",
         )
         return {"FINISHED"}
+
+
+class CIVIL_OT_grading_add_object(Operator, tool.Ifc.Operator):
+    """Apply a criteria to a feature line within a group, computing the
+    slope projection and authoring the resulting slope fill.
+
+    The headless three-GUID payload is the cleanest API surface: the
+    panel popup (commit 15) lets the user pick group / feature-line /
+    criteria from UILists and clicks "Add Object," which runs the
+    operator with the picked GUIDs.
+
+    Headless usage::
+
+        bpy.ops.civil.grading_add_object(
+            "EXEC_DEFAULT",
+            group_guid="...",
+            feature_line_guid="...",
+            criteria_guid="...",
+        )
+
+    Side effect: appends the new :class:`GradingObject` to the group's
+    members. The composite surface isn't rebuilt automatically — call
+    :class:`CIVIL_OT_grading_rebuild_group` after adding all the
+    objects you want, so the rebuild fires once per editing session
+    rather than per-add.
+    """
+
+    bl_idname = "civil.grading_add_object"
+    bl_label = "Add Grading Object"
+    bl_description = (
+        "Apply a criteria to a feature line within a grading group. "
+        "Authors the slope-fill ribbon as IfcEarthworksFill[SLOPEFILL] "
+        "aggregated under the group's composite. Run "
+        "Rebuild Group after adding objects to refresh the composite "
+        "proposed surface."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    group_guid: StringProperty(name="Group GUID")
+    feature_line_guid: StringProperty(name="Feature Line GUID")
+    criteria_guid: StringProperty(name="Criteria GUID")
+
+    def _execute(self, context):
+        if not (
+            self.group_guid and self.feature_line_guid and self.criteria_guid
+        ):
+            self.report(
+                {"ERROR"},
+                "group_guid, feature_line_guid, and criteria_guid are "
+                "all required",
+            )
+            return {"CANCELLED"}
+
+        try:
+            grading_object = core_grading.add_grading_object(
+                tool.Ifc,
+                tool.Surface,
+                tool.Grading,
+                group_guid=self.group_guid,
+                feature_line_guid=self.feature_line_guid,
+                criteria_guid=self.criteria_guid,
+            )
+        except (ValueError, tool_grading.SaikeiGradingError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        self.report(
+            {"INFO"},
+            f"Added grading object {grading_object.name!r} "
+            f"({len(grading_object.daylight_line)} daylight points)",
+        )
+        return {"FINISHED"}
+
+
+class CIVIL_OT_grading_rebuild_group(Operator, tool.Ifc.Operator):
+    """Force-rebuild a grading group's composite proposed surface.
+
+    Per spec §8.2 [H] — headless-only. Most rebuild needs are handled
+    automatically by ``add_grading_object`` (Phase 5.1 will add
+    cascade rebuild on feature-line edit per the v3.2.5 amendments
+    queue item 4); this operator is the explicit "force a fresh
+    rebuild" hatch for power users and the panel.
+
+    Sequencing: core.rebuild_group (assembles slope-fill members +
+    interior-fill geometry → updates the composite TIN +
+    BoundingBox) → refresh the Blender mesh on the composite.
+
+    Headless usage::
+
+        bpy.ops.civil.grading_rebuild_group(
+            "EXEC_DEFAULT", group_guid="..."
+        )
+    """
+
+    bl_idname = "civil.grading_rebuild_group"
+    bl_label = "Rebuild Grading Group"
+    bl_description = (
+        "Force a rebuild of the group's composite proposed surface. "
+        "Reassembles slope-fill members + interior fill + writes the "
+        "result to the composite IfcEarthworksFill's TIN representation."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    group_guid: StringProperty(name="Group GUID")
+
+    def _execute(self, context):
+        if not self.group_guid:
+            self.report({"ERROR"}, "group_guid is required")
+            return {"CANCELLED"}
+
+        try:
+            composite_surface = core_grading.rebuild_group(
+                tool.Ifc,
+                tool.Surface,
+                tool.Grading,
+                group_guid=self.group_guid,
+            )
+        except (ValueError, tool_grading.SaikeiGradingError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        # Refresh / create the composite's Blender mesh so the user
+        # sees the rebuilt TIN.
+        try:
+            tool.Surface.update_blender_mesh(tool.Ifc.get(), composite_surface)
+        except tool_grading.SaikeiGradingError:
+            # Composite hasn't been linked to a Blender mesh yet on
+            # first rebuild — call create_blender_mesh instead.
+            try:
+                tool.Surface.create_blender_mesh(
+                    tool.Ifc.get(), composite_surface
+                )
+            except Exception as exc:
+                self.report(
+                    {"WARNING"},
+                    f"composite TIN rebuilt in IFC but Blender mesh "
+                    f"refresh failed: {exc}",
+                )
+
+        self.report(
+            {"INFO"},
+            f"Rebuilt {composite_surface.name!r} → "
+            f"{len(composite_surface.triangles)} triangles",
+        )
+        return {"FINISHED"}
