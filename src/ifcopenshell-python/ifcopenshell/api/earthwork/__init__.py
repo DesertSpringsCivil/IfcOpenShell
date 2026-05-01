@@ -101,11 +101,15 @@ Currently supported
    creation.
 4. :func:`void_terrain` — :class:`IfcRelVoidsElement` between a cut and
    its host terrain.
-5. :func:`write_cut_quantities` — idempotent
+5. :func:`link_fill_to_cut` — :class:`IfcRelFillsElement` between a
+   cut and a fill that occupies it (footing, pipe segment, embankment,
+   etc.). Mirror of :func:`void_terrain` for the cut→fill half of the
+   voiding chain.
+6. :func:`write_cut_quantities` — idempotent
    ``Qto_EarthworksCutBaseQuantities`` author.
-6. :func:`write_fill_quantities` — idempotent
+7. :func:`write_fill_quantities` — idempotent
    ``Qto_EarthworksFillBaseQuantities`` author.
-7. :func:`apply_shrink_swell_pset` — idempotent
+8. :func:`apply_shrink_swell_pset` — idempotent
    ``Pset_SaikeiGradingShrinkSwell`` author.
 
 Future versions of this API may support
@@ -173,6 +177,7 @@ from .add_volume_solid_representation import add_volume_solid_representation
 from .apply_shrink_swell_pset import apply_shrink_swell_pset
 from .create_earthworks_cut import create_earthworks_cut
 from .create_earthworks_fill import create_earthworks_fill
+from .link_fill_to_cut import link_fill_to_cut
 from .void_terrain import void_terrain
 from .write_cut_quantities import write_cut_quantities
 from .write_fill_quantities import write_fill_quantities
@@ -182,6 +187,7 @@ __all__ = [
     "apply_shrink_swell_pset",
     "create_earthworks_cut",
     "create_earthworks_fill",
+    "link_fill_to_cut",
     "void_terrain",
     "write_cut_quantities",
     "write_fill_quantities",

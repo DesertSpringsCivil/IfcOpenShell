@@ -872,6 +872,217 @@ class TestVoidTerrain:
         assert rels[0].RelatedOpeningElement.Name == "RTCut"
 
 
+class TestLinkFillToCut:
+    """Tests for ``ifcopenshell.api.earthwork.link_fill_to_cut``."""
+
+    def test_happy_path(self, empty_project_file: ifcopenshell.file) -> None:
+        from ifcopenshell.api.earthwork import (
+            create_earthworks_cut,
+            create_earthworks_fill,
+            link_fill_to_cut,
+        )
+
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="Trench", points=points, faces=faces
+        )
+        fill = create_earthworks_fill(
+            empty_project_file,
+            name="Backfill",
+            points=points,
+            faces=faces,
+            predefined_type="BACKFILL",
+        )
+
+        rel = link_fill_to_cut(empty_project_file, cut, fill)
+
+        assert rel.is_a("IfcRelFillsElement")
+        assert rel.RelatingOpeningElement.id() == cut.id()
+        assert rel.RelatedBuildingElement.id() == fill.id()
+
+    def test_idempotent_for_same_pair(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import (
+            create_earthworks_cut,
+            create_earthworks_fill,
+            link_fill_to_cut,
+        )
+
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="C", points=points, faces=faces
+        )
+        fill = create_earthworks_fill(
+            empty_project_file,
+            name="F",
+            points=points,
+            faces=faces,
+            predefined_type="BACKFILL",
+        )
+        first = link_fill_to_cut(empty_project_file, cut, fill)
+        second = link_fill_to_cut(empty_project_file, cut, fill)
+
+        assert first.id() == second.id()
+        assert len(empty_project_file.by_type("IfcRelFillsElement")) == 1
+
+    def test_retargeting_to_different_cut_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """A fill that fills cut_a cannot also fill cut_b without removing the first rel."""
+        from ifcopenshell.api.earthwork import (
+            create_earthworks_cut,
+            create_earthworks_fill,
+            link_fill_to_cut,
+        )
+
+        points, faces = _cube_solid_geometry()
+        cut_a = create_earthworks_cut(
+            empty_project_file, name="CA", points=points, faces=faces
+        )
+        cut_b = create_earthworks_cut(
+            empty_project_file, name="CB", points=points, faces=faces
+        )
+        fill = create_earthworks_fill(
+            empty_project_file,
+            name="F",
+            points=points,
+            faces=faces,
+            predefined_type="BACKFILL",
+        )
+        link_fill_to_cut(empty_project_file, cut_a, fill)
+
+        with pytest.raises(ValueError, match="already fills"):
+            link_fill_to_cut(empty_project_file, cut_b, fill)
+
+    def test_one_cut_filled_by_many_fills(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """A single cut can host multiple fills (e.g., subgrade + bedding +
+        structural fill in one trench). Cardinality only restricts the
+        fill side."""
+        from ifcopenshell.api.earthwork import (
+            create_earthworks_cut,
+            create_earthworks_fill,
+            link_fill_to_cut,
+        )
+
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="Trench", points=points, faces=faces
+        )
+        fill_a = create_earthworks_fill(
+            empty_project_file,
+            name="Bedding",
+            points=points,
+            faces=faces,
+            predefined_type="BACKFILL",
+        )
+        fill_b = create_earthworks_fill(
+            empty_project_file,
+            name="Cap",
+            points=points,
+            faces=faces,
+            predefined_type="EMBANKMENT",
+        )
+        link_fill_to_cut(empty_project_file, cut, fill_a)
+        link_fill_to_cut(empty_project_file, cut, fill_b)
+
+        rels = empty_project_file.by_type("IfcRelFillsElement")
+        assert len(rels) == 2
+        opening_ids = {r.RelatingOpeningElement.id() for r in rels}
+        assert opening_ids == {cut.id()}
+
+    def test_wrong_cut_type_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import (
+            create_earthworks_fill,
+            link_fill_to_cut,
+        )
+
+        points, faces = _cube_solid_geometry()
+        not_a_cut = _make_fill(empty_project_file)
+        fill = create_earthworks_fill(
+            empty_project_file,
+            name="F",
+            points=points,
+            faces=faces,
+            predefined_type="BACKFILL",
+        )
+        with pytest.raises(ValueError, match="must be an IfcFeatureElementSubtraction"):
+            link_fill_to_cut(empty_project_file, not_a_cut, fill)
+
+    def test_wrong_fill_type_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        from ifcopenshell.api.earthwork import (
+            create_earthworks_cut,
+            link_fill_to_cut,
+        )
+
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="X", points=points, faces=faces
+        )
+        not_a_fill = empty_project_file.create_entity(
+            "IfcCartesianPoint", Coordinates=(0.0, 0.0, 0.0)
+        )
+        with pytest.raises(ValueError, match="must be an IfcElement"):
+            link_fill_to_cut(empty_project_file, cut, not_a_fill)
+
+    def test_non_earthworks_fill_accepted(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """The doc lists IfcFooting / IfcPipeSegment / etc. as valid fills.
+        Verify the helper accepts any IfcElement subtype, not just
+        IfcEarthworksFill."""
+        from ifcopenshell.api.earthwork import (
+            create_earthworks_cut,
+            link_fill_to_cut,
+        )
+
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="X", points=points, faces=faces
+        )
+        pipe = empty_project_file.create_entity(
+            "IfcPipeSegment", GlobalId=ifcopenshell.guid.new()
+        )
+        rel = link_fill_to_cut(empty_project_file, cut, pipe)
+        assert rel.RelatedBuildingElement.id() == pipe.id()
+
+    def test_round_trip(
+        self, empty_project_file: ifcopenshell.file, tmp_path
+    ) -> None:
+        from ifcopenshell.api.earthwork import (
+            create_earthworks_cut,
+            create_earthworks_fill,
+            link_fill_to_cut,
+        )
+
+        points, faces = _cube_solid_geometry()
+        cut = create_earthworks_cut(
+            empty_project_file, name="RTCut", points=points, faces=faces
+        )
+        fill = create_earthworks_fill(
+            empty_project_file,
+            name="RTFill",
+            points=points,
+            faces=faces,
+            predefined_type="BACKFILL",
+        )
+        link_fill_to_cut(empty_project_file, cut, fill)
+
+        path = tmp_path / "rt_fills.ifc"
+        empty_project_file.write(str(path))
+        reopened = ifcopenshell.open(str(path))
+        rels = reopened.by_type("IfcRelFillsElement")
+        assert len(rels) == 1
+        assert rels[0].RelatingOpeningElement.Name == "RTCut"
+        assert rels[0].RelatedBuildingElement.Name == "RTFill"
+
+
 def _read_qto(
     product: ifcopenshell.entity_instance, qto_name: str
 ) -> dict[str, float]:
