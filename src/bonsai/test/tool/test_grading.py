@@ -28,14 +28,25 @@ Run via the canonical Phase 4/5 invocation (PowerShell, from src/bonsai)::
       --blender-executable "C:\\Program Files\\Blender Foundation\\Blender_5\\blender.exe"
 """
 
+import bpy
 import ifcopenshell
 import ifcopenshell.api.unit
 import ifcopenshell.guid
 import numpy as np
 import pytest
 
+import bonsai.tool as tool
 import bonsai.tool.grading as tool_grading
 import bonsai.tool.surface as tool_surface
+from test.bim.bootstrap import NewIfc4X3
+
+
+@pytest.fixture(autouse=True)
+def _reset_grading_registry():
+    """Wipe :attr:`Grading._registry` between every test (per spec §4.6).
+    Mirrors the surface module's autouse teardown."""
+    yield
+    tool_grading.Grading.clear()
 
 
 def _make_ifc_file_with_site() -> ifcopenshell.file:
@@ -993,3 +1004,250 @@ class TestAuthorInteriorFill:
             tool_grading.Grading.author_interior_fill(
                 ifc_file, group, points, triangles
             )
+
+
+# ---------------------------------------------------------------------------
+# Registry — lazy-rehydrating cache (spec §4.6)
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryFeatureLine:
+    """Tests for :class:`Grading._registry` + :meth:`get_feature_line`."""
+
+    def test_register_then_get_returns_same_instance(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            name="bound",
+            vertices=[(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)],
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        tool_grading.Grading.register(ifc_file, feature_line)
+        cached = tool_grading.Grading.get_feature_line(ifc_file, feature_line.guid)
+        assert cached is feature_line
+
+    def test_get_rehydrates_on_cache_miss(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            name="re-bound",
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (10.0, 0.0, 100.5),
+                (10.0, 10.0, 101.0),
+            ],
+            closed=True,
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        # Wipe the cache; next get() rehydrates from IFC.
+        tool_grading.Grading.clear()
+        rehydrated = tool_grading.Grading.get_feature_line(
+            ifc_file, feature_line.guid
+        )
+        assert rehydrated is not feature_line
+        assert rehydrated.guid == feature_line.guid
+        assert rehydrated.name == "re-bound"
+        assert rehydrated.closed is True
+        assert len(rehydrated.vertices) == 3
+        # Z values round-trip exactly through IfcCartesianPointList3D.
+        assert rehydrated.vertices[0][2] == pytest.approx(100.0)
+        assert rehydrated.vertices[2][2] == pytest.approx(101.0)
+
+    def test_get_unknown_guid_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="no IfcAlignment"
+        ):
+            tool_grading.Grading.get_feature_line(
+                ifc_file, ifcopenshell.guid.new()
+            )
+
+
+class TestRegistryGroup:
+    """Tests for :meth:`Grading.get_group`."""
+
+    def test_register_then_get_returns_same_instance(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup(name="cached", interior_fill="flat")
+        tool_grading.Grading.author_group(ifc_file, group)
+        tool_grading.Grading.register(ifc_file, group)
+        cached = tool_grading.Grading.get_group(ifc_file, group.guid)
+        assert cached is group
+
+    def test_get_rehydrates_on_cache_miss(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup(
+            name="Test Group", interior_fill="flat"
+        )
+        tool_grading.Grading.author_group(ifc_file, group)
+        tool_grading.Grading.clear()
+        rehydrated = tool_grading.Grading.get_group(ifc_file, group.guid)
+        assert rehydrated is not group
+        assert rehydrated.name == "Test Group"
+        assert rehydrated.interior_fill == "flat"
+        # Composite-fill step id recovered from IfcRelAssignsToGroup.
+        assert rehydrated.ifc_composite_fill_id == group.ifc_composite_fill_id
+        # Members start empty; member rehydration is commit 6 territory.
+        assert rehydrated.members == []
+
+    def test_get_unknown_guid_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        with pytest.raises(
+            tool_grading.SaikeiGradingError,
+            match="no IfcGroup\\[GradingGroup\\]",
+        ):
+            tool_grading.Grading.get_group(ifc_file, ifcopenshell.guid.new())
+
+
+class TestRegistryLifecycle:
+    """Tests for :meth:`Grading.invalidate` and :meth:`clear`."""
+
+    def test_invalidate_drops_specific_entry(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        tool_grading.Grading.register(ifc_file, feature_line)
+        assert (id(ifc_file), feature_line.guid) in tool_grading.Grading._registry
+        tool_grading.Grading.invalidate(ifc_file, feature_line.guid)
+        assert (
+            id(ifc_file),
+            feature_line.guid,
+        ) not in tool_grading.Grading._registry
+
+    def test_clear_wipes_registry(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        tool_grading.Grading.register(ifc_file, feature_line)
+        assert tool_grading.Grading._registry  # non-empty
+        tool_grading.Grading.clear()
+        assert not tool_grading.Grading._registry
+
+    def test_multi_file_registry_keyed_by_id(self) -> None:
+        """Same GUID in two files → two separate cache entries."""
+        ifc_a = _make_ifc_file_with_site()
+        ifc_b = _make_ifc_file_with_site()
+        guid = ifcopenshell.guid.new()
+        feature_line_a = tool_grading.FeatureLine(
+            guid=guid, vertices=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
+        )
+        feature_line_b = tool_grading.FeatureLine(
+            guid=guid, vertices=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
+        )
+        tool_grading.Grading.author_feature_line(ifc_a, feature_line_a)
+        tool_grading.Grading.author_feature_line(ifc_b, feature_line_b)
+        tool_grading.Grading.register(ifc_a, feature_line_a)
+        tool_grading.Grading.register(ifc_b, feature_line_b)
+        assert tool_grading.Grading.get_feature_line(ifc_a, guid) is feature_line_a
+        assert tool_grading.Grading.get_feature_line(ifc_b, guid) is feature_line_b
+
+
+# ---------------------------------------------------------------------------
+# Blender object linkage
+# ---------------------------------------------------------------------------
+
+
+class TestBlenderCurve(NewIfc4X3):
+    """Tests for :meth:`Grading.create_blender_curve` — feature lines as
+    Blender curve objects. Inherits NewIfc4X3 so each test starts with
+    a Bonsai-bootstrapped project (Collector.assign needs the
+    collection hierarchy).
+    """
+
+    def test_creates_curve_object(self) -> None:
+        ifc_file = tool.Ifc.get()
+        feature_line = tool_grading.FeatureLine(
+            name="curve-test",
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0), (10.0, 10.0, 100.0)],
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        obj = tool_grading.Grading.create_blender_curve(ifc_file, feature_line)
+        assert obj is not None
+        assert obj.type == "CURVE"
+        assert obj.data is not None
+
+    def test_links_to_ifc_alignment(self) -> None:
+        ifc_file = tool.Ifc.get()
+        feature_line = tool_grading.FeatureLine(
+            name="link-test",
+            vertices=[(0.0, 0.0, 0.0), (5.0, 0.0, 0.0)],
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        obj = tool_grading.Grading.create_blender_curve(ifc_file, feature_line)
+        alignment = ifc_file.by_id(feature_line.ifc_alignment_id)
+        assert tool.Ifc.get_object(alignment) is obj
+        assert tool.Ifc.get_entity(obj) == alignment
+
+    def test_idempotent_on_repeat_call(self) -> None:
+        ifc_file = tool.Ifc.get()
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 0.0), (5.0, 0.0, 0.0)]
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        a = tool_grading.Grading.create_blender_curve(ifc_file, feature_line)
+        b = tool_grading.Grading.create_blender_curve(ifc_file, feature_line)
+        assert a is b
+
+    def test_no_ifc_alignment_raises(self) -> None:
+        ifc_file = tool.Ifc.get()
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
+        )
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="no IFC alignment"
+        ):
+            tool_grading.Grading.create_blender_curve(ifc_file, feature_line)
+
+    def test_closed_feature_line_yields_cyclic_spline(self) -> None:
+        ifc_file = tool.Ifc.get()
+        feature_line = tool_grading.FeatureLine(
+            vertices=[
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (1.0, 1.0, 0.0),
+                (0.0, 1.0, 0.0),
+            ],
+            closed=True,
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        obj = tool_grading.Grading.create_blender_curve(ifc_file, feature_line)
+        assert obj.data.splines[0].use_cyclic_u is True
+
+
+class TestBlenderGroupEmpty(NewIfc4X3):
+    """Tests for :meth:`Grading.create_blender_empty_for_group`."""
+
+    def test_creates_empty_object(self) -> None:
+        ifc_file = tool.Ifc.get()
+        group = tool_grading.GradingGroup(name="empty-test")
+        tool_grading.Grading.author_group(ifc_file, group)
+        obj = tool_grading.Grading.create_blender_empty_for_group(ifc_file, group)
+        assert obj is not None
+        assert obj.type == "EMPTY"
+        assert obj.data is None
+
+    def test_links_to_ifc_group(self) -> None:
+        ifc_file = tool.Ifc.get()
+        group = tool_grading.GradingGroup(name="g")
+        tool_grading.Grading.author_group(ifc_file, group)
+        obj = tool_grading.Grading.create_blender_empty_for_group(ifc_file, group)
+        ifc_group = ifc_file.by_id(group.ifc_group_id)
+        assert tool.Ifc.get_object(ifc_group) is obj
+
+    def test_idempotent_on_repeat_call(self) -> None:
+        ifc_file = tool.Ifc.get()
+        group = tool_grading.GradingGroup()
+        tool_grading.Grading.author_group(ifc_file, group)
+        a = tool_grading.Grading.create_blender_empty_for_group(ifc_file, group)
+        b = tool_grading.Grading.create_blender_empty_for_group(ifc_file, group)
+        assert a is b
+
+    def test_no_ifc_group_raises(self) -> None:
+        ifc_file = tool.Ifc.get()
+        group = tool_grading.GradingGroup()
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="no IFC entity"
+        ):
+            tool_grading.Grading.create_blender_empty_for_group(ifc_file, group)

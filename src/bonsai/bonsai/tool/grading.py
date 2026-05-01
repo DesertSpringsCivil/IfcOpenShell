@@ -50,10 +50,13 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Optional, Union
 
+import bpy
 import ifcopenshell.api.grading
 import ifcopenshell.guid
 import numpy as np
 import shapely
+
+import bonsai.tool as tool
 
 if TYPE_CHECKING:
     import ifcopenshell
@@ -1129,3 +1132,348 @@ class Grading:
 
         group.ifc_interior_fill_id = interior.id()
         return interior
+
+    # ------------------------------------------------------------------
+    # Registry — lazy-rehydrating cache (spec §4.6)
+    # ------------------------------------------------------------------
+
+    _registry: dict[tuple[int, str], object] = {}
+    """Per spec §4.6: lazy-rehydrating cache keyed by ``(id(ifc_file),
+    guid)``. Stores :class:`FeatureLine`, :class:`GradingCriteria`, and
+    :class:`GradingGroup` instances; the dataclass type is preserved by
+    the value itself. Headless tests call :meth:`clear` in autouse
+    teardown."""
+
+    @classmethod
+    def register(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        entity: Union[FeatureLine, GradingCriteria, GradingGroup],
+    ) -> None:
+        """Add ``entity`` to the registry under
+        ``(id(ifc_file), entity.guid)``. Called by core orchestration
+        after the relevant ``author_*`` so the in-memory dataclass is
+        reused on subsequent ``get_*`` calls."""
+        cls._registry[(id(ifc_file), entity.guid)] = entity
+
+    @classmethod
+    def invalidate(
+        cls, ifc_file: "ifcopenshell.file", guid: str
+    ) -> None:
+        """Drop the cache entry for ``guid`` so the next ``get_*`` call
+        rehydrates from IFC."""
+        cls._registry.pop((id(ifc_file), guid), None)
+
+    @classmethod
+    def clear(cls) -> None:
+        """Wipe the entire registry. Headless test teardown calls this to
+        prevent cross-test contamination."""
+        cls._registry.clear()
+
+    @classmethod
+    def get_feature_line(
+        cls, ifc_file: "ifcopenshell.file", guid: str
+    ) -> FeatureLine:
+        """Return the cached :class:`FeatureLine` for ``guid``,
+        rehydrating from IFC on cache miss."""
+        key = (id(ifc_file), guid)
+        cached = cls._registry.get(key)
+        if isinstance(cached, FeatureLine):
+            return cached
+        feature_line = cls._rehydrate_feature_line_from_ifc(ifc_file, guid)
+        cls._registry[key] = feature_line
+        return feature_line
+
+    @classmethod
+    def get_group(
+        cls, ifc_file: "ifcopenshell.file", guid: str
+    ) -> GradingGroup:
+        """Return the cached :class:`GradingGroup` for ``guid``,
+        rehydrating from IFC on cache miss.
+
+        Phase 5 MVP rehydrates the group's metadata
+        (name, interior_fill, target_surface_guid) and the IFC step ids
+        but leaves ``members`` empty — member rehydration walks the
+        :class:`IfcRelAggregates` graph (commit 6 territory). Callers
+        that need member access should call :meth:`rebuild_group_members`
+        after :meth:`get_group`."""
+        key = (id(ifc_file), guid)
+        cached = cls._registry.get(key)
+        if isinstance(cached, GradingGroup):
+            return cached
+        group = cls._rehydrate_group_from_ifc(ifc_file, guid)
+        cls._registry[key] = group
+        return group
+
+    @classmethod
+    def _rehydrate_feature_line_from_ifc(
+        cls, ifc_file: "ifcopenshell.file", guid: str
+    ) -> FeatureLine:
+        """Reconstruct a :class:`FeatureLine` from the IFC
+        :class:`IfcAlignment` identified by ``guid``.
+
+        Reads the polyline geometry from the alignment's representation
+        and the ``Pset_SaikeiFeatureLineCommon`` for ``closed`` and
+        ``GradingGroupGuid`` (per Phase 2's ``create_feature_line``).
+        """
+        alignment = next(
+            (
+                e
+                for e in ifc_file.by_type("IfcAlignment")
+                if e.GlobalId == guid
+            ),
+            None,
+        )
+        if alignment is None:
+            raise SaikeiGradingError(
+                f"no IfcAlignment with GlobalId {guid!r} in this file"
+            )
+
+        vertices = cls._extract_alignment_polyline(alignment)
+        closed, grading_group_guid = cls._extract_feature_line_pset(alignment)
+
+        # Phase 2 stores closed loops with the start vertex appended as
+        # the terminating point so the polyline geometry round-trips
+        # through any consumer. Strip that duplication on read so
+        # ``vertices`` matches the original authoring input.
+        if (
+            closed
+            and len(vertices) >= 2
+            and vertices[0] == vertices[-1]
+        ):
+            vertices = vertices[:-1]
+
+        return FeatureLine(
+            guid=guid,
+            name=alignment.Name or "",
+            vertices=vertices,
+            closed=closed,
+            grading_group=grading_group_guid,
+            ifc_alignment_id=alignment.id(),
+        )
+
+    @classmethod
+    def _rehydrate_group_from_ifc(
+        cls, ifc_file: "ifcopenshell.file", guid: str
+    ) -> GradingGroup:
+        """Reconstruct a :class:`GradingGroup` from the
+        :class:`IfcGroup[GradingGroup]` identified by ``guid``.
+
+        Reads ``Pset_SaikeiGradingSource`` for ``InteriorFillStrategy``
+        and ``TargetSurfaceGuid``. Locates the per-group composite
+        :class:`IfcEarthworksFill[SUBGRADE]` via the group's
+        :class:`IfcRelAssignsToGroup` membership.
+
+        Member :class:`GradingObject` rehydration is deferred — see
+        :meth:`get_group` docstring.
+        """
+        ifc_group = next(
+            (
+                g
+                for g in ifc_file.by_type("IfcGroup")
+                if g.GlobalId == guid
+                and getattr(g, "ObjectType", None) == "GradingGroup"
+            ),
+            None,
+        )
+        if ifc_group is None:
+            raise SaikeiGradingError(
+                f"no IfcGroup[GradingGroup] with GlobalId {guid!r} in this file"
+            )
+
+        interior_fill, target_surface_guid = cls._extract_grading_source_pset(
+            ifc_group
+        )
+        composite_fill_id = cls._find_composite_fill_id(ifc_group)
+
+        return GradingGroup(
+            guid=guid,
+            name=ifc_group.Name or "",
+            interior_fill=interior_fill,  # type: ignore[arg-type]
+            target_surface_guid=target_surface_guid,
+            ifc_group_id=ifc_group.id(),
+            ifc_composite_fill_id=composite_fill_id,
+        )
+
+    @staticmethod
+    def _extract_alignment_polyline(
+        alignment: "ifcopenshell.entity_instance",
+    ) -> list[tuple[float, float, float]]:
+        """Pull the 3D polyline points from an :class:`IfcAlignment`'s
+        :class:`IfcIndexedPolyCurve` representation. Returns an empty
+        list if the alignment has no polyline representation."""
+        representation = alignment.Representation
+        if representation is None:
+            return []
+        for shape_rep in representation.Representations or []:
+            for item in shape_rep.Items or []:
+                if item.is_a("IfcIndexedPolyCurve"):
+                    points_entity = item.Points
+                    if points_entity is None:
+                        continue
+                    coords = points_entity.CoordList or []
+                    return [
+                        (float(c[0]), float(c[1]), float(c[2]) if len(c) >= 3 else 0.0)
+                        for c in coords
+                    ]
+                if item.is_a("IfcPolyline"):
+                    pts = item.Points or []
+                    out: list[tuple[float, float, float]] = []
+                    for pt in pts:
+                        coords = pt.Coordinates or ()
+                        if len(coords) >= 3:
+                            out.append(
+                                (float(coords[0]), float(coords[1]), float(coords[2]))
+                            )
+                    return out
+        return []
+
+    @staticmethod
+    def _extract_feature_line_pset(
+        alignment: "ifcopenshell.entity_instance",
+    ) -> tuple[bool, Optional[str]]:
+        """Pull ``IsClosed`` and ``GradingGroupGuid`` from
+        ``Pset_SaikeiFeatureLineCommon`` (per Phase 2's
+        :func:`create_feature_line`). Defaults: not closed, no group."""
+        closed = False
+        grading_group_guid = None
+        for rel in getattr(alignment, "IsDefinedBy", None) or []:
+            if not rel.is_a("IfcRelDefinesByProperties"):
+                continue
+            pset = rel.RelatingPropertyDefinition
+            if pset is None or pset.Name != "Pset_SaikeiFeatureLineCommon":
+                continue
+            for prop in pset.HasProperties or []:
+                if prop.Name == "IsClosed" and prop.NominalValue is not None:
+                    closed = bool(prop.NominalValue.wrappedValue)
+                elif (
+                    prop.Name == "GradingGroupGuid"
+                    and prop.NominalValue is not None
+                ):
+                    val = prop.NominalValue.wrappedValue
+                    grading_group_guid = val if val else None
+        return closed, grading_group_guid
+
+    @staticmethod
+    def _extract_grading_source_pset(
+        ifc_group: "ifcopenshell.entity_instance",
+    ) -> tuple[str, Optional[str]]:
+        """Pull ``InteriorFillStrategy`` and ``TargetSurfaceGuid`` from
+        ``Pset_SaikeiGradingSource``. Defaults:
+        ``"interpolate_from_boundary"``, no target."""
+        interior_fill = "interpolate_from_boundary"
+        target_surface_guid = None
+        for rel in getattr(ifc_group, "IsDefinedBy", None) or []:
+            if not rel.is_a("IfcRelDefinesByProperties"):
+                continue
+            pset = rel.RelatingPropertyDefinition
+            if pset is None or pset.Name != "Pset_SaikeiGradingSource":
+                continue
+            for prop in pset.HasProperties or []:
+                if (
+                    prop.Name == "InteriorFillStrategy"
+                    and prop.NominalValue is not None
+                ):
+                    interior_fill = prop.NominalValue.wrappedValue or interior_fill
+                elif (
+                    prop.Name == "TargetSurfaceGuid"
+                    and prop.NominalValue is not None
+                ):
+                    val = prop.NominalValue.wrappedValue
+                    target_surface_guid = val if val else None
+        return interior_fill, target_surface_guid
+
+    @staticmethod
+    def _find_composite_fill_id(
+        ifc_group: "ifcopenshell.entity_instance",
+    ) -> Optional[int]:
+        """Walk the group's :class:`IfcRelAssignsToGroup` inverse for the
+        per-group composite :class:`IfcEarthworksFill[SUBGRADE]`. The
+        composite is the first assigned fill (it's added at create time
+        before any slope fills)."""
+        for rel in getattr(ifc_group, "IsGroupedBy", None) or []:
+            for related in rel.RelatedObjects or []:
+                if (
+                    related.is_a("IfcEarthworksFill")
+                    and getattr(related, "PredefinedType", None) == "SUBGRADE"
+                ):
+                    return related.id()
+        return None
+
+    # ------------------------------------------------------------------
+    # Blender object linkage
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def create_blender_curve(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        feature_line: FeatureLine,
+    ) -> bpy.types.Object:
+        """Create a Blender Bezier-curve object representing
+        ``feature_line`` and link it to the IFC :class:`IfcAlignment`.
+
+        Mirrors :meth:`bonsai.tool.surface.Surface.create_blender_mesh`
+        (which produces meshes for surfaces). For feature lines a curve
+        is the right primitive: low overhead, supports per-vertex
+        elevation editing via Blender's existing curve-edit operators.
+        Idempotent — re-entrant calls return the existing object.
+        """
+        if feature_line.ifc_alignment_id is None:
+            raise SaikeiGradingError(
+                "feature line has no IFC alignment; call author_feature_line first"
+            )
+        alignment = ifc_file.by_id(feature_line.ifc_alignment_id)
+        existing_obj = tool.Ifc.get_object(alignment)
+        if existing_obj:
+            return existing_obj
+
+        display_name = f"IfcAlignment/{alignment.Name or feature_line.guid}"
+        curve_data = bpy.data.curves.new(display_name, "CURVE")
+        curve_data.dimensions = "3D"
+        spline = curve_data.splines.new("POLY")
+        if feature_line.vertices:
+            spline.points.add(len(feature_line.vertices) - 1)
+            for i, (x, y, z) in enumerate(feature_line.vertices):
+                spline.points[i].co = (float(x), float(y), float(z), 1.0)
+            spline.use_cyclic_u = bool(feature_line.closed)
+
+        obj = bpy.data.objects.new(display_name, curve_data)
+        tool.Ifc.link(alignment, obj)
+        tool.Collector.assign(obj)
+        return obj
+
+    @classmethod
+    def create_blender_empty_for_group(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        group: GradingGroup,
+    ) -> bpy.types.Object:
+        """Create a Blender Empty object representing the
+        :class:`IfcGroup[GradingGroup]`. The Empty is a parent for the
+        group's feature-line / slope-fill child objects so the user can
+        select the whole grading assembly via outliner / scene-graph
+        interaction.
+
+        Mirrors :meth:`Surface.create_blender_mesh` for the
+        non-geometric IFC entity case: groups don't have a TIN of their
+        own (the composite proposed surface comes from the rebuild step
+        in commit 6).
+        """
+        if group.ifc_group_id is None:
+            raise SaikeiGradingError(
+                "group has no IFC entity; call author_group first"
+            )
+        ifc_group = ifc_file.by_id(group.ifc_group_id)
+        existing_obj = tool.Ifc.get_object(ifc_group)
+        if existing_obj:
+            return existing_obj
+
+        display_name = f"IfcGroup/{ifc_group.Name or group.guid}"
+        obj = bpy.data.objects.new(display_name, None)  # None = Empty
+        obj.empty_display_type = "PLAIN_AXES"
+        obj.empty_display_size = 1.0
+
+        tool.Ifc.link(ifc_group, obj)
+        tool.Collector.assign(obj)
+        return obj
