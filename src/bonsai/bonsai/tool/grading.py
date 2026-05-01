@@ -932,6 +932,66 @@ class Grading:
         return alignment
 
     @classmethod
+    def update_feature_line_vertices(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        feature_line: FeatureLine,
+    ) -> None:
+        """In-place update of an :class:`IfcAlignment`'s polyline
+        coordinates to match the (possibly mutated) dataclass vertices.
+
+        Phase 2's ``ifcopenshell.api.grading`` has no ``update_feature_line``
+        function — feature lines are authored once and treated as immutable
+        on the IFC side. This helper closes the gap so Phase 5's
+        :func:`bonsai.core.grading.drape_feature_line` can persist the
+        post-drape Z values back to IFC without re-authoring the
+        alignment (which would orphan the old IfcAlignment + leave
+        downstream :class:`IfcRelAggregates` references dangling).
+
+        Locates the alignment's :class:`IfcIndexedPolyCurve` and updates
+        its underlying :class:`IfcCartesianPointList3D.CoordList` to
+        match ``feature_line.vertices`` (with the closed-loop duplicate
+        re-added if ``feature_line.closed``).
+
+        :raises SaikeiGradingError: if the alignment has no polyline
+            representation (created with a different rep type, or never
+            authored).
+        """
+        if feature_line.ifc_alignment_id is None:
+            raise SaikeiGradingError(
+                "feature line has no IFC alignment; call author_feature_line first"
+            )
+        alignment = ifc_file.by_id(feature_line.ifc_alignment_id)
+        polycurve = None
+        representation = alignment.Representation
+        if representation is not None:
+            for shape_rep in representation.Representations or []:
+                for item in shape_rep.Items or []:
+                    if item.is_a("IfcIndexedPolyCurve"):
+                        polycurve = item
+                        break
+                if polycurve is not None:
+                    break
+        if polycurve is None or polycurve.Points is None:
+            raise SaikeiGradingError(
+                f"IfcAlignment #{alignment.id()} has no IfcIndexedPolyCurve "
+                "representation; cannot update vertices in place"
+            )
+
+        coord_list: list[tuple[float, float, float]] = [
+            (float(v[0]), float(v[1]), float(v[2]))
+            for v in feature_line.vertices
+        ]
+        # Phase 2 closed-loop convention: append the start vertex as the
+        # terminating point so the polyline geometry round-trips through
+        # any consumer.
+        if feature_line.closed and (
+            len(coord_list) >= 2 and coord_list[0] != coord_list[-1]
+        ):
+            coord_list.append(coord_list[0])
+        polycurve.Points.CoordList = coord_list
+
+    @classmethod
     def author_criteria_template(
         cls,
         ifc_file: "ifcopenshell.file",

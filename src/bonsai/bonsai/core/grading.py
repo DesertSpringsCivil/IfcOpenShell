@@ -316,3 +316,177 @@ def create_grading_group(
     )
     grading_tool.register(ifc_file, group)
     return group
+
+
+def add_grading_object(
+    ifc_tool: "type[tool.Ifc]",
+    surface_tool: "type[tool.Surface]",
+    grading_tool: "type[tool.Grading]",
+    group_guid: str,
+    feature_line_guid: str,
+    criteria_guid: str,
+) -> Any:
+    """Apply a criteria to a feature line within a group, computing the
+    slope projection and authoring the resulting slope fill.
+
+    Business rules:
+
+    1. An IFC file must be loaded.
+    2. All three GUIDs must resolve via the appropriate registries.
+    3. For ``criteria.target_kind == "surface"``, the criteria's
+       ``target_ref`` (or the group's ``target_surface_guid`` as
+       fallback) must resolve to a :class:`CivilSurface`.
+
+    Sequencing:
+
+    1. Resolve the three entities from registries (lazy-rehydrating
+       on cache miss).
+    2. Resolve the target surface (when applicable).
+    3. :meth:`tool.Grading.compute_grading_object` — runs slope
+       projection.
+    4. :meth:`tool.Grading.assign_criteria` — binds a criteria pset
+       to the group (idempotent on re-bind).
+    5. :meth:`tool.Grading.author_slope_fill` — persists as
+       :class:`IfcEarthworksFill[SLOPEFILL]`.
+    6. Append the new :class:`GradingObject` to ``group.members``.
+
+    :returns: the new :class:`GradingObject` with all step ids stamped.
+    :raises ValueError: on input validation failures.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    feature_line = grading_tool.get_feature_line(ifc_file, feature_line_guid)
+    group = grading_tool.get_group(ifc_file, group_guid)
+    # GradingCriteria isn't directly retrievable via get_*; the registry
+    # caches it but doesn't yet have a get_criteria helper (Phase 5.1
+    # deferral per the v3.2.5 amendments queue). For now, accept that
+    # the caller passes a registered-criteria GUID — the registry
+    # lookup happens via the internal _registry dict.
+    criteria = grading_tool._registry.get(  # type: ignore[attr-defined]
+        (id(ifc_file), criteria_guid)
+    )
+    if criteria is None:
+        raise ValueError(
+            f"no GradingCriteria registered with GUID {criteria_guid!r}; "
+            "call create_grading_criteria first"
+        )
+
+    # Resolve target surface for "surface" kind.
+    target_surface = None
+    if criteria.target_kind == "surface":
+        target_guid = (
+            str(criteria.target_ref)
+            if criteria.target_ref
+            else group.target_surface_guid
+        )
+        if not target_guid:
+            raise ValueError(
+                "criteria.target_kind == 'surface' but no target_ref or "
+                "group.target_surface_guid is set"
+            )
+        target_surface = surface_tool.get(ifc_file, target_guid)
+
+    grading_object = grading_tool.compute_grading_object(
+        feature_line,
+        criteria,
+        target_surface=target_surface,
+        side="auto",
+        name=f"{feature_line.name} @ {criteria.name}",
+    )
+    grading_tool.assign_criteria(ifc_file, group, criteria)
+    grading_tool.author_slope_fill(ifc_file, group, grading_object)
+    group.members.append(grading_object)
+    return grading_object
+
+
+def rebuild_group(
+    ifc_tool: "type[tool.Ifc]",
+    surface_tool: "type[tool.Surface]",
+    grading_tool: "type[tool.Grading]",
+    group_guid: str,
+) -> Any:
+    """Force-rebuild ``group``'s composite proposed surface and register
+    the result in the surface tool's cache.
+
+    Sequencing:
+
+    1. Resolve the group via :meth:`tool.Grading.get_group`.
+    2. :meth:`tool.Grading.rebuild_group_surface` — assembles the
+       composite :class:`CivilSurface` from member slope fills + the
+       interior-fill strategy.
+    3. :meth:`tool.Surface.register` — caches the composite in the
+       surface registry under ``(id(ifc_file), group.output_surface_guid)``
+       so subsequent ``tool.Surface.get`` calls (Phase 6 volume math,
+       UI panel summaries) hit the cache rather than rehydrating.
+
+    :returns: the composite :class:`CivilSurface`.
+    :raises ValueError: on input validation failures.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    group = grading_tool.get_group(ifc_file, group_guid)
+    composite_surface = grading_tool.rebuild_group_surface(ifc_file, group)
+    # Cache contract: tool.Surface.get(file, group.output_surface_guid)
+    # must return the in-memory composite without round-tripping through
+    # IFC rehydration.
+    surface_tool.register(ifc_file, composite_surface)
+    return composite_surface
+
+
+def drape_feature_line(
+    ifc_tool: "type[tool.Ifc]",
+    surface_tool: "type[tool.Surface]",
+    grading_tool: "type[tool.Grading]",
+    feature_line_guid: str,
+    surface_guid: str,
+) -> Any:
+    """Replace each vertex's Z on ``feature_line`` with
+    ``surface.z_at(x, y)``. Persists the change to IFC via
+    :meth:`tool.Grading.update_feature_line_vertices`.
+
+    Common Civil 3D operation: drag a feature line over an existing
+    surface and let the elevations match. Spec §6.2's slope projection
+    starts with a feature line whose Z values are authored — this
+    helper provides one way to author them.
+
+    Business rules:
+
+    1. An IFC file must be loaded.
+    2. Both GUIDs must resolve via the appropriate registries.
+    3. Every feature-line vertex's XY must fall inside the source
+       surface's triangulation; otherwise :meth:`tool.Surface.z_at`
+       returns ``None`` and we raise.
+
+    :returns: the mutated :class:`FeatureLine` with new Z values.
+    :raises ValueError: on input validation failures or out-of-bounds
+        XY (any vertex outside the source surface).
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    feature_line = grading_tool.get_feature_line(ifc_file, feature_line_guid)
+    surface = surface_tool.get(ifc_file, surface_guid)
+
+    new_vertices: list[tuple[float, float, float]] = []
+    for vertex in feature_line.vertices:
+        x, y = float(vertex[0]), float(vertex[1])
+        z = surface_tool.z_at(surface, x, y)
+        if z is None:
+            raise ValueError(
+                f"feature-line vertex ({x:.3f}, {y:.3f}) falls outside "
+                f"surface {surface_guid!r}'s triangulation; cannot drape"
+            )
+        new_vertices.append((x, y, float(z)))
+    feature_line.vertices = new_vertices
+
+    # Persist the new Z values back to the IFC alignment. Without this
+    # step, the in-memory FeatureLine and the IFC entity diverge —
+    # subsequent slope projections use the new Z's, but the IFC file
+    # still has the old polyline.
+    grading_tool.update_feature_line_vertices(ifc_file, feature_line)
+    return feature_line

@@ -526,6 +526,7 @@ class Georeference:
 class Grading:
     # Saikei grading tool — Phase 5. Slope projection + IFC authoring + Blender linkage.
     def author_feature_line(cls, ifc_file, feature_line, site=None): pass
+    def update_feature_line_vertices(cls, ifc_file, feature_line): pass
     def author_criteria_template(cls, ifc_file, criteria): pass
     def author_group(cls, ifc_file, group, target_surface=None, interior_fill_source=None, site=None, author=None): pass
     def assign_criteria(cls, ifc_file, group, criteria, target_reference=None): pass

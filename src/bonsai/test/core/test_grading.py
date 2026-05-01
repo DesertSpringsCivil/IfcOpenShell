@@ -281,7 +281,7 @@ class TestCreateGradingGroup:
                 interior_fill_source_guid=None,
             )
 
-    def test_multi_site_warning_logged(self, ifc, surface, grading, caplog):
+    def test_multi_site_warning_logged_create_group(self, ifc, surface, grading, caplog):
         """Multi-site files emit a WARNING log (per spec §4.3 footgun
         guard, mirrored from core.surface)."""
 
@@ -310,3 +310,52 @@ class TestCreateGradingGroup:
         assert any(
             "multi-site" in r.message.lower() for r in caplog.records
         ), f"expected multi-site warning, got: {[r.message for r in caplog.records]}"
+
+
+# ---------------------------------------------------------------------------
+# add_grading_object
+# ---------------------------------------------------------------------------
+
+
+class TestAddGradingObject:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, surface, grading):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.add_grading_object(
+                ifc,
+                surface,
+                grading,
+                group_guid="g",
+                feature_line_guid="fl",
+                criteria_guid="c",
+            )
+
+
+# ---------------------------------------------------------------------------
+# rebuild_group
+# ---------------------------------------------------------------------------
+
+
+class TestRebuildGroup:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, surface, grading):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.rebuild_group(ifc, surface, grading, group_guid="g")
+
+
+# ---------------------------------------------------------------------------
+# drape_feature_line
+# ---------------------------------------------------------------------------
+
+
+class TestDrapeFeatureLine:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, surface, grading):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.drape_feature_line(
+                ifc,
+                surface,
+                grading,
+                feature_line_guid="fl",
+                surface_guid="s",
+            )

@@ -884,6 +884,82 @@ class TestAuthorFeatureLine:
             tool_grading.Grading.author_feature_line(ifc_file, feature_line)
 
 
+class TestUpdateFeatureLineVertices:
+    """Tests for :meth:`Grading.update_feature_line_vertices` — in-place
+    polyline update that closes the Phase 2 API gap (no
+    update_feature_line)."""
+
+    def test_updates_coord_list_in_place(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            name="dragme",
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        original_alignment_id = feature_line.ifc_alignment_id
+
+        # Drape the Z's (simulate post-drape mutation).
+        feature_line.vertices = [(0.0, 0.0, 95.5), (10.0, 0.0, 96.0)]
+        tool_grading.Grading.update_feature_line_vertices(ifc_file, feature_line)
+
+        # Same alignment entity (in-place update, no orphan).
+        assert feature_line.ifc_alignment_id == original_alignment_id
+        # The polycurve now reports the new Z's.
+        alignment = ifc_file.by_id(feature_line.ifc_alignment_id)
+        polycurve = next(
+            item
+            for shape_rep in alignment.Representation.Representations
+            for item in shape_rep.Items
+            if item.is_a("IfcIndexedPolyCurve")
+        )
+        coords = polycurve.Points.CoordList
+        assert coords[0][2] == pytest.approx(95.5)
+        assert coords[1][2] == pytest.approx(96.0)
+
+    def test_closed_loop_appends_terminating_vertex(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (10.0, 0.0, 100.0),
+                (10.0, 10.0, 100.0),
+                (0.0, 10.0, 100.0),
+            ],
+            closed=True,
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        # Mutate Z values (no XY change).
+        new_vertices = [(v[0], v[1], v[2] + 5.0) for v in feature_line.vertices]
+        feature_line.vertices = new_vertices
+        tool_grading.Grading.update_feature_line_vertices(ifc_file, feature_line)
+
+        alignment = ifc_file.by_id(feature_line.ifc_alignment_id)
+        polycurve = next(
+            item
+            for shape_rep in alignment.Representation.Representations
+            for item in shape_rep.Items
+            if item.is_a("IfcIndexedPolyCurve")
+        )
+        coords = polycurve.Points.CoordList
+        # 4 user vertices + 1 closing duplicate = 5 coords.
+        assert len(coords) == 5
+        assert coords[0] == coords[-1]
+        # Z values updated.
+        for c in coords[:4]:
+            assert c[2] == pytest.approx(105.0)
+
+    def test_no_alignment_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
+        )
+        # Never authored — ifc_alignment_id is None.
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="no IFC alignment"
+        ):
+            tool_grading.Grading.update_feature_line_vertices(ifc_file, feature_line)
+
+
 class TestAuthorCriteriaTemplate:
     """Tests for :meth:`Grading.author_criteria_template`."""
 
