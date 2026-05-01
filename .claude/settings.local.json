@@ -76,7 +76,10 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(powershell.exe -Command \"Remove-Item -Force ''C:\\\\GitHub\\\\IfcOpenShell-saikei-dev\\\\.git\\\\index.lock'' -ErrorAction SilentlyContinue; Test-Path ''C:\\\\GitHub\\\\IfcOpenShell-saikei-dev\\\\.git\\\\index.lock''\")",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "WebFetch(domain:api.bsdd.buildingsmart.org)",
+      "WebFetch(domain:ifc43-docs.standards.buildingsmart.org)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }
