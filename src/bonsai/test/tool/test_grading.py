@@ -1148,6 +1148,83 @@ class TestFeatureLineDrapeOperator(NewIfc4X3):
             )
 
 
+class TestFeatureLineEditElevationsOperator(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_feature_line_edit_elevations` headless
+    contract. The G-key viewport modal is Phase 5.1; commit 12 ships
+    the JSON-payload data path."""
+
+    def _create_feature_line(self, tmp_path) -> str:
+        path = tmp_path / "fl.csv"
+        path.write_text(
+            "0,0,100\n10,0,100\n10,10,100\n0,10,100\n"
+        )
+        bpy.ops.civil.feature_line_create(
+            "EXEC_DEFAULT", csv_filepath=str(path), closed=True
+        )
+        ifc_file = tool.Ifc.get()
+        return ifc_file.by_type("IfcAlignment")[0].GlobalId
+
+    def test_headless_apply_edits(self, tmp_path) -> None:
+        guid = self._create_feature_line(tmp_path)
+        result = bpy.ops.civil.feature_line_edit_elevations(
+            "EXEC_DEFAULT",
+            feature_line_guid=guid,
+            edits_json="[[0, 99.5], [2, 100.5]]",
+        )
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        alignment = next(
+            a for a in ifc_file.by_type("IfcAlignment") if a.GlobalId == guid
+        )
+        polycurve = next(
+            item
+            for shape_rep in alignment.Representation.Representations
+            for item in shape_rep.Items
+            if item.is_a("IfcIndexedPolyCurve")
+        )
+        coords = polycurve.Points.CoordList
+        assert coords[0][2] == pytest.approx(99.5)
+        assert coords[2][2] == pytest.approx(100.5)
+        # Untouched vertices stay at 100.
+        assert coords[1][2] == pytest.approx(100.0)
+        assert coords[3][2] == pytest.approx(100.0)
+
+    def test_missing_guid_raises(self) -> None:
+        with pytest.raises(RuntimeError, match="required"):
+            bpy.ops.civil.feature_line_edit_elevations(
+                "EXEC_DEFAULT", feature_line_guid="", edits_json="[]"
+            )
+
+    def test_invalid_json_raises(self, tmp_path) -> None:
+        guid = self._create_feature_line(tmp_path)
+        with pytest.raises(RuntimeError, match="could not parse"):
+            bpy.ops.civil.feature_line_edit_elevations(
+                "EXEC_DEFAULT",
+                feature_line_guid=guid,
+                edits_json="not json",
+            )
+
+    def test_out_of_range_index_raises(self, tmp_path) -> None:
+        guid = self._create_feature_line(tmp_path)
+        with pytest.raises(RuntimeError, match="out of range"):
+            bpy.ops.civil.feature_line_edit_elevations(
+                "EXEC_DEFAULT",
+                feature_line_guid=guid,
+                edits_json="[[99, 50.0]]",
+            )
+
+    def test_empty_edits_is_noop(self, tmp_path) -> None:
+        """An empty edits list should succeed without changing anything."""
+        guid = self._create_feature_line(tmp_path)
+        result = bpy.ops.civil.feature_line_edit_elevations(
+            "EXEC_DEFAULT",
+            feature_line_guid=guid,
+            edits_json="[]",
+        )
+        assert result == {"FINISHED"}
+
+
 class TestAuthorCriteriaTemplate:
     """Tests for :meth:`Grading.author_criteria_template`."""
 

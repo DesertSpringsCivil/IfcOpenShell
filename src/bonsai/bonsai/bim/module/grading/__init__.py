@@ -50,6 +50,7 @@ classes: tuple[type, ...] = (
     prop.CivilGradingProperties,
     operator.CIVIL_OT_feature_line_create,
     operator.CIVIL_OT_feature_line_drape,
+    operator.CIVIL_OT_feature_line_edit_elevations,
 )
 
 

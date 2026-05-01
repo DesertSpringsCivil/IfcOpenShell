@@ -41,6 +41,8 @@ boilerplate.
     relying on the return set.
 """
 
+import json
+
 import bpy
 from bpy.props import BoolProperty, StringProperty
 from bpy.types import Operator
@@ -236,5 +238,153 @@ class CIVIL_OT_feature_line_drape(Operator, tool.Ifc.Operator):
             {"INFO"},
             f"Draped {feature_line.name!r} to surface "
             f"({len(feature_line.vertices)} vertices)",
+        )
+        return {"FINISHED"}
+
+
+class CIVIL_OT_feature_line_edit_elevations(Operator, tool.Ifc.Operator):
+    """Apply per-vertex Z edits to a feature line.
+
+    Phase 5 MVP ships the headless contract; the G-key viewport-grab
+    modal flow (mirror of the alignment PI edit mode at
+    ``tool/alignment.py``) is deferred to Phase 5.1 — a faithful G-key
+    modal needs ~300 lines of event-dispatch code that's better
+    landed alongside its sibling viewport pickers (feature-line draw,
+    boundary draw) in one cohesive Phase 5.1 commit.
+
+    The headless contract per spec §8.2: accept a JSON-encoded payload
+    of ``[(vertex_index, new_z), ...]`` pairs; apply each in order to
+    the feature line; persist via
+    :meth:`tool.Grading.update_feature_line_vertices`. UI panel
+    (commit 15) provides a popup dialog that builds the JSON payload
+    from a UIList of editable vertex rows.
+
+    Headless usage::
+
+        bpy.ops.civil.feature_line_edit_elevations(
+            "EXEC_DEFAULT",
+            feature_line_guid="...",
+            edits_json='[[0, 99.5], [2, 100.5]]',
+        )
+    """
+
+    bl_idname = "civil.feature_line_edit_elevations"
+    bl_label = "Edit Feature-Line Elevations"
+    bl_description = (
+        "Apply per-vertex Z edits to a feature line. Phase 5 MVP "
+        "headless contract: pass a JSON-encoded list of "
+        "[vertex_index, new_z] pairs. The G-key viewport-grab modal "
+        "flow lands in Phase 5.1."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    feature_line_guid: StringProperty(
+        name="Feature Line GUID",
+        description="GlobalId of the feature line to edit",
+    )
+    edits_json: StringProperty(
+        name="Edits (JSON)",
+        description="JSON-encoded list of [vertex_index, new_z] pairs, "
+        "e.g. '[[0, 99.5], [2, 100.0]]'. Empty defaults to '[]' (no-op).",
+        default="[]",
+    )
+
+    def _execute(self, context):
+        if not self.feature_line_guid:
+            self.report(
+                {"ERROR"}, "feature_line_guid is required"
+            )
+            return {"CANCELLED"}
+
+        try:
+            edits = json.loads(self.edits_json)
+        except json.JSONDecodeError as exc:
+            self.report(
+                {"ERROR"},
+                f"could not parse edits_json: {exc}",
+            )
+            return {"CANCELLED"}
+
+        if not isinstance(edits, list):
+            self.report(
+                {"ERROR"},
+                f"edits_json must decode to a list of [index, z] pairs; "
+                f"got {type(edits).__name__}",
+            )
+            return {"CANCELLED"}
+
+        ifc_file = tool.Ifc.get()
+        try:
+            feature_line = tool.Grading.get_feature_line(
+                ifc_file, self.feature_line_guid
+            )
+        except tool_grading.SaikeiGradingError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        # Validate every edit before mutating, so a bad edit at index 5
+        # of 10 doesn't leave indices 0–4 mutated and 5–9 untouched.
+        n_vertices = len(feature_line.vertices)
+        for entry in edits:
+            if (
+                not isinstance(entry, (list, tuple))
+                or len(entry) != 2
+                or not isinstance(entry[0], int)
+            ):
+                self.report(
+                    {"ERROR"},
+                    f"each edit must be [vertex_index, new_z]; got {entry!r}",
+                )
+                return {"CANCELLED"}
+            vertex_index = int(entry[0])
+            if not (0 <= vertex_index < n_vertices):
+                self.report(
+                    {"ERROR"},
+                    f"vertex_index {vertex_index} out of range "
+                    f"[0, {n_vertices})",
+                )
+                return {"CANCELLED"}
+
+        # All edits validated — apply them.
+        new_vertices = list(feature_line.vertices)
+        for entry in edits:
+            vertex_index = int(entry[0])
+            new_z = float(entry[1])
+            x, y, _ = new_vertices[vertex_index]
+            new_vertices[vertex_index] = (x, y, new_z)
+        feature_line.vertices = new_vertices
+
+        try:
+            tool.Grading.update_feature_line_vertices(ifc_file, feature_line)
+        except tool_grading.SaikeiGradingError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        # Refresh the Blender curve so the viewport reflects the edits.
+        try:
+            obj = tool.Ifc.get_object(
+                ifc_file.by_id(feature_line.ifc_alignment_id)
+            )
+            if obj is not None and obj.data is not None and obj.data.splines:
+                spline = obj.data.splines[0]
+                for i, (x, y, z) in enumerate(feature_line.vertices):
+                    if i < len(spline.points):
+                        spline.points[i].co = (
+                            float(x),
+                            float(y),
+                            float(z),
+                            1.0,
+                        )
+        except Exception as exc:
+            self.report(
+                {"WARNING"},
+                f"feature line edited in IFC but Blender curve refresh "
+                f"failed: {exc}",
+            )
+
+        self.report(
+            {"INFO"},
+            f"Applied {len(edits)} elevation edit(s) to "
+            f"{feature_line.name!r}",
         )
         return {"FINISHED"}
