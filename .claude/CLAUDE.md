@@ -100,6 +100,10 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_surface.py \
   -o "addopts=" -p pytest-blender -v \
   --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
 
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_grading.py \
+  -o "addopts=" -p pytest-blender -v \
+  --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
+
 # Operator tests — requires Blender headless (pytest-blender)
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/bim/module/alignment/test_alignment_operators.py \
   -o "addopts=" -p pytest-blender -m "alignment" -v \
@@ -111,12 +115,14 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_alignment.py te
   --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
 ```
 
-**Phase 4 surface module note:** the tool tests at `test/tool/test_surface.py`
-include both the pure-math tool tests and operator-layer tests
-(via `NewIfc4X3` base class) since the `test/bim/module/surface/` directory
-is currently blocked by an env-level pytest-bdd / parse-type compat issue
-in `test/bim/conftest.py`. Move the operator tests back to
-`test/bim/module/surface/` once that's fixed upstream.
+**Phase 4 / Phase 5 module note:** the tool tests at
+`test/tool/test_surface.py` and `test/tool/test_grading.py` include
+both the pure-math tool tests and operator-layer tests (via
+`NewIfc4X3` base class) since the `test/bim/module/{surface,grading}/`
+directories are currently blocked by an env-level pytest-bdd /
+parse-type compat issue in `test/bim/conftest.py`. Move the
+operator tests back to `test/bim/module/{surface,grading}/` once
+that's fixed upstream.
 
 **Prerequisites:** `pytest-blender` and `pytest-bdd` must be installed in Blender's
 extensions site-packages (`%APPDATA%\Blender Foundation\Blender\5.0\extensions\.local\lib\python3.11\site-packages\`).
@@ -131,7 +137,7 @@ extensions site-packages (`%APPDATA%\Blender Foundation\Blender\5.0\extensions\.
 - PEP 8 naming with long descriptive variable names
 - Blender 5.0+, Python 3.11
 
-## Current State (April 2026)
+## Current State (May 2026)
 
 **Done:**
 - Horizontal alignment (PI method), segment visualization, PI picker, PI edit
@@ -148,6 +154,64 @@ extensions site-packages (`%APPDATA%\Blender Foundation\Blender\5.0\extensions\.
   recovery from IfcAnnotation on rehydration scoped via
   IfcRelAssignsToProduct). 175 surface tests (155 tool + 20 core) +
   bSI validator integration (single + multi-surface) green.
+- **Phase 5 — Bonsai grading module:** `tool.Grading` (FeatureLine /
+  GradingCriteria / GradingObject / GradingGroup dataclasses, slope-
+  projection algorithm with marching-loop daylight detection on
+  surface targets and closed-form for elevation/distance, four
+  interior-fill strategies — none / flat / interpolate_from_boundary
+  / from_surface, registry with `is_feature_line_alignment` /
+  `iter_registered` public helpers, IFC authoring via
+  `ifcopenshell.api.grading`, Blender curve linkage via
+  `create_blender_curve` / `update_blender_curve`), `core.grading`
+  orchestration (`create_feature_line`, `create_grading_criteria`,
+  `create_grading_group`, `add_grading_object`, `rebuild_group`,
+  `drape_feature_line`), UI (seven operators
+  `CIVIL_OT_{feature_line_create,_drape,_edit_elevations,
+  grading_create_criteria,_create_group,_add_object,_rebuild_group}`,
+  panel `BIM_PT_tab_grading` with five sub-panels, four UILists
+  including the feature-line picker, `GradingDecorator` GPU drawing
+  for feature-line and daylight-line polylines, `GradingData` cache
+  syncing groups + feature lines from IFC and criteria from
+  registry). 178 grading tests (160 tool + 17 core + 3 bSI
+  acceptance) + Phase 5 bSI validator integration test (full
+  pad-grading scenario through `bpy.ops` chain) green.
 
 **Not done:** Vertical alignment, corridor generation, cross-sections,
-earthwork (volumes), drainage.
+earthwork (volumes — Phase 6 next), drainage.
+
+## Phase 5 Audit (May 2026)
+
+After commit 15 landed, two cold-review passes were run against the
+SURFACES_GRADING_EARTHWORKS reference doc (Professor Claude / Saikei-
+internal). Audit fixes applied as commits 16's preamble:
+
+- **TIN RepresentationIdentifier → 'Body'** (was 'SurfaceModel'). Phase
+  3 was already correct; Phase 1 brought into line. Drops the
+  redundant `SurfaceModel` subcontext.
+- **OmniClass classification** added to `create_terrain` (`22-07 31 13`
+  Site Preparation) and `create_proposed_surface` (`22-07 31 23`
+  Fill). Both overridable. Closes Principle #8 ("never rely on entity
+  type + name alone").
+- **`api/earthwork/link_fill_to_cut`** — new helper authoring
+  `IfcRelFillsElement`. Closes the cut→fill half of the voiding
+  chain (was a Phase 6 prereq).
+- **`tool.Grading.update_blender_curve`** — extracted from operator-
+  layer spline mutation. 3-layer hygiene.
+- **Schema + algorithm regression tests** — pinned `IfcEarthworksCutTypeEnum`
+  spellings against the canonical IFC 4.3 ADD2 schema header, and
+  verified non-monotonic-terrain slope projection returns the
+  geometrically-correct first daylight (the original audit hypothesis
+  was wrong; algorithm was already correct).
+- **Georef delegation** documented in all three IFC API module
+  docstrings (`api.surface`, `api.grading`, `api.earthwork`):
+  caller's responsibility via `IfcMapConversion` (Bonsai's
+  `tool.Georeference`).
+
+**Remaining audit items** (deferred to Phase 6):
+- Boundary-polygon round-trip on rehydration (currently falls back to
+  convex hull). `Pset_SaikeiGradingSurface.BoundaryPolygonReference`
+  slot exists but no read path.
+- TIN-minus-TIN surface-difference algorithm (Phase 3 API takes a
+  pre-computed solid; the differencing math is the Phase 6 task).
+- `LooseVolume = UndisturbedVolume × SwellFactor` automatic
+  computation (Phase 6 caller responsibility).

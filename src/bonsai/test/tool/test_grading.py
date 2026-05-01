@@ -2929,3 +2929,252 @@ class TestAddGradingObjectRegistersGradingObject(NewIfc4X3):
         # The whole point: registry contains the GradingObject.
         key = (id(ifc_file), grading_object.guid)
         assert tool_grading.Grading._registry[key] is grading_object
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 acceptance — bSI validator integration
+# ---------------------------------------------------------------------------
+
+
+class TestGradingBSIIntegration(NewIfc4X3):
+    """End-to-end integration test mirroring the Phase 5 'done'
+    criterion (parallel to :class:`TestSurfaceBSIIntegration` for
+    Phase 4).
+
+    Drives the full operator chain (existing-ground create → feature
+    line create → criteria create → group create → add object →
+    rebuild group) through ``bpy.ops``, writes the result to disk,
+    reopens via :func:`ifcopenshell.open`, and runs
+    :func:`ifcopenshell.validate.validate` to assert no schema
+    warnings. When this passes, end users can author a complete
+    grading scenario in Bonsai and round-trip the result through IFC
+    with a clean validator report.
+    """
+
+    @staticmethod
+    def _validate_clean(ifc_path) -> None:
+        """Re-open ``ifc_path`` with ifcopenshell and assert
+        ``ifcopenshell.validate.validate`` reports no warnings."""
+        import logging
+
+        import ifcopenshell.validate
+
+        reopened = ifcopenshell.open(str(ifc_path))
+
+        records: list[logging.LogRecord] = []
+
+        class _CollectingHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.Logger("phase5-acceptance-validate")
+        logger.addHandler(_CollectingHandler(level=logging.DEBUG))
+        ifcopenshell.validate.validate(reopened, logger)
+
+        errors = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+        assert errors == [], f"ifcopenshell.validate() reported: {errors}"
+        return reopened
+
+    def _author_full_scenario(
+        self, tmp_path, *, interior_fill: str = "interpolate_from_boundary"
+    ) -> tuple[str, str, str]:
+        """Build a complete Phase 5 grading scenario via ``bpy.ops``.
+
+        Same shape as ``TestGradingAddObjectAndRebuildOperators._author_pad_grading_setup``
+        but parameterizes interior_fill so callers can exercise the
+        flat / interpolate_from_boundary / from_surface branches in
+        the rebuild path without duplicating boilerplate.
+
+        :returns: ``(group_guid, feature_line_guid, criteria_guid)``.
+        """
+        eg_path = tmp_path / "eg.csv"
+        eg_path.write_text(
+            "-50,-50,98\n50,-50,98\n50,50,98\n-50,50,98\n"
+        )
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = (
+            "bSI Validation EG"
+        )
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(eg_path)
+        )
+        terrain_guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        fl_path = tmp_path / "fl.csv"
+        fl_path.write_text("0,0,100\n10,0,100\n10,10,100\n0,10,100\n")
+        bpy.ops.civil.feature_line_create(
+            "EXEC_DEFAULT", csv_filepath=str(fl_path), closed=True
+        )
+        ifc_file = tool.Ifc.get()
+        fl_guid = next(
+            a.GlobalId
+            for a in ifc_file.by_type("IfcAlignment")
+            if tool_grading.Grading.is_feature_line_alignment(a)
+        )
+
+        bpy.ops.civil.grading_create_criteria(
+            "EXEC_DEFAULT",
+            name="3:1 fill / 2:1 cut",
+            target_kind="surface",
+            target_ref=terrain_guid,
+            cut_slope=2.0,
+            fill_slope=3.0,
+        )
+        criteria_guid = next(
+            guid
+            for (_file_id, guid), entity in tool_grading.Grading._registry.items()
+            if isinstance(entity, tool_grading.GradingCriteria)
+        )
+
+        bpy.ops.civil.grading_create_group(
+            "EXEC_DEFAULT",
+            name="bSI Validation Pad",
+            target_surface_guid=terrain_guid,
+            interior_fill=interior_fill,
+        )
+        ifc_file = tool.Ifc.get()
+        group_guid = next(
+            g.GlobalId
+            for g in ifc_file.by_type("IfcGroup")
+            if getattr(g, "ObjectType", None) == "GradingGroup"
+        )
+
+        return group_guid, fl_guid, criteria_guid
+
+    def test_full_workflow_round_trip_and_validate(self, tmp_path) -> None:
+        """Author a complete pad-grading scenario, write to disk, and
+        confirm ``ifcopenshell.validate`` reports no warnings.
+
+        Verifies the IFC structure round-tripped (terrain, feature
+        line, group, slope fill, composite subgrade with TIN body)
+        and the schema validator is clean."""
+        group_guid, fl_guid, criteria_guid = self._author_full_scenario(
+            tmp_path, interior_fill="interpolate_from_boundary"
+        )
+
+        bpy.ops.civil.grading_add_object(
+            "EXEC_DEFAULT",
+            group_guid=group_guid,
+            feature_line_guid=fl_guid,
+            criteria_guid=criteria_guid,
+        )
+        bpy.ops.civil.grading_rebuild_group(
+            "EXEC_DEFAULT", group_guid=group_guid
+        )
+
+        ifc_path = tmp_path / "phase5_acceptance.ifc"
+        tool.Ifc.get().write(str(ifc_path))
+        reopened = self._validate_clean(ifc_path)
+
+        # Round-trip structure assertions.
+        terrains = [
+            t
+            for t in reopened.by_type("IfcGeographicElement")
+            if t.PredefinedType == "TERRAIN"
+        ]
+        assert len(terrains) == 1
+        assert terrains[0].Name == "bSI Validation EG"
+
+        groups = [
+            g
+            for g in reopened.by_type("IfcGroup")
+            if getattr(g, "ObjectType", None) == "GradingGroup"
+        ]
+        assert len(groups) == 1
+        assert groups[0].Name == "bSI Validation Pad"
+
+        feature_lines = [
+            a
+            for a in reopened.by_type("IfcAlignment")
+            if any(
+                rel.is_a("IfcRelDefinesByProperties")
+                and rel.RelatingPropertyDefinition.Name
+                == "Pset_SaikeiFeatureLineCommon"
+                for rel in (a.IsDefinedBy or [])
+            )
+        ]
+        assert len(feature_lines) == 1
+
+        slope_fills = [
+            f
+            for f in reopened.by_type("IfcEarthworksFill")
+            if f.PredefinedType == "SLOPEFILL"
+        ]
+        assert len(slope_fills) == 1
+
+        # With interior_fill='interpolate_from_boundary' there are two
+        # SUBGRADE fills: the per-group composite (named after the
+        # group, no suffix) and a separate interior-fill SUBGRADE
+        # (suffixed " interior"). Both must round-trip; the composite
+        # must have a Body TIN.
+        subgrades = [
+            f
+            for f in reopened.by_type("IfcEarthworksFill")
+            if f.PredefinedType == "SUBGRADE"
+        ]
+        assert len(subgrades) == 2
+        composite = next(
+            f for f in subgrades if f.Name == "bSI Validation Pad"
+        )
+        assert composite.Representation is not None
+        assert any(
+            r.RepresentationIdentifier == "Body"
+            for r in composite.Representation.Representations
+        )
+
+    def test_flat_interior_fill_validates_clean(self, tmp_path) -> None:
+        """Same end-to-end exercise but with ``interior_fill='flat'``.
+        Triangulation and IFC tree differ between strategies; verify
+        both produce schema-clean files."""
+        group_guid, fl_guid, criteria_guid = self._author_full_scenario(
+            tmp_path, interior_fill="flat"
+        )
+        bpy.ops.civil.grading_add_object(
+            "EXEC_DEFAULT",
+            group_guid=group_guid,
+            feature_line_guid=fl_guid,
+            criteria_guid=criteria_guid,
+        )
+        bpy.ops.civil.grading_rebuild_group(
+            "EXEC_DEFAULT", group_guid=group_guid
+        )
+
+        ifc_path = tmp_path / "phase5_flat.ifc"
+        tool.Ifc.get().write(str(ifc_path))
+        self._validate_clean(ifc_path)
+
+    def test_classification_round_trips_on_authored_surfaces(
+        self, tmp_path
+    ) -> None:
+        """Pin the OmniClass classification added in the audit-fix
+        sprint: existing terrain (22-07 31 13 Site Preparation) and
+        composite subgrade (22-07 31 23 Fill from
+        create_grading_group) both round-trip with
+        IfcRelAssociatesClassification entries."""
+        group_guid, fl_guid, criteria_guid = self._author_full_scenario(
+            tmp_path, interior_fill="interpolate_from_boundary"
+        )
+        bpy.ops.civil.grading_add_object(
+            "EXEC_DEFAULT",
+            group_guid=group_guid,
+            feature_line_guid=fl_guid,
+            criteria_guid=criteria_guid,
+        )
+        bpy.ops.civil.grading_rebuild_group(
+            "EXEC_DEFAULT", group_guid=group_guid
+        )
+
+        ifc_path = tmp_path / "phase5_classification.ifc"
+        tool.Ifc.get().write(str(ifc_path))
+        reopened = ifcopenshell.open(str(ifc_path))
+
+        # Every classification rel's references should be findable.
+        rels = reopened.by_type("IfcRelAssociatesClassification")
+        codes = {
+            r.RelatingClassification.Identification
+            for r in rels
+            if r.RelatingClassification is not None
+        }
+        # Terrain classification: 22-07 31 13 (Site Preparation).
+        assert "22-07 31 13" in codes
+        # Composite subgrade + slope fill share Fill code 22-07 31 23.
+        assert "22-07 31 23" in codes
