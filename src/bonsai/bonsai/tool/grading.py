@@ -50,6 +50,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Optional, Union
 
+import ifcopenshell.api.grading
 import ifcopenshell.guid
 import numpy as np
 import shapely
@@ -850,3 +851,281 @@ class Grading:
             triangles.append((i, n + i + 1, n + i))
         triangles_array = np.asarray(triangles, dtype=int)
         return points_array, triangles_array
+
+    # ------------------------------------------------------------------
+    # IFC authoring wrappers (delegate to ifcopenshell.api.grading)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def author_feature_line(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        feature_line: FeatureLine,
+        site: Optional["ifcopenshell.entity_instance"] = None,
+    ) -> "ifcopenshell.entity_instance":
+        """Persist ``feature_line`` as :class:`IfcAlignment` with an
+        :class:`IfcIndexedPolyCurve` representation, via Phase 2's
+        :func:`ifcopenshell.api.grading.create_feature_line`.
+
+        Mirrors :meth:`bonsai.tool.surface.Surface.author_ifc_host`: after
+        the API mints a fresh GlobalId, this wrapper rewrites it to match
+        :attr:`FeatureLine.guid` so the dataclass and IFC entity carry
+        the same identifier. The step id is stamped on
+        :attr:`FeatureLine.ifc_alignment_id`.
+
+        :raises SaikeiGradingError: on ``len(vertices) < 2`` or
+            wrapped Phase 2 API errors.
+        """
+        if len(feature_line.vertices) < 2:
+            raise SaikeiGradingError(
+                f"feature line needs ≥ 2 vertices to author; "
+                f"got {len(feature_line.vertices)}"
+            )
+        try:
+            alignment = ifcopenshell.api.grading.create_feature_line(
+                ifc_file,
+                name=feature_line.name,
+                vertices=feature_line.vertices,
+                closed=feature_line.closed,
+                grading_group_guid=feature_line.grading_group,
+                site=site,
+            )
+        except Exception as exc:
+            raise SaikeiGradingError(
+                f"Phase 2 create_feature_line failed: {exc}"
+            ) from exc
+
+        alignment.GlobalId = feature_line.guid
+        feature_line.ifc_alignment_id = alignment.id()
+        return alignment
+
+    @classmethod
+    def author_criteria_template(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        criteria: GradingCriteria,
+    ) -> "ifcopenshell.entity_instance":
+        """Persist (or return the existing) :class:`IfcPropertySetTemplate`
+        for ``Pset_SaikeiGradingCriteria`` at project scope.
+
+        The Phase 2 API ``create_grading_criteria_template`` is a
+        singleton-by-shape — calling it repeatedly returns the same
+        template entity rather than creating duplicates, so the wrapper
+        is idempotent. The :class:`GradingCriteria` dataclass tracks the
+        template's step id but not its GlobalId (the singleton's
+        identity is structural, not GUID-based).
+        """
+        try:
+            template = ifcopenshell.api.grading.create_grading_criteria_template(
+                ifc_file
+            )
+        except Exception as exc:
+            raise SaikeiGradingError(
+                f"Phase 2 create_grading_criteria_template failed: {exc}"
+            ) from exc
+        criteria.ifc_template_id = template.id()
+        return template
+
+    @classmethod
+    def author_group(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        group: GradingGroup,
+        target_surface: Optional["ifcopenshell.entity_instance"] = None,
+        interior_fill_source: Optional[
+            "ifcopenshell.entity_instance"
+        ] = None,
+        site: Optional["ifcopenshell.entity_instance"] = None,
+        author: Optional[str] = None,
+    ) -> "ifcopenshell.entity_instance":
+        """Persist ``group`` as :class:`IfcGroup[GradingGroup]` plus the
+        per-group composite :class:`IfcEarthworksFill[SUBGRADE]`, via
+        Phase 2's :func:`ifcopenshell.api.grading.create_grading_group`.
+
+        Stamps the IfcGroup's step id on :attr:`GradingGroup.ifc_group_id`,
+        the composite-fill's step id on
+        :attr:`GradingGroup.ifc_composite_fill_id`, and rewrites the
+        group's GlobalId to match :attr:`GradingGroup.guid`.
+
+        :returns: the :class:`IfcGroup[GradingGroup]` entity. The composite
+            :class:`IfcEarthworksFill` is reachable via the named tuple
+            on the API result; callers that need it directly should
+            pull it via ``ifc_file.by_id(group.ifc_composite_fill_id)``.
+        """
+        try:
+            authoring = ifcopenshell.api.grading.create_grading_group(
+                ifc_file,
+                name=group.name,
+                target_surface=target_surface,
+                interior_fill=group.interior_fill,
+                interior_fill_source=interior_fill_source,
+                site=site,
+                author=author,
+            )
+        except Exception as exc:
+            raise SaikeiGradingError(
+                f"Phase 2 create_grading_group failed: {exc}"
+            ) from exc
+
+        authoring.group.GlobalId = group.guid
+        group.ifc_group_id = authoring.group.id()
+        group.ifc_composite_fill_id = authoring.composite_fill.id()
+        return authoring.group
+
+    @classmethod
+    def assign_criteria(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        group: GradingGroup,
+        criteria: GradingCriteria,
+        target_reference: Optional[str] = None,
+    ) -> "ifcopenshell.entity_instance":
+        """Bind ``criteria`` to ``group`` via the Phase 2
+        :func:`ifcopenshell.api.grading.assign_grading_criteria`. The
+        criteria template is auto-authored if not already present in the
+        file (singleton-by-shape).
+
+        Re-assigning the same criteria to the same group updates the
+        existing pset's values in place rather than duplicating — the
+        Phase 2 API guarantees idempotence.
+
+        :param target_reference: GUID-or-numeric override for
+            ``Pset_SaikeiGradingCriteria.TargetReference``. Defaults to
+            ``str(criteria.target_ref)`` since the underlying API stores
+            it as a string regardless of ``target_kind``.
+        """
+        if group.ifc_group_id is None:
+            raise SaikeiGradingError(
+                "group has no IFC entity; call author_group first"
+            )
+        if criteria.ifc_template_id is None:
+            cls.author_criteria_template(ifc_file, criteria)
+        ifc_group = ifc_file.by_id(group.ifc_group_id)
+        ifc_template = ifc_file.by_id(criteria.ifc_template_id)  # type: ignore[arg-type]
+        try:
+            pset = ifcopenshell.api.grading.assign_grading_criteria(
+                ifc_file,
+                ifc_group,
+                ifc_template,
+                target_kind=criteria.target_kind,
+                cut_slope=criteria.cut_slope,
+                fill_slope=criteria.fill_slope,
+                target_reference=(
+                    target_reference
+                    if target_reference is not None
+                    else str(criteria.target_ref)
+                ),
+                max_distance=criteria.max_distance,
+                retaining_wall_at_limit=criteria.retaining_wall_at_limit,
+                name=criteria.name or None,
+            )
+        except Exception as exc:
+            raise SaikeiGradingError(
+                f"Phase 2 assign_grading_criteria failed: {exc}"
+            ) from exc
+        return pset
+
+    @classmethod
+    def author_slope_fill(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        group: GradingGroup,
+        grading_object: GradingObject,
+    ) -> "ifcopenshell.entity_instance":
+        """Persist ``grading_object`` as
+        :class:`IfcEarthworksFill[SLOPEFILL]` under ``group``, via Phase 2's
+        :func:`ifcopenshell.api.grading.add_slope_fill_to_group`.
+
+        Stamps the slope-fill step id on
+        :attr:`GradingObject.ifc_slope_fill_id` and rewrites the
+        slope-fill's GlobalId to match :attr:`GradingObject.guid`.
+        """
+        if group.ifc_group_id is None or group.ifc_composite_fill_id is None:
+            raise SaikeiGradingError(
+                "group has no IFC entities; call author_group first"
+            )
+        if grading_object.projection_points.shape[0] == 0:
+            raise SaikeiGradingError(
+                "grading object has empty projection_points; nothing to author"
+            )
+
+        ifc_group = ifc_file.by_id(group.ifc_group_id)
+        ifc_composite = ifc_file.by_id(group.ifc_composite_fill_id)
+        feature_line_entity = None
+        if (
+            grading_object.footprint is not None
+            and grading_object.footprint.ifc_alignment_id is not None
+        ):
+            feature_line_entity = ifc_file.by_id(
+                grading_object.footprint.ifc_alignment_id
+            )
+
+        try:
+            slope_fill = ifcopenshell.api.grading.add_slope_fill_to_group(
+                ifc_file,
+                ifc_group,
+                ifc_composite,
+                name=grading_object.name,
+                points=grading_object.projection_points,
+                triangles=grading_object.projection_triangles,
+                feature_line=feature_line_entity,
+            )
+        except Exception as exc:
+            raise SaikeiGradingError(
+                f"Phase 2 add_slope_fill_to_group failed: {exc}"
+            ) from exc
+
+        slope_fill.GlobalId = grading_object.guid
+        grading_object.ifc_slope_fill_id = slope_fill.id()
+        return slope_fill
+
+    @classmethod
+    def author_interior_fill(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        group: GradingGroup,
+        points: np.ndarray,
+        triangles: np.ndarray,
+        name: Optional[str] = None,
+    ) -> "ifcopenshell.entity_instance":
+        """Persist the per-group interior fill as
+        :class:`IfcEarthworksFill[SUBGRADE]` via Phase 2's
+        :func:`ifcopenshell.api.grading.add_interior_fill_to_group`.
+        One per group — the Phase 2 API enforces this constraint.
+
+        Stamps the interior-fill step id on
+        :attr:`GradingGroup.ifc_interior_fill_id`. The interior fill
+        doesn't have its own dataclass GUID; the IFC entity's
+        API-minted GUID is preserved.
+        """
+        if group.ifc_group_id is None or group.ifc_composite_fill_id is None:
+            raise SaikeiGradingError(
+                "group has no IFC entities; call author_group first"
+            )
+        if group.interior_fill == "none":
+            raise SaikeiGradingError(
+                "group.interior_fill is 'none'; no interior fill to author"
+            )
+        if points.shape[0] == 0 or triangles.shape[0] == 0:
+            raise SaikeiGradingError(
+                "interior fill has empty points / triangles; nothing to author"
+            )
+
+        ifc_group = ifc_file.by_id(group.ifc_group_id)
+        ifc_composite = ifc_file.by_id(group.ifc_composite_fill_id)
+        try:
+            interior = ifcopenshell.api.grading.add_interior_fill_to_group(
+                ifc_file,
+                ifc_group,
+                ifc_composite,
+                name=name or f"{group.name} interior",
+                points=points,
+                triangles=triangles,
+            )
+        except Exception as exc:
+            raise SaikeiGradingError(
+                f"Phase 2 add_interior_fill_to_group failed: {exc}"
+            ) from exc
+
+        group.ifc_interior_fill_id = interior.id()
+        return interior

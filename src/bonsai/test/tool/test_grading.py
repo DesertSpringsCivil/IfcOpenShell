@@ -28,11 +28,35 @@ Run via the canonical Phase 4/5 invocation (PowerShell, from src/bonsai)::
       --blender-executable "C:\\Program Files\\Blender Foundation\\Blender_5\\blender.exe"
 """
 
+import ifcopenshell
+import ifcopenshell.api.unit
+import ifcopenshell.guid
 import numpy as np
 import pytest
 
 import bonsai.tool.grading as tool_grading
 import bonsai.tool.surface as tool_surface
+
+
+def _make_ifc_file_with_site() -> ifcopenshell.file:
+    """Build a minimal IFC4X3 file with project + site for IFC-authoring
+    tests. Mirrors the helper in test_surface.py."""
+    ifc_file = ifcopenshell.file(schema="IFC4X3_ADD2")
+    project = ifc_file.create_entity(
+        "IfcProject", GlobalId=ifcopenshell.guid.new(), Name="Test Project"
+    )
+    length = ifcopenshell.api.unit.add_si_unit(ifc_file, unit_type="LENGTHUNIT")
+    ifcopenshell.api.unit.assign_unit(ifc_file, units=[length])
+    site = ifc_file.create_entity(
+        "IfcSite", GlobalId=ifcopenshell.guid.new(), Name="Test Site"
+    )
+    ifc_file.create_entity(
+        "IfcRelAggregates",
+        GlobalId=ifcopenshell.guid.new(),
+        RelatingObject=project,
+        RelatedObjects=[site],
+    )
+    return ifc_file
 
 
 # ---------------------------------------------------------------------------
@@ -682,4 +706,290 @@ class TestComputeGradingObjectIntegration:
         ):
             tool_grading.Grading.compute_grading_object(
                 feature_line, criteria, side="right"
+            )
+
+
+# ---------------------------------------------------------------------------
+# IFC authoring wrappers
+# ---------------------------------------------------------------------------
+
+
+class TestAuthorFeatureLine:
+    """Tests for :meth:`Grading.author_feature_line`."""
+
+    def test_creates_alignment(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            name="Pad perimeter",
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (10.0, 0.0, 100.0),
+                (10.0, 10.0, 100.0),
+                (0.0, 10.0, 100.0),
+            ],
+            closed=True,
+        )
+        alignment = tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        assert alignment.is_a("IfcAlignment")
+        assert alignment.Name == "Pad perimeter"
+
+    def test_global_id_matches_dataclass_guid(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            name="bound",
+            vertices=[(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)],
+        )
+        alignment = tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        assert alignment.GlobalId == feature_line.guid
+
+    def test_stamps_step_id(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)]
+        )
+        alignment = tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        assert feature_line.ifc_alignment_id == alignment.id()
+
+    def test_too_short_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(vertices=[(0.0, 0.0, 0.0)])
+        with pytest.raises(tool_grading.SaikeiGradingError, match="≥ 2 vertices"):
+            tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+
+
+class TestAuthorCriteriaTemplate:
+    """Tests for :meth:`Grading.author_criteria_template`."""
+
+    def test_creates_property_set_template(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        criteria = tool_grading.GradingCriteria(name="3:1 fill / 2:1 cut")
+        template = tool_grading.Grading.author_criteria_template(ifc_file, criteria)
+        assert template.is_a("IfcPropertySetTemplate")
+
+    def test_idempotent_on_repeat_call(self) -> None:
+        """Phase 2 API treats the template as singleton-by-shape — two
+        calls return the same entity."""
+        ifc_file = _make_ifc_file_with_site()
+        criteria_a = tool_grading.GradingCriteria()
+        criteria_b = tool_grading.GradingCriteria()
+        template_a = tool_grading.Grading.author_criteria_template(ifc_file, criteria_a)
+        template_b = tool_grading.Grading.author_criteria_template(ifc_file, criteria_b)
+        assert template_a.id() == template_b.id()
+
+    def test_stamps_template_id_on_criteria(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        criteria = tool_grading.GradingCriteria()
+        template = tool_grading.Grading.author_criteria_template(ifc_file, criteria)
+        assert criteria.ifc_template_id == template.id()
+
+
+class TestAuthorGroup:
+    """Tests for :meth:`Grading.author_group`."""
+
+    def test_creates_group_and_composite_fill(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup(name="North Pad")
+        ifc_group = tool_grading.Grading.author_group(ifc_file, group)
+        assert ifc_group.is_a("IfcGroup")
+        assert ifc_group.ObjectType == "GradingGroup"
+        assert ifc_group.Name == "North Pad"
+
+        # Composite fill exists and is referenced by the group.
+        composite = ifc_file.by_id(group.ifc_composite_fill_id)
+        assert composite.is_a("IfcEarthworksFill")
+        assert composite.PredefinedType == "SUBGRADE"
+
+    def test_global_id_matches_dataclass_guid(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup(name="GuidTest")
+        ifc_group = tool_grading.Grading.author_group(ifc_file, group)
+        assert ifc_group.GlobalId == group.guid
+
+    def test_stamps_step_ids(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup()
+        ifc_group = tool_grading.Grading.author_group(ifc_file, group)
+        assert group.ifc_group_id == ifc_group.id()
+        assert group.ifc_composite_fill_id is not None
+
+    def test_interior_fill_strategy_passes_through(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup(interior_fill="flat")
+        tool_grading.Grading.author_group(ifc_file, group)
+        # Pset_SaikeiGradingSource on the group records InteriorFillStrategy.
+        ifc_group = ifc_file.by_id(group.ifc_group_id)
+        psets = []
+        for rel in ifc_file.by_type("IfcRelDefinesByProperties"):
+            if ifc_group in (rel.RelatedObjects or []):
+                psets.append(rel.RelatingPropertyDefinition)
+        source_pset = next(
+            (p for p in psets if p.Name == "Pset_SaikeiGradingSource"), None
+        )
+        assert source_pset is not None
+        strategy = next(
+            (
+                p.NominalValue.wrappedValue
+                for p in source_pset.HasProperties
+                if p.Name == "InteriorFillStrategy"
+            ),
+            None,
+        )
+        assert strategy == "flat"
+
+
+class TestAssignCriteria:
+    """Tests for :meth:`Grading.assign_criteria`."""
+
+    def test_binds_criteria_to_group(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup()
+        tool_grading.Grading.author_group(ifc_file, group)
+
+        criteria = tool_grading.GradingCriteria(
+            name="3:1 fill",
+            target_kind="surface",
+            target_ref="some-target-guid",
+            cut_slope=2.0,
+            fill_slope=3.0,
+        )
+        pset = tool_grading.Grading.assign_criteria(ifc_file, group, criteria)
+        assert pset.is_a("IfcPropertySet")
+
+        # Pset is bound to the group via IfcRelDefinesByProperties.
+        ifc_group = ifc_file.by_id(group.ifc_group_id)
+        bound_psets = []
+        for rel in ifc_file.by_type("IfcRelDefinesByProperties"):
+            if ifc_group in (rel.RelatedObjects or []):
+                bound_psets.append(rel.RelatingPropertyDefinition)
+        assert pset in bound_psets
+
+    def test_no_group_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup()  # no ifc_group_id
+        criteria = tool_grading.GradingCriteria()
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="no IFC entity"
+        ):
+            tool_grading.Grading.assign_criteria(ifc_file, group, criteria)
+
+    def test_auto_authors_template_when_missing(self) -> None:
+        """assign_criteria should auto-author the template if it hasn't
+        been authored yet."""
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup()
+        tool_grading.Grading.author_group(ifc_file, group)
+        criteria = tool_grading.GradingCriteria()
+        # criteria.ifc_template_id is None at this point
+        assert criteria.ifc_template_id is None
+        tool_grading.Grading.assign_criteria(ifc_file, group, criteria)
+        # Template was auto-authored.
+        assert criteria.ifc_template_id is not None
+
+
+class TestAuthorSlopeFill:
+    """Tests for :meth:`Grading.author_slope_fill`."""
+
+    @staticmethod
+    def _make_grading_object_with_geometry() -> tool_grading.GradingObject:
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="distance", target_ref=3.0
+        )
+        return tool_grading.Grading.compute_grading_object(
+            feature_line, criteria, side="right"
+        )
+
+    def test_creates_slopefill(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup()
+        tool_grading.Grading.author_group(ifc_file, group)
+
+        grading_object = self._make_grading_object_with_geometry()
+        slope_fill = tool_grading.Grading.author_slope_fill(
+            ifc_file, group, grading_object
+        )
+        assert slope_fill.is_a("IfcEarthworksFill")
+        assert slope_fill.PredefinedType == "SLOPEFILL"
+
+    def test_global_id_matches_grading_object_guid(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup()
+        tool_grading.Grading.author_group(ifc_file, group)
+        grading_object = self._make_grading_object_with_geometry()
+        slope_fill = tool_grading.Grading.author_slope_fill(
+            ifc_file, group, grading_object
+        )
+        assert slope_fill.GlobalId == grading_object.guid
+        assert grading_object.ifc_slope_fill_id == slope_fill.id()
+
+    def test_no_group_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup()  # no ifc ids
+        grading_object = self._make_grading_object_with_geometry()
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="no IFC entities"
+        ):
+            tool_grading.Grading.author_slope_fill(ifc_file, group, grading_object)
+
+    def test_empty_geometry_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup()
+        tool_grading.Grading.author_group(ifc_file, group)
+        empty_grading = tool_grading.GradingObject()  # empty arrays
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="empty projection_points"
+        ):
+            tool_grading.Grading.author_slope_fill(ifc_file, group, empty_grading)
+
+
+class TestAuthorInteriorFill:
+    """Tests for :meth:`Grading.author_interior_fill`."""
+
+    def test_creates_subgrade_fill(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup(interior_fill="flat")
+        tool_grading.Grading.author_group(ifc_file, group)
+        points = np.array(
+            [
+                (0.0, 0.0, 99.0),
+                (10.0, 0.0, 99.0),
+                (10.0, 10.0, 99.0),
+                (0.0, 10.0, 99.0),
+            ]
+        )
+        triangles = np.array([(0, 1, 2), (0, 2, 3)])
+        interior = tool_grading.Grading.author_interior_fill(
+            ifc_file, group, points, triangles
+        )
+        assert interior.is_a("IfcEarthworksFill")
+        assert interior.PredefinedType == "SUBGRADE"
+        assert group.ifc_interior_fill_id == interior.id()
+
+    def test_none_strategy_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup(interior_fill="none")
+        tool_grading.Grading.author_group(ifc_file, group)
+        points = np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)])
+        triangles = np.array([(0, 1, 2)])
+        with pytest.raises(
+            tool_grading.SaikeiGradingError,
+            match="interior_fill is 'none'",
+        ):
+            tool_grading.Grading.author_interior_fill(
+                ifc_file, group, points, triangles
+            )
+
+    def test_no_group_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup()  # no ifc ids
+        points = np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)])
+        triangles = np.array([(0, 1, 2)])
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="no IFC entities"
+        ):
+            tool_grading.Grading.author_interior_fill(
+                ifc_file, group, points, triangles
             )
