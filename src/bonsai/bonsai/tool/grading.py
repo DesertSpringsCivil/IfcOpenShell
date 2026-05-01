@@ -468,7 +468,7 @@ class Grading:
             daylight_line.append(tie)
 
         projection_points, projection_triangles = cls._triangulate_ribbon(
-            sample_points, daylight_line
+            sample_points, daylight_line, closed=feature_line.closed
         )
 
         return GradingObject(
@@ -517,11 +517,20 @@ class Grading:
                 xy_ring.append(xy_ring[0])
             try:
                 polygon = shapely.Polygon(xy_ring)
-                is_ccw = polygon.exterior.is_ccw
             except Exception as exc:
                 raise SaikeiGradingError(
                     f"could not orient closed feature line: {exc}"
                 ) from exc
+            # Self-intersecting / degenerate rings produce a polygon
+            # whose exterior orientation may not match the input
+            # traversal — outward direction would be silently wrong.
+            # Reject upfront.
+            if not polygon.is_valid:
+                raise SaikeiGradingError(
+                    f"closed feature line ring is not topologically valid: "
+                    f"{shapely.is_valid_reason(polygon)}"
+                )
+            is_ccw = polygon.exterior.is_ccw
             resolved_side = "right" if is_ccw else "left"
 
         outward_per_segment: list[tuple[float, float]] = []
@@ -724,7 +733,14 @@ class Grading:
             # Crossing detection: sign flip → linearly interpolate.
             if (prev_delta > 0) != (current_delta > 0):
                 # Walk back by a fraction along the last march step.
-                fraction = prev_delta / (prev_delta - current_delta)
+                # Catastrophic cancellation guard: if both deltas are
+                # vanishingly close in value (parallel approach with
+                # IEEE 754 noise), the denominator can collapse to
+                # exactly zero; treat as "already at target."
+                denominator = prev_delta - current_delta
+                if abs(denominator) < 1e-15:
+                    return (x, y, z)
+                fraction = prev_delta / denominator
                 tie_x = x - ox * march_step * (1 - fraction)
                 tie_y = y - oy * march_step * (1 - fraction)
                 tie_z = z - dz_per_step * (1 - fraction)
@@ -827,6 +843,7 @@ class Grading:
     def _triangulate_ribbon(
         footprint_points: list[tuple[float, float, float]],
         daylight_points: list[tuple[float, float, float]],
+        closed: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Build the ribbon mesh between the feature line and the daylight
         line. Two triangles per consecutive sample-point pair; output is
@@ -838,6 +855,13 @@ class Grading:
         ribbon strip uses the quad
         ``(footprint[i], footprint[i+1], daylight[i+1], daylight[i])``
         triangulated as ``(i, i+1, N+i+1)`` and ``(i, N+i+1, N+i)``.
+
+        :param closed: when ``True``, also emits the wrap-around strip
+            from sample ``N-1`` back to sample ``0``. Required for closed
+            feature lines so the ribbon doesn't have a missing strip
+            between the last sample and vertex 0 (sample 0 is at
+            vertex 0; the last sample is at ``(n_steps-1) / n_steps``
+            of the last segment, NOT at vertex 0 — closing the loop).
         """
         n = len(footprint_points)
         if n < 2 or len(daylight_points) != n:
@@ -853,6 +877,10 @@ class Grading:
         for i in range(n - 1):
             triangles.append((i, i + 1, n + i + 1))
             triangles.append((i, n + i + 1, n + i))
+        if closed:
+            # Wrap-around strip from sample N-1 back to sample 0.
+            triangles.append((n - 1, 0, n))
+            triangles.append((n - 1, n, 2 * n - 1))
         triangles_array = np.asarray(triangles, dtype=int)
         return points_array, triangles_array
 
@@ -1509,10 +1537,24 @@ class Grading:
         second one.
 
         :returns: the assembled :class:`CivilSurface` with
-            ``kind="proposed_group"`` and IFC step ids stamped.
+            ``kind="proposed_group"`` and IFC step ids stamped. The
+            surface's GUID matches the composite fill's IFC GlobalId
+            so :meth:`bonsai.tool.surface.Surface.get` resolves it
+            correctly.
+
+            The caller must register the result in
+            :attr:`bonsai.tool.surface.Surface._registry` via
+            :meth:`bonsai.tool.surface.Surface.register` if subsequent
+            in-session ``Surface.get`` calls should return the
+            in-memory dataclass rather than triggering a
+            ``_rehydrate_from_ifc`` round-trip. Core orchestration
+            (commit 9) handles this; direct callers of the tool layer
+            must do it explicitly.
         :raises SaikeiGradingError: when the group has no IFC entities
-            (call :meth:`author_group` first), no members to compose,
-            or an interior-fill strategy that hasn't been implemented yet.
+            (call :meth:`author_group` first), has no members to
+            compose, requires a multi-member interior fill (Phase 5.1
+            deferral), or hits any other documented input-validation
+            check.
         """
         from .surface import (
             CivilSurface,
@@ -1562,15 +1604,24 @@ class Grading:
                     merged_triangles = interior_triangles
 
         # Build the proposed_group CivilSurface. Use the un-constrained
-        # default backend to populate triangle_flags as zeros (the
-        # cross-surface composition flag computation for Hole=-1 /
-        # Void=-2 is commit 7 territory).
+        # default backend to populate triangle_flags as zeros — the
+        # cross-surface composition flag computation (Flag=-1 Hole for
+        # fall-through to existing ground per spec §6.3 last paragraph)
+        # is queued for Phase 6 alongside the volume math that consumes
+        # the flags.
+        #
+        # CRITICAL: composite_surface.guid MUST match the actual IFC
+        # composite fill's GlobalId — not a fresh ifcopenshell.guid.new().
+        # Phase 6 retrieves the composite via tool.Surface.get(file,
+        # group.output_surface_guid); a fresh GUID here would orphan the
+        # dataclass from the IFC entity it represents.
+        composite_fill_entity = ifc_file.by_id(group.ifc_composite_fill_id)
         triangle_flags = np.zeros(len(merged_triangles), dtype=int)
         outer_boundary = shapely.MultiPoint(
             [(float(p[0]), float(p[1])) for p in merged_points]
         ).convex_hull
         composite_surface = CivilSurface(
-            guid=ifcopenshell.guid.new(),
+            guid=composite_fill_entity.GlobalId,
             name=f"{group.name} composite",
             kind="proposed_group",
             points=merged_points,
@@ -1619,10 +1670,14 @@ class Grading:
         if group.interior_fill == "none":
             return empty
         if len(group.members) != 1:
-            raise NotImplementedError(
+            # SaikeiGradingError (not NotImplementedError) so the
+            # operator/headless contract catches it consistently with
+            # other validation failures and converts to
+            # report({"ERROR"}, ...) + CANCELLED.
+            raise SaikeiGradingError(
                 "Phase 5 MVP supports interior fill on single-member "
                 f"groups only; got {len(group.members)} members. "
-                "Multi-ring composition lands in Phase 5.1."
+                "Multi-ring composition is deferred to Phase 5.1."
             )
         member = group.members[0]
         if member.footprint is None or not member.footprint.closed:

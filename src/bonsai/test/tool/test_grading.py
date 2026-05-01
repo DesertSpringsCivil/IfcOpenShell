@@ -628,6 +628,60 @@ class TestOutwardDirection:
         )
         assert outward_left[0] == pytest.approx((0.0, 1.0))
 
+    def test_zero_length_segment_skipped_in_sampling(self) -> None:
+        """Consecutive duplicate vertices produce a zero-length segment;
+        the sampler must skip it rather than emit a sample with zero
+        outward direction."""
+        feature_line = tool_grading.FeatureLine(
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (5.0, 0.0, 100.0),
+                (5.0, 0.0, 100.0),  # duplicate
+                (10.0, 0.0, 100.0),
+            ],
+            closed=False,
+        )
+        outward = tool_grading.Grading._compute_outward_per_segment(
+            feature_line, side="right"
+        )
+        # 3 segments total; the middle one is zero-length and emits
+        # (0.0, 0.0).
+        assert len(outward) == 3
+        assert outward[1] == pytest.approx((0.0, 0.0))
+        # Sampling should skip the zero-length segment without crashing.
+        sample_points, sample_outward = (
+            tool_grading.Grading._sample_along_feature_line(
+                feature_line, outward, sample_step=1.0
+            )
+        )
+        # Samples on the 0–5 segment (5 + 1) + samples on the 5–10
+        # segment (5, plus end vertex on the open last segment).
+        assert len(sample_points) > 0
+        # No sample carries the zero outward.
+        for o in sample_outward:
+            assert o != (0.0, 0.0)
+
+    def test_self_intersecting_ring_raises(self) -> None:
+        """Bowtie-shaped closed feature line: shapely.Polygon is_valid
+        is False; outward computation must reject upfront rather than
+        silently producing wrong directions."""
+        feature_line = tool_grading.FeatureLine(
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (10.0, 10.0, 100.0),
+                (10.0, 0.0, 100.0),
+                (0.0, 10.0, 100.0),
+            ],
+            closed=True,
+        )
+        with pytest.raises(
+            tool_grading.SaikeiGradingError,
+            match="not topologically valid",
+        ):
+            tool_grading.Grading._compute_outward_per_segment(
+                feature_line, side="auto"
+            )
+
     def test_open_feature_line_auto_side_raises(self) -> None:
         feature_line = tool_grading.FeatureLine(
             vertices=[(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)],
@@ -667,6 +721,68 @@ class TestRibbonTriangulation:
         )
         assert points.shape == (0, 3)
         assert triangles.shape == (0, 3)
+
+    def test_closed_ribbon_emits_wraparound_strip(self) -> None:
+        """For closed feature lines, the ribbon must wrap from the last
+        sample back to sample 0 — otherwise the closing strip is
+        missing and the proposed surface has a gap.
+        """
+        footprint = [
+            (0.0, 0.0, 100.0),
+            (1.0, 0.0, 100.0),
+            (1.0, 1.0, 100.0),
+            (0.0, 1.0, 100.0),
+        ]
+        daylight = [
+            (-1.0, -1.0, 99.0),
+            (2.0, -1.0, 99.0),
+            (2.0, 2.0, 99.0),
+            (-1.0, 2.0, 99.0),
+        ]
+        # Open ribbon: 3 strips × 2 triangles = 6.
+        _, open_triangles = tool_grading.Grading._triangulate_ribbon(
+            footprint, daylight, closed=False
+        )
+        assert open_triangles.shape == (6, 3)
+        # Closed ribbon: 4 strips × 2 triangles = 8.
+        _, closed_triangles = tool_grading.Grading._triangulate_ribbon(
+            footprint, daylight, closed=True
+        )
+        assert closed_triangles.shape == (8, 3)
+
+
+class TestCompositeSurfaceGuid:
+    """Pin: composite_surface.guid in rebuild_group_surface MUST match
+    the IFC composite fill's GlobalId so tool.Surface.get can resolve
+    it. Phase 6 volume math depends on this lookup working."""
+
+    def test_composite_surface_guid_matches_ifc_composite_fill(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        group = tool_grading.GradingGroup(
+            name="guid-pin", interior_fill="none"
+        )
+        tool_grading.Grading.author_group(ifc_file, group)
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+            closed=False,
+        )
+        criteria = tool_grading.GradingCriteria(
+            target_kind="distance", target_ref=3.0
+        )
+        member = tool_grading.Grading.compute_grading_object(
+            feature_line, criteria, side="right"
+        )
+        tool_grading.Grading.author_slope_fill(ifc_file, group, member)
+        group.members.append(member)
+
+        composite_surface = tool_grading.Grading.rebuild_group_surface(
+            ifc_file, group
+        )
+        composite_fill_entity = ifc_file.by_id(group.ifc_composite_fill_id)
+        # The dataclass GUID must match the IFC entity's GlobalId.
+        assert composite_surface.guid == composite_fill_entity.GlobalId
+        # And group.output_surface_guid points at the same GUID.
+        assert group.output_surface_guid == composite_fill_entity.GlobalId
 
 
 class TestComputeGradingObjectIntegration:
@@ -1580,8 +1696,11 @@ class TestComputeInteriorFillDispatcher:
             interior_fill="flat",
             members=[tool_grading.GradingObject(), tool_grading.GradingObject()],
         )
+        # SaikeiGradingError (not NotImplementedError) so operators catch
+        # it via the documented operator/headless contract — same
+        # exception type as other validation failures.
         with pytest.raises(
-            NotImplementedError, match="single-member"
+            tool_grading.SaikeiGradingError, match="single-member"
         ):
             tool_grading.Grading._compute_interior_fill(ifc_file, group)
 
