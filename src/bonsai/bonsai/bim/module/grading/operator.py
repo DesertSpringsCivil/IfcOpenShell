@@ -213,20 +213,7 @@ class CIVIL_OT_feature_line_drape(Operator, tool.Ifc.Operator):
 
         # Update the Blender curve to reflect new Z values.
         try:
-            ifc_file = tool.Ifc.get()
-            obj = tool.Ifc.get_object(
-                ifc_file.by_id(feature_line.ifc_alignment_id)
-            )
-            if obj is not None and obj.data is not None:
-                spline = obj.data.splines[0]
-                for i, (x, y, z) in enumerate(feature_line.vertices):
-                    if i < len(spline.points):
-                        spline.points[i].co = (
-                            float(x),
-                            float(y),
-                            float(z),
-                            1.0,
-                        )
+            tool.Grading.update_blender_curve(tool.Ifc.get(), feature_line)
         except Exception as exc:
             self.report(
                 {"WARNING"},
@@ -362,19 +349,7 @@ class CIVIL_OT_feature_line_edit_elevations(Operator, tool.Ifc.Operator):
 
         # Refresh the Blender curve so the viewport reflects the edits.
         try:
-            obj = tool.Ifc.get_object(
-                ifc_file.by_id(feature_line.ifc_alignment_id)
-            )
-            if obj is not None and obj.data is not None and obj.data.splines:
-                spline = obj.data.splines[0]
-                for i, (x, y, z) in enumerate(feature_line.vertices):
-                    if i < len(spline.points):
-                        spline.points[i].co = (
-                            float(x),
-                            float(y),
-                            float(z),
-                            1.0,
-                        )
+            tool.Grading.update_blender_curve(ifc_file, feature_line)
         except Exception as exc:
             self.report(
                 {"WARNING"},

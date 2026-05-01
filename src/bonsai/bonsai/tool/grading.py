@@ -1575,6 +1575,43 @@ class Grading:
         return obj
 
     @classmethod
+    def update_blender_curve(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        feature_line: FeatureLine,
+    ) -> bool:
+        """Refresh the linked Blender curve's spline points to match
+        ``feature_line.vertices``.
+
+        Companion to :meth:`create_blender_curve`. Used by drape /
+        edit-elevations flows: after the IFC alignment's polyline is
+        rewritten via :meth:`update_feature_line_vertices`, the linked
+        Blender curve still shows stale Z values until the in-memory
+        spline is rewritten too.
+
+        :returns: True if a curve object was found and updated, False
+            if the feature line has no linked Blender object yet (the
+            caller created the IFC entity but hasn't called
+            :meth:`create_blender_curve` — silent no-op rather than an
+            error so headless flows that don't need the viewport
+            update continue working).
+        """
+        if feature_line.ifc_alignment_id is None:
+            raise SaikeiGradingError(
+                "feature line has no IFC alignment; "
+                "call author_feature_line first"
+            )
+        alignment = ifc_file.by_id(feature_line.ifc_alignment_id)
+        obj = tool.Ifc.get_object(alignment)
+        if obj is None or obj.data is None or not obj.data.splines:
+            return False
+        spline = obj.data.splines[0]
+        for i, (x, y, z) in enumerate(feature_line.vertices):
+            if i < len(spline.points):
+                spline.points[i].co = (float(x), float(y), float(z), 1.0)
+        return True
+
+    @classmethod
     def create_blender_empty_for_group(
         cls,
         ifc_file: "ifcopenshell.file",

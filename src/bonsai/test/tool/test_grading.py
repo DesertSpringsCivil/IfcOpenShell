@@ -1988,6 +1988,52 @@ class TestBlenderCurve(NewIfc4X3):
         assert obj.data.splines[0].use_cyclic_u is True
 
 
+class TestUpdateBlenderCurve(NewIfc4X3):
+    """Tests for :meth:`Grading.update_blender_curve` — refresh the
+    linked Blender curve to match the in-memory dataclass after IFC-side
+    polyline edits (drape / edit_elevations flows)."""
+
+    def test_updates_spline_z_values_after_drape(self) -> None:
+        ifc_file = tool.Ifc.get()
+        feature_line = tool_grading.FeatureLine(
+            name="drape-target",
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        obj = tool_grading.Grading.create_blender_curve(ifc_file, feature_line)
+
+        # Mutate the dataclass (simulating a drape).
+        feature_line.vertices = [(0.0, 0.0, 95.0), (10.0, 0.0, 96.5)]
+        result = tool_grading.Grading.update_blender_curve(ifc_file, feature_line)
+
+        assert result is True
+        spline = obj.data.splines[0]
+        assert spline.points[0].co[2] == pytest.approx(95.0)
+        assert spline.points[1].co[2] == pytest.approx(96.5)
+
+    def test_returns_false_when_no_blender_curve_yet(self) -> None:
+        """Headless flows that author the feature line but never call
+        create_blender_curve should be silent no-ops."""
+        ifc_file = tool.Ifc.get()
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 0.0), (5.0, 0.0, 0.0)]
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        # Notably do NOT call create_blender_curve.
+        result = tool_grading.Grading.update_blender_curve(ifc_file, feature_line)
+        assert result is False
+
+    def test_no_ifc_alignment_raises(self) -> None:
+        ifc_file = tool.Ifc.get()
+        feature_line = tool_grading.FeatureLine(
+            vertices=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
+        )
+        with pytest.raises(
+            tool_grading.SaikeiGradingError, match="no IFC alignment"
+        ):
+            tool_grading.Grading.update_blender_curve(ifc_file, feature_line)
+
+
 class TestBlenderGroupEmpty(NewIfc4X3):
     """Tests for :meth:`Grading.create_blender_empty_for_group`."""
 
