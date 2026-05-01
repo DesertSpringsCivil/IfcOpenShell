@@ -116,6 +116,28 @@ class TestSharedHelpers:
         for value in ALLOWED_CUT_TYPES:
             validate_cut_predefined_type(value)
 
+    def test_allowed_cut_types_match_ifc_schema(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """Round-trip each ``ALLOWED_CUT_TYPES`` value through ifcopenshell
+        entity creation. If the IFC schema rejects a value here, the
+        ``ALLOWED_CUT_TYPES`` set has drifted from the canonical schema —
+        catches typos like ``"CUTTING"`` (not in the schema) and missing
+        underscores in compound names (the schema uses ``PAVEMENTMILLING``,
+        not ``PAVEMENT_MILLING``)."""
+        from ifcopenshell.api.earthwork._shared import ALLOWED_CUT_TYPES
+
+        for value in ALLOWED_CUT_TYPES:
+            entity = empty_project_file.create_entity(
+                "IfcEarthworksCut",
+                GlobalId=ifcopenshell.guid.new(),
+                PredefinedType=value,
+            )
+            assert entity.PredefinedType == value, (
+                f"schema accepted {value!r} but normalized to "
+                f"{entity.PredefinedType!r} — possible enum drift"
+            )
+
     def test_validate_cut_predefined_type_rejects_unknown(self) -> None:
         from ifcopenshell.api.earthwork._shared import validate_cut_predefined_type
 
