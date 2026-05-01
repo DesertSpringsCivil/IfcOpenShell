@@ -2406,3 +2406,415 @@ class TestRebuildGroupSurfaceWithInteriorFill:
         composite = tool_grading.Grading.rebuild_group_surface(ifc_file, group)
         assert composite.triangles.shape[0] > 0
         assert group.ifc_interior_fill_id is not None
+
+
+# ---------------------------------------------------------------------------
+# Commit 15 — public helpers, registry GradingObject, data-cache, decorator
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryGradingObject:
+    """The decorator's daylight-line draw depends on the registry
+    storing :class:`GradingObject` instances. These tests pin that
+    behavior so a future refactor can't quietly regress it."""
+
+    def test_register_accepts_grading_object(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            name="fl",
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+        )
+        criteria = tool_grading.GradingCriteria(
+            name="2:1", target_kind="elevation", target_ref=95.0
+        )
+        grading_object = tool_grading.GradingObject(
+            name="fl @ 2:1",
+            footprint=feature_line,
+            criteria=criteria,
+        )
+        tool_grading.Grading.register(ifc_file, grading_object)
+        key = (id(ifc_file), grading_object.guid)
+        assert tool_grading.Grading._registry[key] is grading_object
+
+
+class TestIsFeatureLineAlignment:
+    """Public predicate used by both the data cache and decorator to
+    distinguish Saikei feature lines from ordinary IfcAlignments."""
+
+    def test_returns_true_for_authored_feature_line(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            name="fl",
+            vertices=[(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)],
+        )
+        alignment = tool_grading.Grading.author_feature_line(
+            ifc_file, feature_line
+        )
+        assert tool_grading.Grading.is_feature_line_alignment(alignment) is True
+
+    def test_returns_false_for_alignment_without_pset(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        alignment = ifc_file.create_entity(
+            "IfcAlignment",
+            GlobalId=ifcopenshell.guid.new(),
+            Name="Roadway Centerline",
+        )
+        assert tool_grading.Grading.is_feature_line_alignment(alignment) is False
+
+
+class TestIterRegistered:
+    """Public iterator for reading the registry without touching
+    :attr:`_registry`'s private key shape."""
+
+    def test_yields_only_matching_type_and_file(self) -> None:
+        ifc_file_a = _make_ifc_file_with_site()
+        ifc_file_b = _make_ifc_file_with_site()
+        criteria_a = tool_grading.GradingCriteria(name="a", target_kind="distance")
+        feature_a = tool_grading.FeatureLine(name="fa", vertices=[(0, 0, 0), (1, 0, 0)])
+        criteria_b = tool_grading.GradingCriteria(name="b", target_kind="distance")
+
+        tool_grading.Grading.register(ifc_file_a, criteria_a)
+        tool_grading.Grading.register(ifc_file_a, feature_a)
+        tool_grading.Grading.register(ifc_file_b, criteria_b)
+
+        # Type filter: only criteria from file A.
+        result = list(
+            tool_grading.Grading.iter_registered(
+                ifc_file_a, tool_grading.GradingCriteria
+            )
+        )
+        assert result == [criteria_a]
+
+        # File filter: criteria from file B.
+        result_b = list(
+            tool_grading.Grading.iter_registered(
+                ifc_file_b, tool_grading.GradingCriteria
+            )
+        )
+        assert result_b == [criteria_b]
+
+
+class TestGradingDataLoad(NewIfc4X3):
+    """Tests for :meth:`bonsai.bim.module.grading.data.GradingData.load`
+    and its three sync helpers."""
+
+    @staticmethod
+    def _data_module():
+        import bonsai.bim.module.grading.data as grading_data
+
+        # Reset between tests so prior runs don't leak count state into
+        # the next assertion.
+        grading_data.GradingData.is_loaded = False
+        grading_data.GradingData.data = {}
+        return grading_data
+
+    def test_load_with_no_ifc_clears_data(self) -> None:
+        # Make sure no IFC is loaded.
+        bpy.context.scene.BIMProperties.ifc_file = ""
+        grading_data = self._data_module()
+        grading_data.GradingData.load()
+        assert grading_data.GradingData.data == {
+            "group_count": 0,
+            "criteria_count": 0,
+            "feature_line_count": 0,
+        }
+        assert grading_data.GradingData.is_loaded is True
+
+    def test_load_counts_groups_and_feature_lines(self) -> None:
+        ifc_file = tool.Ifc.get()
+        feature_line = tool_grading.FeatureLine(
+            name="fl",
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0)],
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        group = tool_grading.GradingGroup(name="g")
+        tool_grading.Grading.author_group(ifc_file, group)
+
+        grading_data = self._data_module()
+        grading_data.GradingData.load()
+
+        assert grading_data.GradingData.data["group_count"] == 1
+        assert grading_data.GradingData.data["feature_line_count"] == 1
+
+    def test_load_populates_groups_uilist_from_ifc(self) -> None:
+        ifc_file = tool.Ifc.get()
+        group = tool_grading.GradingGroup(
+            name="North Pad", interior_fill="flat"
+        )
+        tool_grading.Grading.author_group(ifc_file, group)
+        tool_grading.Grading.register(ifc_file, group)
+
+        grading_data = self._data_module()
+        grading_data.GradingData.load()
+
+        props = bpy.context.scene.CivilGradingProperties
+        assert len(props.groups) == 1
+        assert props.groups[0].name == "North Pad"
+        assert props.groups[0].guid == group.guid
+        assert props.groups[0].interior_fill == "flat"
+
+    def test_load_populates_feature_lines_uilist_from_ifc(self) -> None:
+        ifc_file = tool.Ifc.get()
+        feature_line = tool_grading.FeatureLine(
+            name="Pad ring",
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (10.0, 0.0, 100.0),
+                (10.0, 10.0, 100.0),
+                (0.0, 10.0, 100.0),
+            ],
+            closed=True,
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+
+        grading_data = self._data_module()
+        grading_data.GradingData.load()
+
+        props = bpy.context.scene.CivilGradingProperties
+        assert len(props.feature_lines) == 1
+        item = props.feature_lines[0]
+        assert item.name == "Pad ring"
+        assert item.guid == feature_line.guid
+        assert item.closed is True
+        assert item.vertex_count == 4
+
+    def test_load_populates_criteria_uilist_from_registry(self) -> None:
+        ifc_file = tool.Ifc.get()
+        criteria = tool_grading.GradingCriteria(
+            name="3:1 / 2:1",
+            target_kind="surface",
+            cut_slope=2.0,
+            fill_slope=3.0,
+        )
+        tool_grading.Grading.register(ifc_file, criteria)
+
+        grading_data = self._data_module()
+        grading_data.GradingData.load()
+
+        props = bpy.context.scene.CivilGradingProperties
+        assert len(props.criteria) == 1
+        assert props.criteria[0].name == "3:1 / 2:1"
+        assert props.criteria[0].target_kind == "surface"
+        assert props.criteria[0].cut_slope == pytest.approx(2.0)
+        assert props.criteria[0].fill_slope == pytest.approx(3.0)
+
+    def test_sync_restores_active_group_guid_on_refresh(self) -> None:
+        ifc_file = tool.Ifc.get()
+        group_a = tool_grading.GradingGroup(name="A")
+        group_b = tool_grading.GradingGroup(name="B")
+        tool_grading.Grading.author_group(ifc_file, group_a)
+        tool_grading.Grading.author_group(ifc_file, group_b)
+        tool_grading.Grading.register(ifc_file, group_a)
+        tool_grading.Grading.register(ifc_file, group_b)
+
+        grading_data = self._data_module()
+        grading_data.GradingData.load()
+        props = bpy.context.scene.CivilGradingProperties
+
+        # Pretend the user clicked group B.
+        for index, item in enumerate(props.groups):
+            if item.guid == group_b.guid:
+                props.active_group_index = index
+                props.active_group_guid = item.guid
+                break
+
+        # Simulate an IFC mutation triggering refresh.
+        grading_data.GradingData.is_loaded = False
+        grading_data.GradingData.load()
+
+        assert props.active_group_guid == group_b.guid
+
+
+class TestGradingDecoratorCollect:
+    """Tests for the headless-pure collection helpers on
+    :class:`GradingDecorator`. Avoids GPU shader work — exercises the
+    positions/indices logic directly."""
+
+    @staticmethod
+    def _decorator():
+        import bonsai.bim.module.grading.decorator as grading_decorator
+
+        return grading_decorator.GradingDecorator
+
+    def test_collect_feature_lines_empty_returns_empty_pair(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        positions, indices = self._decorator()._collect_feature_line_segments(
+            ifc_file
+        )
+        assert positions == []
+        assert indices == []
+
+    def test_collect_feature_lines_open_polyline(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            name="open",
+            vertices=[(0.0, 0.0, 100.0), (10.0, 0.0, 100.0), (20.0, 0.0, 100.0)],
+            closed=False,
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        positions, indices = self._decorator()._collect_feature_line_segments(
+            ifc_file
+        )
+        # 3 vertices, 2 line segments (no closing edge).
+        assert len(positions) == 3
+        assert indices == [(0, 1), (1, 2)]
+
+    def test_collect_feature_lines_closed_loop_adds_closing_edge(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            name="ring",
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (10.0, 0.0, 100.0),
+                (10.0, 10.0, 100.0),
+                (0.0, 10.0, 100.0),
+            ],
+            closed=True,
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        positions, indices = self._decorator()._collect_feature_line_segments(
+            ifc_file
+        )
+        assert len(positions) == 4
+        # 3 inter-segment edges + 1 closing edge = 4.
+        assert len(indices) == 4
+        # Last edge connects last vertex back to first.
+        assert indices[-1] == (3, 0)
+
+    def test_collect_daylight_lines_filters_by_file(self) -> None:
+        ifc_file_a = _make_ifc_file_with_site()
+        ifc_file_b = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            name="fl", vertices=[(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)]
+        )
+        criteria = tool_grading.GradingCriteria(
+            name="c", target_kind="distance", target_ref=5.0
+        )
+        grading_object = tool_grading.GradingObject(
+            name="fl @ c",
+            footprint=feature_line,
+            criteria=criteria,
+            daylight_line=[
+                (0.0, 5.0, -2.5),
+                (10.0, 5.0, -2.5),
+            ],
+        )
+        tool_grading.Grading.register(ifc_file_a, grading_object)
+
+        # File A sees the daylight line.
+        positions_a, indices_a = self._decorator()._collect_daylight_line_segments(
+            ifc_file_a
+        )
+        assert len(positions_a) == 2
+        assert indices_a == [(0, 1)]
+
+        # File B sees nothing — same registry, different file_key.
+        positions_b, indices_b = self._decorator()._collect_daylight_line_segments(
+            ifc_file_b
+        )
+        assert positions_b == []
+        assert indices_b == []
+
+
+class TestGradingDecoratorLifecycle:
+    """Install / uninstall lifecycle for the GPU draw handler — pinned
+    so a future refactor can't leak handlers across file loads."""
+
+    @staticmethod
+    def _decorator():
+        import bonsai.bim.module.grading.decorator as grading_decorator
+
+        return grading_decorator.GradingDecorator
+
+    def test_uninstall_when_not_installed_is_noop(self) -> None:
+        decorator = self._decorator()
+        decorator.uninstall()  # idempotent baseline
+        assert decorator.is_installed is False
+        assert decorator.handlers == []
+
+    def test_install_then_uninstall(self) -> None:
+        decorator = self._decorator()
+        decorator.install(bpy.context)
+        try:
+            assert decorator.is_installed is True
+            assert len(decorator.handlers) == 1
+        finally:
+            decorator.uninstall()
+        assert decorator.is_installed is False
+        assert decorator.handlers == []
+
+    def test_repeat_install_replaces_handler(self) -> None:
+        decorator = self._decorator()
+        decorator.install(bpy.context)
+        try:
+            first_handler = decorator.handlers[0]
+            decorator.install(bpy.context)
+            assert decorator.is_installed is True
+            assert len(decorator.handlers) == 1
+            assert decorator.handlers[0] is not first_handler
+        finally:
+            decorator.uninstall()
+
+
+class TestAddGradingObjectRegistersGradingObject(NewIfc4X3):
+    """Pins fix #1: ``core.add_grading_object`` must call
+    ``grading_tool.register`` on the new GradingObject so the GPU
+    decorator can find it. Without this, ``draw_daylight_lines_3d`` is
+    a silent no-op."""
+
+    def test_add_grading_object_writes_to_registry(self) -> None:
+        import bonsai.core.grading as core_grading
+
+        ifc_file = tool.Ifc.get()
+        # Author a target surface, group, feature line, criteria.
+        target_points = np.array(
+            [(-50.0, -50.0, 95.0), (50.0, -50.0, 95.0),
+             (50.0, 50.0, 95.0), (-50.0, 50.0, 95.0)]
+        )
+        target_surface = tool_surface.Surface.build_tin_from_points(
+            "target", target_points
+        )
+        tool_surface.Surface.author_ifc_host(ifc_file, target_surface)
+        tool_surface.Surface.register(ifc_file, target_surface)
+
+        feature_line = core_grading.create_feature_line(
+            tool.Ifc,
+            tool_grading.Grading,
+            name="ring",
+            vertices=[
+                (0.0, 0.0, 100.0),
+                (10.0, 0.0, 100.0),
+                (10.0, 10.0, 100.0),
+                (0.0, 10.0, 100.0),
+            ],
+            closed=True,
+        )
+        criteria = core_grading.create_grading_criteria(
+            tool.Ifc,
+            tool_grading.Grading,
+            name="3:1",
+            target_kind="surface",
+            target_ref=target_surface.guid,
+            cut_slope=2.0,
+            fill_slope=3.0,
+        )
+        group = core_grading.create_grading_group(
+            tool.Ifc,
+            tool_surface.Surface,
+            tool_grading.Grading,
+            name="pad",
+            target_surface_guid=target_surface.guid,
+            interior_fill="interpolate_from_boundary",
+        )
+        grading_object = core_grading.add_grading_object(
+            tool.Ifc,
+            tool_surface.Surface,
+            tool_grading.Grading,
+            group_guid=group.guid,
+            feature_line_guid=feature_line.guid,
+            criteria_guid=criteria.guid,
+        )
+
+        # The whole point: registry contains the GradingObject.
+        key = (id(ifc_file), grading_object.guid)
+        assert tool_grading.Grading._registry[key] is grading_object

@@ -1228,21 +1228,26 @@ class Grading:
 
     _registry: dict[tuple[int, str], object] = {}
     """Per spec §4.6: lazy-rehydrating cache keyed by ``(id(ifc_file),
-    guid)``. Stores :class:`FeatureLine`, :class:`GradingCriteria`, and
-    :class:`GradingGroup` instances; the dataclass type is preserved by
-    the value itself. Headless tests call :meth:`clear` in autouse
-    teardown."""
+    guid)``. Stores :class:`FeatureLine`, :class:`GradingCriteria`,
+    :class:`GradingGroup`, and :class:`GradingObject` instances; the
+    dataclass type is preserved by the value itself. Headless tests
+    call :meth:`clear` in autouse teardown."""
 
     @classmethod
     def register(
         cls,
         ifc_file: "ifcopenshell.file",
-        entity: Union[FeatureLine, GradingCriteria, GradingGroup],
+        entity: Union[FeatureLine, GradingCriteria, GradingGroup, GradingObject],
     ) -> None:
         """Add ``entity`` to the registry under
         ``(id(ifc_file), entity.guid)``. Called by core orchestration
         after the relevant ``author_*`` so the in-memory dataclass is
-        reused on subsequent ``get_*`` calls."""
+        reused on subsequent ``get_*`` calls.
+
+        :class:`GradingObject` registration is what backs the GPU
+        decorator's ``draw_daylight_lines_3d`` — without it, daylight
+        lines computed by ``compute_grading_object`` are lost as soon
+        as the orchestrator returns."""
         cls._registry[(id(ifc_file), entity.guid)] = entity
 
     @classmethod
@@ -1258,6 +1263,43 @@ class Grading:
         """Wipe the entire registry. Headless test teardown calls this to
         prevent cross-test contamination."""
         cls._registry.clear()
+
+    @staticmethod
+    def is_feature_line_alignment(alignment) -> bool:
+        """Return True if ``alignment`` is a Saikei feature line
+        (carries ``Pset_SaikeiFeatureLineCommon``), False if it's an
+        ordinary IfcAlignment (e.g., a roadway centerline).
+
+        Public predicate so UI-layer code (data cache, GPU decorator)
+        doesn't have to duplicate the pset-name string.
+        """
+        for rel in getattr(alignment, "IsDefinedBy", None) or []:
+            if not rel.is_a("IfcRelDefinesByProperties"):
+                continue
+            pset = rel.RelatingPropertyDefinition
+            if pset is not None and pset.Name == "Pset_SaikeiFeatureLineCommon":
+                return True
+        return False
+
+    @classmethod
+    def iter_registered(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        entity_type: type,
+    ):
+        """Yield every registered entity matching ``entity_type`` for
+        ``ifc_file``.
+
+        Public iterator over :attr:`_registry` so UI-layer consumers
+        (the GPU decorator, the data-cache UIList sync) don't have to
+        reach into the registry's private ``(id(ifc_file), guid)`` key
+        shape. Pass one of :class:`FeatureLine`, :class:`GradingCriteria`,
+        :class:`GradingGroup`, :class:`GradingObject` as ``entity_type``.
+        """
+        ifc_key = id(ifc_file)
+        for (file_key, _guid), entry in cls._registry.items():
+            if file_key == ifc_key and isinstance(entry, entity_type):
+                yield entry
 
     @classmethod
     def get_feature_line(

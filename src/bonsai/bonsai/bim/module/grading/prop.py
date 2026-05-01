@@ -49,6 +49,40 @@ from bpy.props import (
 from bpy.types import PropertyGroup, UIList
 
 
+def _on_active_feature_line_index_change(
+    self, context: bpy.types.Context
+) -> None:
+    """Mirror the highlighted feature-line UIList row's GUID into
+    :attr:`active_feature_line_guid` so the drape and edit-elevations
+    operators read a consistent picker target."""
+    if 0 <= self.active_feature_line_index < len(self.feature_lines):
+        self.active_feature_line_guid = self.feature_lines[
+            self.active_feature_line_index
+        ].guid
+    else:
+        self.active_feature_line_guid = ""
+
+
+def _on_decorator_toggle_change(self, context: bpy.types.Context) -> None:
+    """Install / uninstall :class:`GradingDecorator` based on the two
+    decorator-toggle booleans.
+
+    Lazy-imports the decorator module to avoid the circular import that
+    would otherwise hit (decorator imports tool which imports the bim
+    module's prop). The handler runs when ``show_feature_lines`` or
+    ``show_daylight_lines`` flips — installed once with both False
+    means "uninstall completely"; either True means "install if not
+    already installed".
+    """
+    from . import decorator as grading_decorator
+
+    if self.show_feature_lines or self.show_daylight_lines:
+        if not grading_decorator.GradingDecorator.is_installed:
+            grading_decorator.GradingDecorator.install(context)
+    else:
+        grading_decorator.GradingDecorator.uninstall()
+
+
 # ---------------------------------------------------------------------------
 # Collection-element types
 # ---------------------------------------------------------------------------
@@ -114,6 +148,17 @@ class CivilGradingMemberItem(PropertyGroup):
     slope_fill_id: IntProperty(default=0)
 
 
+class CivilGradingFeatureLineItem(PropertyGroup):
+    """A single row in the feature-line list. Backs the picker for
+    drape / edit-elevations operators."""
+
+    name: StringProperty(name="Name", default="")
+    guid: StringProperty(name="GlobalId", default="")
+    ifc_id: IntProperty(name="IFC Step ID", default=0)
+    closed: BoolProperty(name="Closed", default=False)
+    vertex_count: IntProperty(name="Vertex Count", default=0)
+
+
 # ---------------------------------------------------------------------------
 # UILists
 # ---------------------------------------------------------------------------
@@ -175,6 +220,31 @@ class CIVIL_UL_grading_criteria(UIList):
             layout.label(text=item.name)
 
 
+class CIVIL_UL_grading_feature_lines(UIList):
+    """UIList for :attr:`CivilGradingProperties.feature_lines`."""
+
+    def draw_item(
+        self,
+        context,
+        layout,
+        data,
+        item,
+        icon,
+        active_data,
+        active_propname,
+        index,
+    ):
+        if self.layout_type in {"DEFAULT", "COMPACT"}:
+            row = layout.row(align=True)
+            row.label(text="", icon="IPO_BACK")
+            row.prop(item, "name", text="", emboss=False)
+            closure = "○" if item.closed else "—"
+            row.label(text=f"{closure} {item.vertex_count}v")
+        elif self.layout_type == "GRID":
+            layout.alignment = "CENTER"
+            layout.label(text=item.name, icon="IPO_BACK")
+
+
 class CIVIL_UL_grading_members(UIList):
     """UIList for :attr:`CivilGradingProperties.active_group_members`."""
 
@@ -231,6 +301,20 @@ class CivilGradingProperties(PropertyGroup):
 
     active_group_members: CollectionProperty(type=CivilGradingMemberItem)
     active_member_index: IntProperty(name="Active Member Index", default=0)
+
+    # ----------------------------------------------------------------------
+    # Feature-line list (drape / edit picker)
+    # ----------------------------------------------------------------------
+
+    feature_lines: CollectionProperty(type=CivilGradingFeatureLineItem)
+    active_feature_line_index: IntProperty(
+        name="Active Feature Line Index",
+        default=0,
+        update=_on_active_feature_line_index_change,
+    )
+    active_feature_line_guid: StringProperty(
+        name="Active Feature Line GUID", default=""
+    )
 
     # ----------------------------------------------------------------------
     # Criteria list
@@ -350,4 +434,25 @@ class CivilGradingProperties(PropertyGroup):
         name="Interior Fill Source GUID",
         description="Required when interior_fill == 'from_surface'",
         default="",
+    )
+
+    # ----------------------------------------------------------------------
+    # GPU decorator toggles
+    # ----------------------------------------------------------------------
+
+    show_feature_lines: BoolProperty(
+        name="Show Feature Lines",
+        description="Render every authored feature line as a colored polyline "
+        "via the grading decorator",
+        default=False,
+        update=_on_decorator_toggle_change,
+    )
+
+    show_daylight_lines: BoolProperty(
+        name="Show Daylight Lines",
+        description="Render every grading object's daylight tie-point line "
+        "(where the slope projection meets the target surface) via the "
+        "grading decorator",
+        default=False,
+        update=_on_decorator_toggle_change,
     )

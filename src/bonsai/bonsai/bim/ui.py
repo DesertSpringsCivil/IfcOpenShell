@@ -1720,6 +1720,24 @@ class BIM_PT_tab_surface_modeler(Panel):
         pass
 
 
+class BIM_PT_tab_grading(Panel):
+    bl_idname = "BIM_PT_tab_grading"
+    bl_label = "Grading"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "scene"
+    bl_order = 3
+    bim_tab_name = "CIVIL"
+
+    @classmethod
+    def poll(cls, context):
+        if tool.Blender.should_show_panel(context, cls.bim_tab_name, cls.bl_idname) and tool.Ifc.get():
+            return True
+
+    def draw(self, context):
+        pass
+
+
 class BIM_PT_tab_sheets(Panel):
     bl_idname = "BIM_PT_tab_sheets"
     bl_label = "Sheets"

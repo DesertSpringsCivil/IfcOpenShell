@@ -397,6 +397,7 @@ def add_grading_object(
     )
     grading_tool.assign_criteria(ifc_file, group, criteria)
     grading_tool.author_slope_fill(ifc_file, group, grading_object)
+    grading_tool.register(ifc_file, grading_object)
     group.members.append(grading_object)
     return grading_object
 

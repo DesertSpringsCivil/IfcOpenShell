@@ -189,6 +189,7 @@ classes = [
     # Civil infrastructure
     ui.BIM_PT_tab_horizontal_alignment,
     ui.BIM_PT_tab_surface_modeler,
+    ui.BIM_PT_tab_grading,
     # Drawings and documents
     ui.BIM_PT_tab_sheets,
     ui.BIM_PT_tab_drawings,
