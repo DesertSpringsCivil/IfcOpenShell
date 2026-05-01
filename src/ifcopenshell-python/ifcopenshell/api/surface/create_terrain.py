@@ -27,12 +27,22 @@ import ifcopenshell.api.pset
 import ifcopenshell.api.spatial
 import ifcopenshell.guid
 
+from ..grading._shared import apply_omniclass_classification
 from .add_bounding_box_representation import add_bounding_box_representation
 from .add_tin_representation import (
     _to_point_list,
     add_tin_representation,
 )
 from .apply_saikei_pset import apply_saikei_pset
+
+
+# OmniClass Table 22 — 22-07 31 13 Site Preparation. Used as the default
+# classification for an existing-ground TIN; distinguishes terrains from
+# proposed surfaces (which default to 22-07 31 23 Fill, like slope fills)
+# so consumers can tell them apart by classification, not just entity
+# type + name (per the surfaces/grading/earthworks doc Principle #8).
+TERRAIN_OMNICLASS_CODE = "22-07 31 13"
+TERRAIN_OMNICLASS_TITLE = "Site Preparation"
 
 if TYPE_CHECKING:
     from .add_tin_representation import FlagArray, PointArray, TriangleArray
@@ -89,6 +99,8 @@ def create_terrain(
     site: Optional[ifcopenshell.entity_instance] = None,
     triangulation_tolerance: float = 0.0,
     breakline_count: int = 0,
+    omniclass_code: str = TERRAIN_OMNICLASS_CODE,
+    omniclass_title: str = TERRAIN_OMNICLASS_TITLE,
 ) -> ifcopenshell.entity_instance:
     """Create an :class:`IfcGeographicElement` with ``PredefinedType=TERRAIN`` hosting a TIN.
 
@@ -100,10 +112,20 @@ def create_terrain(
     ``Pset_GeographicElementCommon`` (``Status="NEW"``) and the Saikei
     ``Pset_SaikeiGradingSurface`` (with ``triangulation_tolerance``,
     ``breakline_count``, and inferred ``VertexCount``) are attached.
+    An OmniClass Table 22 ``IfcClassificationReference`` is associated
+    via :class:`IfcRelAssociatesClassification` so consumers can
+    distinguish existing-vs-proposed surfaces beyond the entity-type
+    + name pair (per the surfaces/grading/earthworks doc Principle #8).
 
     The function does **not** triangulate — it persists pre-triangulated data.
     Callers are responsible for the constrained Delaunay step (Bonsai's
     ``tool.Surface`` covers that).
+
+    Coordinate system: TIN points are in the project's local engineering
+    frame. Geodetic positioning is the caller's responsibility via
+    :class:`IfcMapConversion` (Bonsai's ``tool.Georeference`` covers
+    this); ``IfcSite.RefLatitude``/``RefLongitude`` is deprecated for
+    new authoring.
 
     :param file: the IFC file to author into
     :param name: human-readable name for the terrain (e.g., ``"Existing Ground"``)
@@ -115,6 +137,10 @@ def create_terrain(
         first ``IfcSite`` is used
     :param triangulation_tolerance: stored on ``Pset_SaikeiGradingSurface``
     :param breakline_count: stored on ``Pset_SaikeiGradingSurface``
+    :param omniclass_code: OmniClass Table 22 code. Default ``22-07 31 13``
+        (Site Preparation). Override for project-specific or agency
+        classifications (e.g., ``22-07 31 14`` Site Clearing).
+    :param omniclass_title: human-readable title paired with ``omniclass_code``.
     :returns: the created :class:`IfcGeographicElement`
     :raises ValueError: if ``points`` or ``triangles`` are empty, if any triangle
         index is out of range, or if ``site`` is ``None`` and no IfcSite exists
@@ -143,4 +169,5 @@ def create_terrain(
         triangulation_tolerance=triangulation_tolerance,
         breakline_count=breakline_count,
     )
+    apply_omniclass_classification(file, terrain, omniclass_code, omniclass_title)
     return terrain

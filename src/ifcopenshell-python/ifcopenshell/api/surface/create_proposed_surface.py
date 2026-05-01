@@ -27,10 +27,21 @@ import ifcopenshell.api.pset
 import ifcopenshell.api.spatial
 import ifcopenshell.guid
 
+from ..grading._shared import apply_omniclass_classification
 from .add_bounding_box_representation import add_bounding_box_representation
 from .add_tin_representation import _to_point_list, add_tin_representation
 from .apply_saikei_pset import apply_saikei_pset
 from .create_terrain import _bounding_box_corners, _resolve_site
+
+
+# OmniClass Table 22 — 22-07 31 23 Fill. Used as the default
+# classification for a proposed-ground TIN; matches the OmniClass code
+# used for slope fills and group-composite fills, distinguishing
+# proposed surfaces from existing terrain (which defaults to
+# 22-07 31 13 Site Preparation) per the surfaces/grading/earthworks
+# doc Principle #8.
+PROPOSED_SURFACE_OMNICLASS_CODE = "22-07 31 23"
+PROPOSED_SURFACE_OMNICLASS_TITLE = "Fill"
 
 if TYPE_CHECKING:
     from .add_tin_representation import FlagArray, PointArray, TriangleArray
@@ -54,6 +65,8 @@ def create_proposed_surface(
     site: Optional[ifcopenshell.entity_instance] = None,
     triangulation_tolerance: float = 0.0,
     breakline_count: int = 0,
+    omniclass_code: str = PROPOSED_SURFACE_OMNICLASS_CODE,
+    omniclass_title: str = PROPOSED_SURFACE_OMNICLASS_TITLE,
 ) -> ifcopenshell.entity_instance:
     """Create an :class:`IfcEarthworksFill` with ``PredefinedType=SUBGRADE`` hosting a TIN.
 
@@ -62,11 +75,16 @@ def create_proposed_surface(
     Delaunay step. The new element is contained in :class:`IfcSite` via
     :func:`ifcopenshell.api.spatial.assign_container`. A Body TIN
     representation, a Box LOD representation, the standard
-    ``Pset_EarthworksFillCommon`` (``Status="NEW"``), and the Saikei
-    ``Pset_SaikeiGradingSurface`` are attached.
+    ``Pset_EarthworksFillCommon`` (``Status="NEW"``), the Saikei
+    ``Pset_SaikeiGradingSurface``, and an OmniClass Table 22
+    ``IfcClassificationReference`` are attached.
 
     :func:`ifcopenshell.api.grading.create_grading_group` (Phase 2) will call
     this for the proposed-ground TIN of every grading group it authors.
+
+    Coordinate system: TIN points are in the project's local engineering
+    frame. Geodetic positioning is the caller's responsibility via
+    :class:`IfcMapConversion` (Bonsai's ``tool.Georeference`` covers this).
 
     :param file: the IFC file to author into
     :param name: human-readable name for the proposed surface
@@ -78,6 +96,9 @@ def create_proposed_surface(
         first ``IfcSite`` is used
     :param triangulation_tolerance: stored on ``Pset_SaikeiGradingSurface``
     :param breakline_count: stored on ``Pset_SaikeiGradingSurface``
+    :param omniclass_code: OmniClass Table 22 code. Default ``22-07 31 23``
+        (Fill). Override for project-specific or agency classifications.
+    :param omniclass_title: human-readable title paired with ``omniclass_code``.
     :returns: the created :class:`IfcEarthworksFill`
     :raises ValueError: if ``points`` or ``triangles`` are empty, if any triangle
         index is out of range, or if ``site`` is ``None`` and no IfcSite exists
@@ -106,4 +127,5 @@ def create_proposed_surface(
         triangulation_tolerance=triangulation_tolerance,
         breakline_count=breakline_count,
     )
+    apply_omniclass_classification(file, proposed, omniclass_code, omniclass_title)
     return proposed

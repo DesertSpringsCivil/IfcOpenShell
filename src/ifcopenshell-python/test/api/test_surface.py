@@ -565,6 +565,20 @@ class TestCreateTerrain:
         assert saikei["BreaklineCount"] == 0
         assert saikei["VertexCount"] == len(points)
 
+        # OmniClass classification — distinguishes terrain from proposed
+        # surfaces beyond entity-type + name (per
+        # SURFACES_GRADING_EARTHWORKS.md Principle #8).
+        rels = [
+            r
+            for r in empty_project_file.by_type("IfcRelAssociatesClassification")
+            if terrain in r.RelatedObjects
+        ]
+        assert len(rels) == 1
+        ref = rels[0].RelatingClassification
+        assert ref.is_a("IfcClassificationReference")
+        assert ref.Identification == "22-07 31 13"
+        assert ref.Name == "Site Preparation"
+
     def test_site_auto_resolution(self, empty_project_file: ifcopenshell.file) -> None:
         """When site=None, the project's first IfcSite is used."""
         from ifcopenshell.api.surface import create_terrain
@@ -710,6 +724,19 @@ class TestCreateProposedSurface:
         assert saikei["TriangulationTolerance"] == 0.002
         assert saikei["BreaklineCount"] == 1
         assert saikei["VertexCount"] == len(points)
+
+        # OmniClass classification — proposed surfaces share the slope-fill
+        # default code (22-07 31 23 Fill) so they're distinguishable from
+        # terrains (22-07 31 13 Site Preparation).
+        rels = [
+            r
+            for r in empty_project_file.by_type("IfcRelAssociatesClassification")
+            if proposed in r.RelatedObjects
+        ]
+        assert len(rels) == 1
+        ref = rels[0].RelatingClassification
+        assert ref.Identification == "22-07 31 23"
+        assert ref.Name == "Fill"
 
     def test_raises_when_no_site(self) -> None:
         from ifcopenshell.api.surface import create_proposed_surface
