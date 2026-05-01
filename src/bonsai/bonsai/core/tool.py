@@ -523,6 +523,26 @@ class Georeference:
 
 
 @interface
+class Grading:
+    # Saikei grading tool — Phase 5. Slope projection + IFC authoring + Blender linkage.
+    def author_feature_line(cls, ifc_file, feature_line, site=None): pass
+    def author_criteria_template(cls, ifc_file, criteria): pass
+    def author_group(cls, ifc_file, group, target_surface=None, interior_fill_source=None, site=None, author=None): pass
+    def assign_criteria(cls, ifc_file, group, criteria, target_reference=None): pass
+    def author_slope_fill(cls, ifc_file, group, grading_object): pass
+    def author_interior_fill(cls, ifc_file, group, points, triangles, name=None): pass
+    def compute_grading_object(cls, feature_line, criteria, target_surface=None, sample_step=1.0, march_step=0.5, daylight_epsilon=0.001, max_iter=10000, side="auto", name=""): pass
+    def rebuild_group_surface(cls, ifc_file, group): pass
+    def register(cls, ifc_file, entity): pass
+    def get_feature_line(cls, ifc_file, guid): pass
+    def get_group(cls, ifc_file, guid): pass
+    def invalidate(cls, ifc_file, guid): pass
+    def clear(cls): pass
+    def create_blender_curve(cls, ifc_file, feature_line): pass
+    def create_blender_empty_for_group(cls, ifc_file, group): pass
+
+
+@interface
 class Group:
     def get_group_props(cls): pass
     def get_groups_data(cls, group_type): pass

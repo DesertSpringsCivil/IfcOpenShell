@@ -117,6 +117,13 @@ def georeference():
 
 
 @pytest.fixture
+def grading():
+    prophet = Prophecy(bonsai.core.tool.Grading)
+    yield prophet
+    prophet.verify()
+
+
+@pytest.fixture
 def group():
     prophet = Prophecy(bonsai.core.tool.Group)
     yield prophet
