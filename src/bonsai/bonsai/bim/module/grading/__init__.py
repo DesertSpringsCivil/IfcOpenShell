@@ -51,6 +51,8 @@ classes: tuple[type, ...] = (
     operator.CIVIL_OT_feature_line_create,
     operator.CIVIL_OT_feature_line_drape,
     operator.CIVIL_OT_feature_line_edit_elevations,
+    operator.CIVIL_OT_grading_create_criteria,
+    operator.CIVIL_OT_grading_create_group,
 )
 
 

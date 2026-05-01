@@ -44,7 +44,7 @@ boilerplate.
 import json
 
 import bpy
-from bpy.props import BoolProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
 from bpy.types import Operator
 
 import bonsai.core.grading as core_grading
@@ -386,5 +386,200 @@ class CIVIL_OT_feature_line_edit_elevations(Operator, tool.Ifc.Operator):
             {"INFO"},
             f"Applied {len(edits)} elevation edit(s) to "
             f"{feature_line.name!r}",
+        )
+        return {"FINISHED"}
+
+
+class CIVIL_OT_grading_create_criteria(Operator, tool.Ifc.Operator):
+    """Author a reusable grading criteria.
+
+    Inputs default to :class:`CivilGradingProperties` panel state
+    (``new_criteria_name``, ``new_criteria_target_kind``, etc.); the
+    operator's own properties override per-call. Modal flow is the
+    panel popup itself — clicking the "Create Criteria" panel button
+    runs the operator with the panel's values.
+
+    Headless usage::
+
+        bpy.ops.civil.grading_create_criteria(
+            "EXEC_DEFAULT",
+            name="3:1 fill / 2:1 cut",
+            target_kind="surface",
+            target_ref="<surface-guid>",
+            cut_slope=2.0,
+            fill_slope=3.0,
+        )
+    """
+
+    bl_idname = "civil.grading_create_criteria"
+    bl_label = "Create Grading Criteria"
+    bl_description = (
+        "Author a reusable grading-slope criteria as an "
+        "IfcPropertySetTemplate. Civil 3D's Grading Criteria analog: "
+        "binds to grading groups via assign_criteria when used."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    name: StringProperty(name="Name", default="")
+    target_kind: EnumProperty(
+        name="Target Kind",
+        items=[
+            ("surface", "Surface", "Project until intersecting a target surface"),
+            ("elevation", "Elevation", "Project until reaching an absolute Z"),
+            (
+                "relative_elevation",
+                "Relative Elevation",
+                "Project until reaching a Z delta from the feature line",
+            ),
+            ("distance", "Distance", "Project to a fixed horizontal offset"),
+        ],
+        default="surface",
+    )
+    target_ref: StringProperty(
+        name="Target Reference",
+        description="For surface kind: GUID of target. For numeric kinds: "
+        "float value as string.",
+        default="",
+    )
+    cut_slope: FloatProperty(name="Cut Slope (H:V)", default=2.0, min=0.01)
+    fill_slope: FloatProperty(name="Fill Slope (H:V)", default=3.0, min=0.01)
+    max_distance: FloatProperty(
+        name="Max Distance",
+        description="Daylight cap; 0 = unlimited",
+        default=0.0,
+        min=0.0,
+    )
+    retaining_wall_at_limit: BoolProperty(
+        name="Retaining Wall at Limit", default=False
+    )
+
+    def _execute(self, context):
+        props = context.scene.CivilGradingProperties
+        # Fall back to panel state when the operator wasn't given an
+        # explicit name / target_ref (the panel's "Create" button path).
+        name = self.name or props.new_criteria_name
+        target_ref = self.target_ref or props.new_criteria_target_ref
+
+        try:
+            criteria = core_grading.create_grading_criteria(
+                tool.Ifc,
+                tool.Grading,
+                name=name,
+                target_kind=self.target_kind,
+                target_ref=target_ref,
+                cut_slope=self.cut_slope,
+                fill_slope=self.fill_slope,
+                max_distance=(
+                    self.max_distance if self.max_distance > 0.0 else None
+                ),
+                retaining_wall_at_limit=self.retaining_wall_at_limit,
+            )
+        except (ValueError, tool_grading.SaikeiGradingError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        self.report(
+            {"INFO"},
+            f"Created criteria {criteria.name!r} "
+            f"({criteria.cut_slope:g}:1 cut / {criteria.fill_slope:g}:1 fill)",
+        )
+        return {"FINISHED"}
+
+
+class CIVIL_OT_grading_create_group(Operator, tool.Ifc.Operator):
+    """Author an empty grading group.
+
+    Inputs default to :class:`CivilGradingProperties` panel state
+    (``new_group_name``, ``new_group_target_surface_guid``,
+    ``new_group_interior_fill``, ``new_group_interior_fill_source_guid``);
+    the operator's own properties override per-call.
+
+    Headless usage::
+
+        bpy.ops.civil.grading_create_group(
+            "EXEC_DEFAULT",
+            name="North Pad",
+            target_surface_guid="<terrain-guid>",
+            interior_fill="flat",
+        )
+    """
+
+    bl_idname = "civil.grading_create_group"
+    bl_label = "Create Grading Group"
+    bl_description = (
+        "Author an empty grading group as IfcGroup[GradingGroup] with a "
+        "per-group composite IfcEarthworksFill[SUBGRADE]. Add grading "
+        "objects via the Add Object operator."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    name: StringProperty(name="Name", default="")
+    target_surface_guid: StringProperty(
+        name="Target Surface GUID",
+        description="GlobalId of the existing-ground surface; populates "
+        "from the surface module's active surface when blank",
+        default="",
+    )
+    interior_fill: EnumProperty(
+        name="Interior Fill",
+        items=[
+            ("none", "None", "No interior fill"),
+            ("flat", "Flat", "Interior at average feature-line elevation"),
+            (
+                "interpolate_from_boundary",
+                "Interpolate from Boundary",
+                "Delaunay over feature-line vertices",
+            ),
+            ("from_surface", "From Surface", "Drape from a source surface"),
+        ],
+        default="interpolate_from_boundary",
+    )
+    interior_fill_source_guid: StringProperty(
+        name="Interior Fill Source GUID",
+        description="Required when interior_fill='from_surface'",
+        default="",
+    )
+
+    def _execute(self, context):
+        props = context.scene.CivilGradingProperties
+        # Fall back to panel state for any blank operator parameters.
+        name = self.name or props.new_group_name
+        target_surface_guid = (
+            self.target_surface_guid or props.new_group_target_surface_guid
+        )
+        interior_fill_source_guid = (
+            self.interior_fill_source_guid
+            or props.new_group_interior_fill_source_guid
+        )
+
+        try:
+            group = core_grading.create_grading_group(
+                tool.Ifc,
+                tool.Surface,
+                tool.Grading,
+                name=name,
+                target_surface_guid=target_surface_guid or None,
+                interior_fill=self.interior_fill,
+                interior_fill_source_guid=interior_fill_source_guid or None,
+            )
+        except (ValueError, tool_grading.SaikeiGradingError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        # Create a Blender Empty as the group's parent placeholder so
+        # the user has something selectable in the outliner.
+        try:
+            tool.Grading.create_blender_empty_for_group(tool.Ifc.get(), group)
+        except tool_grading.SaikeiGradingError as exc:
+            self.report(
+                {"WARNING"},
+                f"group authored to IFC but Blender Empty creation "
+                f"failed: {exc}",
+            )
+
+        self.report(
+            {"INFO"},
+            f"Created grading group {group.name!r} "
+            f"(interior_fill={group.interior_fill})",
         )
         return {"FINISHED"}

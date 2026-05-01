@@ -1225,6 +1225,128 @@ class TestFeatureLineEditElevationsOperator(NewIfc4X3):
         assert result == {"FINISHED"}
 
 
+class TestGradingCreateCriteriaOperator(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_grading_create_criteria` headless path."""
+
+    def test_headless_create(self) -> None:
+        result = bpy.ops.civil.grading_create_criteria(
+            "EXEC_DEFAULT",
+            name="3:1 fill",
+            target_kind="surface",
+            target_ref="some-target-guid",
+            cut_slope=2.0,
+            fill_slope=3.0,
+        )
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        # Phase 2 idempotent template singleton — exactly one
+        # IfcPropertySetTemplate authored.
+        templates = ifc_file.by_type("IfcPropertySetTemplate")
+        assert len(templates) == 1
+
+    def test_falls_back_to_panel_state(self) -> None:
+        """Empty operator name uses CivilGradingProperties.new_criteria_name."""
+        bpy.context.scene.CivilGradingProperties.new_criteria_name = "Panel Criteria"
+        bpy.context.scene.CivilGradingProperties.new_criteria_target_ref = "panel-tgt"
+        result = bpy.ops.civil.grading_create_criteria(
+            "EXEC_DEFAULT",
+            name="",  # falls back to panel
+            target_kind="surface",
+            target_ref="",  # falls back to panel
+        )
+        assert result == {"FINISHED"}
+
+    def test_invalid_target_kind_raises(self) -> None:
+        with pytest.raises(TypeError):
+            # EnumProperty rejects unknown values at the bpy.ops layer.
+            bpy.ops.civil.grading_create_criteria(
+                "EXEC_DEFAULT",
+                name="x",
+                target_kind="bogus",
+                target_ref="g",
+            )
+
+    def test_negative_slope_clamped_to_min(self) -> None:
+        """Blender's FloatProperty(min=0.01) silently clamps negative
+        values rather than raising — the FloatProperty bound is the
+        validation gate. Documenting the clamp behavior so future
+        callers don't expect a hard error."""
+        result = bpy.ops.civil.grading_create_criteria(
+            "EXEC_DEFAULT",
+            name="clamped",
+            target_kind="surface",
+            target_ref="g",
+            cut_slope=-1.0,  # clamped to 0.01 by the FloatProperty
+        )
+        assert result == {"FINISHED"}
+
+
+class TestGradingCreateGroupOperator(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_grading_create_group` headless path."""
+
+    def test_headless_create_no_target(self) -> None:
+        """Group can be created without a target surface — useful for
+        elevation/distance-kind grading groups that don't need one."""
+        result = bpy.ops.civil.grading_create_group(
+            "EXEC_DEFAULT",
+            name="No-Target Group",
+            interior_fill="none",
+        )
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        groups = [
+            g
+            for g in ifc_file.by_type("IfcGroup")
+            if getattr(g, "ObjectType", None) == "GradingGroup"
+        ]
+        assert len(groups) == 1
+        assert groups[0].Name == "No-Target Group"
+
+    def test_headless_create_with_target_surface(self, tmp_path) -> None:
+        # Author a surface first.
+        path = tmp_path / "src.csv"
+        path.write_text("0,0,98\n10,0,98\n10,10,98\n0,10,98\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        target_guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        result = bpy.ops.civil.grading_create_group(
+            "EXEC_DEFAULT",
+            name="Pad",
+            target_surface_guid=target_guid,
+            interior_fill="flat",
+        )
+        assert result == {"FINISHED"}
+
+    def test_from_surface_without_source_raises(self) -> None:
+        with pytest.raises(RuntimeError, match="interior_fill_source_guid"):
+            bpy.ops.civil.grading_create_group(
+                "EXEC_DEFAULT",
+                name="Bad",
+                interior_fill="from_surface",
+                interior_fill_source_guid="",
+            )
+
+    def test_falls_back_to_panel_state(self) -> None:
+        bpy.context.scene.CivilGradingProperties.new_group_name = "Panel Group"
+        result = bpy.ops.civil.grading_create_group(
+            "EXEC_DEFAULT",
+            name="",  # falls back to panel
+            interior_fill="none",
+        )
+        assert result == {"FINISHED"}
+        ifc_file = tool.Ifc.get()
+        groups = [
+            g
+            for g in ifc_file.by_type("IfcGroup")
+            if getattr(g, "ObjectType", None) == "GradingGroup"
+        ]
+        assert any(g.Name == "Panel Group" for g in groups)
+
+
 class TestAuthorCriteriaTemplate:
     """Tests for :meth:`Grading.author_criteria_template`."""
 
