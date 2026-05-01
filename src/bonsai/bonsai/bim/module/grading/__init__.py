@@ -37,7 +37,7 @@ shell and the parent-module wiring at ``bim/__init__.py``.
 
 import bpy
 
-from . import prop
+from . import operator, prop
 
 
 classes: tuple[type, ...] = (
@@ -48,6 +48,8 @@ classes: tuple[type, ...] = (
     prop.CIVIL_UL_grading_criteria,
     prop.CIVIL_UL_grading_members,
     prop.CivilGradingProperties,
+    operator.CIVIL_OT_feature_line_create,
+    operator.CIVIL_OT_feature_line_drape,
 )
 
 

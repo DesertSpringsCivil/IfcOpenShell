@@ -1024,6 +1024,129 @@ class TestGradingModuleRegistration:
         assert hasattr(bpy.types, "CIVIL_UL_grading_criteria")
         assert hasattr(bpy.types, "CIVIL_UL_grading_members")
 
+    def test_operators_registered(self) -> None:
+        assert hasattr(bpy.types, "CIVIL_OT_feature_line_create")
+        assert hasattr(bpy.types, "CIVIL_OT_feature_line_drape")
+
+
+class TestFeatureLineCreateOperator(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_feature_line_create` headless path."""
+
+    def test_headless_create_from_csv(self, tmp_path) -> None:
+        # Write a closed-loop pad perimeter.
+        path = tmp_path / "perimeter.csv"
+        path.write_text(
+            "0,0,100\n10,0,100\n10,10,100\n0,10,100\n"
+        )
+        bpy.context.scene.CivilGradingProperties.new_feature_line_name = (
+            "Op Test Perimeter"
+        )
+
+        result = bpy.ops.civil.feature_line_create(
+            "EXEC_DEFAULT",
+            csv_filepath=str(path),
+            closed=True,
+        )
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        alignments = ifc_file.by_type("IfcAlignment")
+        assert len(alignments) == 1
+        assert alignments[0].Name == "Op Test Perimeter"
+
+    def test_invalid_csv_path_raises(self, tmp_path) -> None:
+        ifc_file = tool.Ifc.get()
+        before = len(ifc_file.by_type("IfcAlignment"))
+        with pytest.raises(RuntimeError, match="could not parse"):
+            bpy.ops.civil.feature_line_create(
+                "EXEC_DEFAULT",
+                csv_filepath="/nonexistent/bogus.csv",
+            )
+        # No new alignment authored.
+        assert len(ifc_file.by_type("IfcAlignment")) == before
+
+    def test_too_few_vertices_raises(self, tmp_path) -> None:
+        ifc_file = tool.Ifc.get()
+        path = tmp_path / "single.csv"
+        path.write_text("0,0,100\n")  # only 1 vertex
+        before = len(ifc_file.by_type("IfcAlignment"))
+        with pytest.raises(RuntimeError, match="≥ 2 vertices"):
+            bpy.ops.civil.feature_line_create(
+                "EXEC_DEFAULT", csv_filepath=str(path)
+            )
+        assert len(ifc_file.by_type("IfcAlignment")) == before
+
+
+class TestFeatureLineDrapeOperator(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_feature_line_drape` headless path."""
+
+    def _create_source_surface_and_feature_line(self, tmp_path):
+        """Helper: create a flat existing surface at z=98 and a feature
+        line at z=100 ready for draping."""
+        # Source surface — large enough to cover the feature line.
+        source_path = tmp_path / "source.csv"
+        source_path.write_text(
+            "-50,-50,98\n50,-50,98\n50,50,98\n-50,50,98\n"
+        )
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Source"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(source_path)
+        )
+        source_guid = (
+            bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+        )
+
+        # Feature line at z=100.
+        fl_path = tmp_path / "fl.csv"
+        fl_path.write_text("0,0,100\n10,0,100\n10,10,100\n0,10,100\n")
+        bpy.context.scene.CivilGradingProperties.new_feature_line_name = "Drape Target"
+        bpy.ops.civil.feature_line_create(
+            "EXEC_DEFAULT", csv_filepath=str(fl_path), closed=True
+        )
+        # Find the feature line's GUID.
+        ifc_file = tool.Ifc.get()
+        alignment = next(
+            a
+            for a in ifc_file.by_type("IfcAlignment")
+            if a.Name == "Drape Target"
+        )
+        return source_guid, alignment.GlobalId
+
+    def test_headless_drape(self, tmp_path) -> None:
+        source_guid, fl_guid = self._create_source_surface_and_feature_line(
+            tmp_path
+        )
+
+        result = bpy.ops.civil.feature_line_drape(
+            "EXEC_DEFAULT",
+            feature_line_guid=fl_guid,
+            surface_guid=source_guid,
+        )
+        assert result == {"FINISHED"}
+
+        # Verify the IFC alignment's polyline now has z=98 vertices.
+        ifc_file = tool.Ifc.get()
+        alignment = next(
+            a for a in ifc_file.by_type("IfcAlignment")
+            if a.GlobalId == fl_guid
+        )
+        polycurve = next(
+            item
+            for shape_rep in alignment.Representation.Representations
+            for item in shape_rep.Items
+            if item.is_a("IfcIndexedPolyCurve")
+        )
+        for coord in polycurve.Points.CoordList:
+            assert coord[2] == pytest.approx(98.0)
+
+    def test_missing_guids_raises(self) -> None:
+        with pytest.raises(RuntimeError, match="required"):
+            bpy.ops.civil.feature_line_drape(
+                "EXEC_DEFAULT",
+                feature_line_guid="",
+                surface_guid="",
+            )
+
 
 class TestAuthorCriteriaTemplate:
     """Tests for :meth:`Grading.author_criteria_template`."""

@@ -38,6 +38,7 @@ from bonsai.tool.drawing import Drawing
 from bonsai.tool.feature import Feature
 from bonsai.tool.geometry import Geometry
 from bonsai.tool.georeference import Georeference
+from bonsai.tool.grading import Grading
 from bonsai.tool.group import Group
 from bonsai.tool.ifc import Ifc
 from bonsai.tool.ifcgit import IfcGit, IfcGitRepo
