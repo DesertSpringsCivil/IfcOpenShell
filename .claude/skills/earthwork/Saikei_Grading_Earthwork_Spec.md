@@ -1,9 +1,27 @@
 # Saikei Civil — Site Grading & Earthwork Implementation Spec
 
-**Status:** Draft v3.2.4 — Phases 1–3 shipped, Phase 4 ready
+**Status:** Draft v3.2.5 — Phases 1–5 shipped, Phase 6 (Bonsai earthwork) next
 **Target repo path:** `C:\GitHub\IfcOpenShell-saikei-dev\src\bonsai\bonsai\` (branch: `saikei-dev`)
 **Scope:** Non-linear site grading (pads, parking lots, ponds, infield areas)
 **Companion doc:** `Saikei_Grading_Earthwork_Research.md` (commercial tool survey — background reading)
+
+## v3.2.5 changelog
+
+Phases 4 (Bonsai surface) and 5 (Bonsai grading) shipped. Six post-implementation amendments to bring the spec back in step with what landed. The implementations are unchanged — this revision catches the document up.
+
+1. **§4.8 (new) — Visualization decorators.** Bonsai's pattern for surface / feature-line / daylight-line visualization is GPU draw handlers (`SurfaceDecorator`, `GradingDecorator`), not Blender mesh `color_attributes`. Phase 4's elevation banding ships as `SMOOTH_COLOR` per-vertex draws at `POST_VIEW`, and Phase 5's feature-line and daylight-line overlays use `POLYLINE_UNIFORM_COLOR`. Cross-references the 14 other Bonsai modules using the same pattern. §8.3 cross-reference added.
+
+2. **§6.2 — Slope projection tunables pinned.** The four marching-loop tunables now have committed defaults (`DEFAULT_SAMPLE_STEP=1.0` m, `DEFAULT_MARCH_STEP=0.5` m, `DEFAULT_DAYLIGHT_EPSILON=1e-3` m, `DEFAULT_MAX_ITER=10_000`). Adjustments are reviewable code changes, not silent constant edits.
+
+3. **§6.3 — Cascade rebuild policy.** Composite proposed-surface rebuilds fire on modal commit (Enter/LMB), not per modal frame. Mouse-drag during a feature-line G-key edit is draft state; cancel discards. Phase 5 ships rebuild on explicit `civil.grading_rebuild_group` invocation; cascade-on-feature-line-edit is Phase 5.1.
+
+4. **§6.3 — Composite Hole flag (-1) is Phase 6 prerequisite.** Phase 5 writes `triangle_flags = zeros(N)` for the composite proposed surface (all triangles visible). The IFC 4.3 cross-surface composition rule (Hole=-1 falls through to existing ground) requires the composite to mark fall-through regions with `Flag=-1`; Phase 6 prismoidal volume composition needs this. Documented as a known gap.
+
+5. **§7.1 — Core orchestration signatures match the shipped implementation.** Replaces the speculative finer-grained tool-method names (`author_ifc_group`, `apply_source_pset`, `add_to_group`, `update_blender`, etc.) with what shipped: `author_feature_line` / `author_group` / `assign_criteria` / `compute_grading_object` / `author_slope_fill` / `add_interior_fill_to_group` / `rebuild_group_surface` / `update_blender_curve`. Also updates the function names to the actually-shipped `core` API (`create_feature_line`, `drape_feature_line`, `rebuild_group`, …).
+
+6. **§8.4 — G-key conflict resolution helper convention.** Modes register an `is_*_active(self) -> bool` helper on their `CivilCivilProperties` PropertyGroup; the `G` keymap entry's `poll` reads exactly one of them. Documents how to add new G-key modes without retroactively partitioning existing modes.
+
+Phase 1, 2, 3, 4, 5 implementations are unaffected — this revision catches the spec up to what shipped.
 
 ## v3.2.4 changelog
 
@@ -505,6 +523,38 @@ def create_surface_from_points(
 
 **Type-annotation rule.** Core function signatures use only built-in types and `ifcopenshell` types. They do **not** import `numpy`, `shapely`, or `bpy` at module top. Where a signature needs to accept point arrays, the type is `list[tuple[float, float, float]]`; the tool layer converts to `np.ndarray` internally on the way in and back to native Python types on the way out. This keeps `core/` agent-callable and headless without pulling the math stack into every importer.
 
+### 4.8 Visualization decorators
+
+Saikei renders all custom overlays (TIN wireframes, elevation banding, feature-line and daylight-line polylines) through GPU draw handlers, **not** through Blender mesh `color_attributes` or modifier stacks. This matches the 14 other Bonsai modules that ship visualization (alignment PI markers, georeferencing axes, opening cuts, dimensions, etc.).
+
+**Pattern.** A single class per module owns the draw lifecycle:
+
+```python
+class GradingDecorator:
+    is_installed: bool = False
+    handlers: list = []
+
+    @classmethod
+    def install(cls, context): ...   # SpaceView3D.draw_handler_add at POST_VIEW
+    @classmethod
+    def uninstall(cls): ...
+    def draw_3d(cls, context):       # toggle-driven dispatch to per-method draws
+        ...
+```
+
+The `install` / `uninstall` toggle hooks are wired to BoolProperty `update=` callbacks on the module's `CivilCivilProperties` PropertyGroup (`show_triangles`, `show_elevation_banding`, `show_feature_lines`, `show_daylight_lines`). Toggling either ON installs the handler if not already; toggling all OFF uninstalls.
+
+**Shaders used.**
+
+- `POLYLINE_UNIFORM_COLOR` for line rendering (TIN wireframe edges, feature lines, daylight lines, breaklines). Requires `viewportSize` + `lineWidth` uniforms; pass `(region.width, region.height)` when `bpy.context.region` is available, fall back to `(1920, 1080)` for headless / thumbnail draws.
+- `SMOOTH_COLOR` for filled rendering (elevation banding on TIN triangles). Per-vertex Z-derived RGBA colors interpolated across triangle batches.
+
+**File-load cleanup.** A `@persistent load_post` handler in each module's `__init__.py` calls `Decorator.uninstall()` and resets the module's toggle BoolProperties. Without this, the draw handler captures the previous file's context in a closure and races the new file's initialization. Toggle reset removes a load-order dependency between `load_post` and property deserialization.
+
+**Read-from semantics.** Decorators read live state via `tool.<Module>.get(ifc_file, guid)` or `tool.<Module>.iter_registered(...)` rather than maintaining their own caches. Per-frame rehydration cost is acceptable for typical Saikei scenes (≤ ~10⁴ TIN points, ≤ ~10² grading entities); a future Phase 5.1 / 6.1 may move to dirty-flagged caching if real-world projects push past that.
+
+Cross-references: §8.3 (PropertyGroup BoolProperty toggles), §8.4 (G-key conflict resolution does **not** apply to decorator toggles — toggles are stateless visualization, not modal-edit input).
+
 ---
 
 ## 5. Data Model
@@ -756,6 +806,17 @@ For each segment between consecutive vertices of the feature line:
 
 **Outward direction:** for closed feature lines (pad perimeters), outward is "away from the interior" — determined by polygon orientation (counterclockwise = outward is to the right of the direction of traversal). For open feature lines, the user specifies which side the projection goes on (matches Civil 3D's "Apply to Side" prompt).
 
+**Tunables (committed defaults).** Four module-level constants in `tool/grading.py` govern the algorithm's accuracy / cost trade-off. Adjustments are reviewable code changes, not silent constant edits.
+
+| Constant | Default | Meaning |
+|---|---|---|
+| `DEFAULT_SAMPLE_STEP` | `1.0` m | Distance between sample points along each feature-line segment. Smaller = more daylight-line resolution but linear cost. 1 m suits typical pad / corridor work. |
+| `DEFAULT_MARCH_STEP` | `0.5` m | Horizontal distance per outward-march iteration when hunting for daylight against a target surface. Smaller = more accurate crossing detection but higher per-sample cost. 0.5 m halves the typical surface triangle scale; bisection refines further. |
+| `DEFAULT_DAYLIGHT_EPSILON` | `1e-3` m | Vertical tolerance for declaring "the slope hit the target." 1 mm in metric — well below survey accuracy, comfortably above IEEE 754 noise. |
+| `DEFAULT_MAX_ITER` | `10_000` | Marching-loop iteration cap per sample point. At `DEFAULT_MARCH_STEP=0.5` m this allows 5 km of horizontal projection per sample before raising `SaikeiSlopeProjectionError` — far beyond any realistic civil grading reach. |
+
+`Grading.compute_grading_object` accepts each as a keyword override. The primary use-cases for overriding are imperial-units projects (`DEFAULT_SAMPLE_STEP=3.0` ft is closer to the metric default than `1.0` ft) and very tight pad-corner geometry (drop `DEFAULT_MARCH_STEP` to `0.1` m).
+
 ### 6.3 Grading group composition
 
 When a group has multiple grading objects, its composite proposed surface is built from:
@@ -772,6 +833,17 @@ When a group has multiple grading objects, its composite proposed surface is bui
 The composite is authored as an `IfcEarthworksFill[SUBGRADE]` entity that aggregates the slope fills and interior fill via `IfcRelAggregates`. It carries both the proposed TIN (as `SurfaceModel` representation) and the composite fill solid (as a `Body` / `Tessellation` representation per §2.4).
 
 **Cross-surface composition uses the IFC `Flags` semantic.** Where a grading group's proposed surface is meant to "fall through" to existing ground (e.g., the area between adjacent grading groups, or the no-grading region of a partial-site project), the composite proposed TIN's covering triangles in that XY region are authored with `Flag = -1` (Hole). Per IFC 4.3.2 §8.8.3.48, downstream readers combine surfaces by retaining Voids (-2) and overriding Holes (-1) wherever another surface has visible geometry at the same XY. This means Saikei does not need a custom merge algorithm: author the per-surface Flags correctly and the standardized rules handle composition. Use `Flag = -2` (Void) only for regions that must remain empty regardless of any other surface — e.g., under a building footprint, where the existing-ground TIN should also be excluded.
+
+**Phase 5 MVP gap (Phase 6 prerequisite):** the shipped `tool.Grading.rebuild_group_surface` writes `triangle_flags = numpy.zeros(N)` for the composite proposed surface — every triangle is visible, no fall-through. Acceptable for single-group scenes where no cross-surface composition is needed, but Phase 6's TIN-to-TIN prismoidal volumes (§6.4) implicitly assume the composite respects the Flag rules above. Before Phase 6 ships volume composition across grading groups + existing ground, the rebuild path must mark interior-fill triangles outside the feature-line ring as `Flag=-1`. Tracked in the spec amendments queue as a Phase 6 prereq.
+
+**Cascade rebuild policy.** When the user is dragging a feature-line vertex via G-key (Phase 5.1+), per-frame composite recomputation would crater interactivity. The contract is:
+
+- **Rebuild fires on commit, not per modal frame.** Modal confirm (Enter or LMB) calls `civil.grading_rebuild_group` once with the final state. Modal cancel (Esc / RMB) discards the draft and triggers no rebuild.
+- **Phase 5 ships explicit-rebuild only.** `civil.grading_rebuild_group` is invoked from the panel button or `bpy.ops` directly. No automatic cascade on feature-line edit.
+- **Phase 5.1 adds cascade-on-commit.** When `civil.feature_line_edit_elevations` confirms an edit, it walks `tool.Grading.find_groups_using_feature_line(ifc_file, feature_line.guid)` and rebuilds each affected group exactly once. The walk is bounded by the registry size (≤ ~10² in typical scenes); per-edit cost is the rebuild cost itself, not the lookup.
+- **Modal draft state lives on the in-memory dataclass.** While the modal is active, vertex Z values are mutated on the `FeatureLine` dataclass directly. The IFC-side `update_feature_line_vertices` and `update_blender_curve` calls fire only on commit.
+
+This mirrors the alignment PI editor's modal-vs-IFC discipline: modal events touch the dataclass; commit writes both IFC and Blender; cancel restores from the pre-modal snapshot.
 
 ### 6.4 TIN-to-TIN prismoidal volumes
 
@@ -909,40 +981,78 @@ def set_surface_boundary(
     surface_tool.update_blender(surface)
 
 
-# core/grading.py
+# core/grading.py — actual shipped signatures, Phase 5
 
-def create_grading_group(
+def create_feature_line(
     ifc_tool: "type[tool.Ifc]",
-    surface_tool: "type[tool.Surface]",
     grading_tool: "type[tool.Grading]",
     name: str,
-    target_surface_guid: str,
-    interior_fill: str = "interpolate_from_boundary",
-) -> str:
-    """Create an empty grading group targeting an existing surface."""
+    vertices: list[tuple[float, float, float]],
+    closed: bool = False,
+) -> "tool.Grading.FeatureLine":
+    """Author a feature line from an XYZ vertex sequence.
+
+    Sequencing: build FeatureLine dataclass → author_feature_line
+    (IfcAlignment + IfcIndexedPolyCurve under the alignment Axis
+    subcontext + Pset_SaikeiFeatureLineCommon) → register.
+    """
     ifc_file = ifc_tool.get()
-    target = surface_tool.get(ifc_file, target_surface_guid)
-    group = grading_tool.create_group(name, target, interior_fill)
-    grading_tool.author_ifc_group(ifc_file, group)               # IfcGroup ObjectType="GradingGroup"
-    grading_tool.author_ifc_composite_fill(ifc_file, group)      # IfcEarthworksFill [SUBGRADE] (composite)
-    grading_tool.apply_source_pset(ifc_file, group)              # Pset_SaikeiGradingSource
-    return group.guid
+    feature_line = tool.Grading.FeatureLine(name=name, vertices=vertices, closed=closed)
+    grading_tool.author_feature_line(ifc_file, feature_line)
+    grading_tool.register(ifc_file, feature_line)
+    return feature_line
 
 
 def create_grading_criteria(
     ifc_tool: "type[tool.Ifc]",
     grading_tool: "type[tool.Grading]",
     name: str,
-    target_kind: str,
-    cut_slope: float,
-    fill_slope: float,
+    target_kind: str,                        # one of {surface, elevation, relative_elevation, distance}
+    target_ref: str | float,
+    cut_slope: float = 2.0,
+    fill_slope: float = 3.0,
     max_distance: float | None = None,
-) -> str:
-    """Author a reusable grading criteria as an IfcPropertySetTemplate."""
+    retaining_wall_at_limit: bool = False,
+) -> "tool.Grading.GradingCriteria":
+    """Author a reusable grading criteria as an IfcPropertySetTemplate
+    (singleton-by-shape at project scope). Binding to a specific group
+    happens later in add_grading_object via assign_criteria.
+    """
     ifc_file = ifc_tool.get()
-    criteria = grading_tool.build_criteria(name, target_kind, cut_slope, fill_slope, max_distance)
-    grading_tool.author_ifc_criteria_template(ifc_file, criteria)
-    return criteria.guid
+    criteria = tool.Grading.GradingCriteria(
+        name=name, target_kind=target_kind, target_ref=target_ref,
+        cut_slope=cut_slope, fill_slope=fill_slope,
+        max_distance=max_distance, retaining_wall_at_limit=retaining_wall_at_limit,
+    )
+    grading_tool.author_criteria_template(ifc_file, criteria)
+    grading_tool.register(ifc_file, criteria)
+    return criteria
+
+
+def create_grading_group(
+    ifc_tool: "type[tool.Ifc]",
+    surface_tool: "type[tool.Surface]",
+    grading_tool: "type[tool.Grading]",
+    name: str,
+    target_surface_guid: str | None = None,
+    interior_fill: str = "interpolate_from_boundary",
+    interior_fill_source_guid: str | None = None,
+) -> "tool.Grading.GradingGroup":
+    """Author an empty grading group as IfcGroup[GradingGroup] plus a
+    per-group composite IfcEarthworksFill[SUBGRADE]. Pset_SaikeiGradingSource
+    is attached by the same author_group call.
+    """
+    ifc_file = ifc_tool.get()
+    target = surface_tool.get(ifc_file, target_surface_guid) if target_surface_guid else None
+    source = surface_tool.get(ifc_file, interior_fill_source_guid) if interior_fill_source_guid else None
+    group = tool.Grading.GradingGroup(
+        name=name, target_surface_guid=target_surface_guid,
+        interior_fill=interior_fill,
+        interior_fill_source_guid=interior_fill_source_guid,
+    )
+    grading_tool.author_group(ifc_file, group, target_surface=target, interior_fill_source=source)
+    grading_tool.register(ifc_file, group)
+    return group
 
 
 def add_grading_object(
@@ -952,39 +1062,60 @@ def add_grading_object(
     group_guid: str,
     feature_line_guid: str,
     criteria_guid: str,
-) -> str:
-    """Apply a criteria to a feature line within a group."""
+) -> "tool.Grading.GradingObject":
+    """Apply a criteria to a feature line within a group, computing
+    the slope projection ribbon and authoring it as
+    IfcEarthworksFill[SLOPEFILL]. Cascade rebuild fires explicitly via
+    rebuild_group, not as a side effect.
+    """
     ifc_file = ifc_tool.get()
     group = grading_tool.get_group(ifc_file, group_guid)
     feature_line = grading_tool.get_feature_line(ifc_file, feature_line_guid)
     criteria = grading_tool.get_criteria(ifc_file, criteria_guid)
-    target = surface_tool.get(ifc_file, group.target_surface_guid)
+    target = surface_tool.get(ifc_file, group.target_surface_guid) if criteria.target_kind == "surface" else None
 
-    grading_object = grading_tool.compute_grading_object(feature_line, criteria, target)
-    grading_tool.author_ifc_slope_fill(ifc_file, grading_object) # IfcEarthworksFill [SLOPEFILL]
-    grading_tool.add_to_group(ifc_file, group, grading_object)
-    grading_tool.rebuild_group_surface(group)
-    grading_tool.update_blender(group)
-    return grading_object.guid
+    grading_object = grading_tool.compute_grading_object(feature_line, criteria, target_surface=target)
+    grading_tool.assign_criteria(ifc_file, group, criteria)
+    grading_tool.author_slope_fill(ifc_file, group, grading_object)
+    grading_tool.register(ifc_file, grading_object)
+    group.members.append(grading_object)
+    return grading_object
 
 
-def edit_feature_line_elevations(
+def rebuild_group(
     ifc_tool: "type[tool.Ifc]",
+    surface_tool: "type[tool.Surface]",
+    grading_tool: "type[tool.Grading]",
+    group_guid: str,
+) -> "tool.Surface.CivilSurface":
+    """Force-rebuild a group's composite proposed surface. Per §6.3
+    Cascade Rebuild Policy, this is the explicit-commit path; no
+    cascade-on-feature-line-edit until Phase 5.1.
+    """
+    ifc_file = ifc_tool.get()
+    group = grading_tool.get_group(ifc_file, group_guid)
+    composite = grading_tool.rebuild_group_surface(ifc_file, group)
+    surface_tool.register(ifc_file, composite)
+    return composite
+
+
+def drape_feature_line(
+    ifc_tool: "type[tool.Ifc]",
+    surface_tool: "type[tool.Surface]",
     grading_tool: "type[tool.Grading]",
     feature_line_guid: str,
-    edits: list[tuple[int, float]],
-) -> None:
-    """Edit feature line vertex elevations; cascade rebuild to all parent groups."""
+    surface_guid: str,
+) -> "tool.Grading.FeatureLine":
+    """Drape a feature line onto a target surface — replace each
+    vertex's Z with surface.z_at(x, y). Phase 5 ships this for the
+    drape operator; Phase 5.1 will add the modal-grab equivalent.
+    """
     ifc_file = ifc_tool.get()
     feature_line = grading_tool.get_feature_line(ifc_file, feature_line_guid)
-    grading_tool.apply_elevation_edits(feature_line, edits)
-    grading_tool.update_ifc_alignment_representation(ifc_file, feature_line)
-
-    # Dynamic rebuild — find all grading objects using this feature line
-    affected_groups = grading_tool.find_groups_using_feature_line(ifc_file, feature_line_guid)
-    for group in affected_groups:
-        grading_tool.rebuild_group_surface(group)
-        grading_tool.update_blender(group)
+    surface = surface_tool.get(ifc_file, surface_guid)
+    grading_tool.drape_to_surface(feature_line, surface)
+    grading_tool.update_feature_line_vertices(ifc_file, feature_line)
+    return feature_line
 
 
 # core/earthwork.py
@@ -1319,6 +1450,16 @@ Saikei mirrors the alignment T-panel toolbar's modal-edit precedent for vertex-e
 
 `bpy.utils.register_keymap` registration is per-window-manager and is added/removed in `register()` / `unregister()` in `bim/module/grading/__init__.py`. Tests verify keymap registration via `wm.keyconfigs.user.keymaps['civil'].keymap_items`.
 
+**G-key conflict resolution policy.** Both `tool.Surface` (modal breakline picker, Phase 4.1+) and `tool.Grading` (feature-line elevation edit, Phase 5.1+) want the `G` key. To avoid having every modal poll a list of mutually-exclusive booleans, Saikei uses a single helper convention:
+
+- Each modal-edit-mode property in a `Civil*Properties` PropertyGroup pairs with an `is_*_active(self) -> bool` classmethod or module-level function that reads the underlying flag and returns a boolean.
+- The `G` keymap entry's `poll` reads exactly **one** of those helpers — the one for the mode currently scoped (`feature_line_edit_mode` for grading, `breakline_pick_mode` for surface). Two modes cannot be active simultaneously: `Tab` (toggle into edit mode) on one module disables the other module's flag.
+- Adding a new G-key mode (e.g., a future cross-section editor) is a three-step contract: define the BoolProperty, define `is_*_active`, register a new keymap entry whose `poll` returns `is_*_active(props)` — no edits to existing modes.
+
+The helper-pair convention keeps the keymap registration site shallow (one entry per mode) and makes mode partitioning a property of the PropertyGroup rather than the keymap, so adding modes from new modules doesn't churn `bim/module/grading/__init__.py`.
+
+Decorator toggles (`show_triangles`, `show_feature_lines`, etc., per §4.8) do **not** use this convention — they're stateless visualization, not modal edits, and the GPU draw handlers don't claim keys.
+
 ### 8.5 Modal vs headless operator contract
 
 Every operator with `[M+H]` annotation in §8.2 implements both an `invoke()` (modal entry) and an `_execute()` (headless execution). Calling conventions:
@@ -1504,4 +1645,4 @@ Most previous open questions have been resolved by this spec revision. Remaining
 
 ---
 
-*End of implementation spec. Phases 1–3 shipped; Phase 4 (Bonsai surface module) ready to start.*
+*End of implementation spec. Phases 1–5 shipped; Phase 6 (Bonsai earthwork module — TIN-to-TIN volumes, cut/fill solid construction, shrink/swell pay quantities) ready to start.*
