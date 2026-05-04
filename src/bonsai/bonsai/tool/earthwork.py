@@ -346,6 +346,7 @@ class Earthwork:
         shrink_factor: float = 1.0,
         swell_factor: float = 1.0,
         capture_per_triangle_deltas: bool = False,
+        build_solids: bool = False,
     ) -> VolumeResult:
         """Compute cut and fill volumes between two surfaces.
 
@@ -382,10 +383,16 @@ class Earthwork:
             ``per_triangle_deltas`` field is populated with one
             entry per sub-triangle in iteration order. Used by the
             optional cut/fill color-map overlay (Phase 6 commit 12+).
+        :param build_solids: when True, the result's ``cut_solid``
+            and ``fill_solid`` fields are populated with closed-solid
+            geometry (a "prism soup" — one triangular prism per
+            sub-triangle, 6 vertices and 5 faces each). Each prism
+            independently bounds a watertight chunk of cut / fill
+            volume; the IFC PolygonalFaceSet body holds the union
+            of all of them. Volumes from the prisms agree with the
+            Qto values (both come from the same sub-triangle pass).
         :returns: a :class:`VolumeResult` with cut / fill magnitudes
-            populated. ``cut_solid`` / ``fill_solid`` remain None
-            here — solid construction (§6.5) is a separate step on
-            the result.
+            populated.
         """
         domain = cls._resolve_volume_domain(
             existing_surface, proposed_surface, domain
@@ -410,7 +417,9 @@ class Earthwork:
 
         cut_total = 0.0
         fill_total = 0.0
-        deltas: list[float] = [] if capture_per_triangle_deltas else []
+        deltas: list[float] = []
+        cut_subs: list[SubTriangle] = []
+        fill_subs: list[SubTriangle] = []
 
         for proposed_poly in proposed_polys:
             candidate_indices = existing_tree.query(proposed_poly)
@@ -441,8 +450,19 @@ class Earthwork:
                         deltas.append(sub_tri.delta_z)
                     if signed > 0:
                         cut_total += signed
+                        if build_solids:
+                            cut_subs.append(sub_tri)
                     elif signed < 0:
                         fill_total += -signed
+                        if build_solids:
+                            fill_subs.append(sub_tri)
+
+        cut_solid = (
+            cls._build_prism_soup_solid(cut_subs) if build_solids else None
+        )
+        fill_solid = (
+            cls._build_prism_soup_solid(fill_subs) if build_solids else None
+        )
 
         return VolumeResult(
             existing_surface_guid=existing_surface.guid,
@@ -451,6 +471,8 @@ class Earthwork:
             compacted_fill_m3=float(fill_total),
             shrink_factor=shrink_factor,
             swell_factor=swell_factor,
+            cut_solid=cut_solid,
+            fill_solid=fill_solid,
             per_triangle_deltas=(
                 np.asarray(deltas, dtype=float)
                 if capture_per_triangle_deltas else None
@@ -565,6 +587,65 @@ class Earthwork:
             for tri in triangulated.geoms:
                 if tri.geom_type == "Polygon" and tri.area > 0:
                     yield tri
+
+    @staticmethod
+    def _build_prism_soup_solid(
+        sub_triangles: list[SubTriangle],
+    ) -> Optional[ClosedSolid]:
+        """Build a prism-soup :class:`ClosedSolid` covering all
+        ``sub_triangles``. One triangular prism per sub-triangle —
+        6 vertices (3 on existing, 3 on proposed) and 5 faces (top
+        triangle, bottom triangle, 3 side quads).
+
+        Each prism is independently watertight; the IFC PolygonalFaceSet
+        body holds the union of all of them. This is the spec §6.5
+        MVP solid construction — a single connected manifold per
+        cut/fill region (the §6.5 "stages" approach with zero-delta
+        contour boundary stitching) is a Phase 6.1 refinement.
+
+        :returns: ``None`` if ``sub_triangles`` is empty (no cut/fill
+            volume to author); otherwise a :class:`ClosedSolid` with
+            ``points.shape == (6N, 3)`` and ``len(faces) == 5N``.
+        """
+        if not sub_triangles:
+            return None
+
+        all_points: list[tuple[float, float, float]] = []
+        all_faces: list[list[int]] = []
+
+        for sub in sub_triangles:
+            base = len(all_points)
+            xy = sub.vertices_xy
+            # 3 vertices on the proposed surface (bottom of cut, top
+            # of fill — orientation-agnostic; faces below define
+            # outward normals).
+            for x, y in xy:
+                all_points.append(
+                    (float(x), float(y), float(sub.z_proposed_avg))
+                )
+            # 3 vertices on the existing surface (top of cut, bottom
+            # of fill).
+            for x, y in xy:
+                all_points.append(
+                    (float(x), float(y), float(sub.z_existing_avg))
+                )
+            # Vertex layout per prism:
+            #   p0,p1,p2 = proposed-Z triangle
+            #   p3,p4,p5 = existing-Z triangle (same XY, different Z)
+            p0, p1, p2, p3, p4, p5 = (base + i for i in range(6))
+            # Cap faces. Order picks outward normals consistent for
+            # cut prisms (existing above proposed); fill prisms use
+            # the same definition geometrically since signed volumes
+            # are tracked by the dataclass, not the geometry.
+            all_faces.append([p3, p4, p5])  # top  (existing-Z tri)
+            all_faces.append([p2, p1, p0])  # bottom (proposed-Z tri, reversed)
+            # Side quads — 3 of them, one per prism edge.
+            all_faces.append([p0, p1, p4, p3])
+            all_faces.append([p1, p2, p5, p4])
+            all_faces.append([p2, p0, p3, p5])
+
+        points_array = np.asarray(all_points, dtype=float)
+        return ClosedSolid(points=points_array, faces=all_faces)
 
     @staticmethod
     def _make_sub_triangle(

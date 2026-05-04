@@ -437,6 +437,64 @@ class TestComputeVolumesDomainFallback:
         assert result.undisturbed_cut_m3 == pytest.approx(1000.0, rel=1e-9)
 
 
+class TestComputeVolumesBuildSolids:
+    """Optional prism-soup solid construction (spec §6.5 MVP)."""
+
+    def test_solids_are_none_by_default(self) -> None:
+        existing = _flat_square_surface("eg", 110.0)
+        proposed = _flat_square_surface("pr", 100.0)
+        result = tool_earthwork.Earthwork.compute_volumes(
+            existing, proposed
+        )
+        assert result.cut_solid is None
+        assert result.fill_solid is None
+
+    def test_cut_solid_populated_for_cut_pair(self) -> None:
+        existing = _flat_square_surface("eg", 110.0)
+        proposed = _flat_square_surface("pr", 100.0)
+        result = tool_earthwork.Earthwork.compute_volumes(
+            existing, proposed, build_solids=True
+        )
+        assert result.cut_solid is not None
+        # Two existing triangles × two proposed triangles → at most
+        # 2 sub-triangles for this aligned pair (each existing tri ∩
+        # corresponding proposed tri = the same triangle).
+        # Each sub-triangle becomes a 6-vertex / 5-face prism.
+        assert result.cut_solid.points.shape[1] == 3
+        assert result.cut_solid.points.shape[0] >= 6
+        assert len(result.cut_solid.faces) >= 5
+        # Vertex count is 6 × number of prisms.
+        n_prisms = len(result.cut_solid.faces) // 5
+        assert result.cut_solid.points.shape[0] == 6 * n_prisms
+        # No fill volume → fill_solid is None.
+        assert result.fill_solid is None
+
+    def test_fill_solid_populated_for_fill_pair(self) -> None:
+        existing = _flat_square_surface("eg", 95.0)
+        proposed = _flat_square_surface("pr", 100.0)
+        result = tool_earthwork.Earthwork.compute_volumes(
+            existing, proposed, build_solids=True
+        )
+        assert result.fill_solid is not None
+        assert result.cut_solid is None
+
+    def test_prism_height_matches_delta(self) -> None:
+        """For a pure-cut pair, every prism's existing-Z minus
+        proposed-Z equals the delta. Sample one prism."""
+        existing = _flat_square_surface("eg", 110.0)
+        proposed = _flat_square_surface("pr", 100.0)
+        result = tool_earthwork.Earthwork.compute_volumes(
+            existing, proposed, build_solids=True
+        )
+        assert result.cut_solid is not None
+        # First 3 vertices: proposed-Z (z=100). Next 3: existing-Z (z=110).
+        first_prism = result.cut_solid.points[:6]
+        z_proposed = first_prism[:3, 2]
+        z_existing = first_prism[3:, 2]
+        assert np.allclose(z_proposed, 100.0)
+        assert np.allclose(z_existing, 110.0)
+
+
 class TestComputeVolumesNonOverlapping:
     """Two surfaces that don't overlap in XY produce zero volume."""
 
