@@ -544,6 +544,14 @@ class Grading:
 
 
 @interface
+class Earthwork:
+    # Saikei earthwork tool — Phase 6. TIN-to-TIN volumes + cut/fill solid construction + IFC authoring.
+    def compute_volumes(cls, existing_surface, proposed_surface, domain=None, shrink_factor=1.0, swell_factor=1.0, capture_per_triangle_deltas=False, build_solids=False): pass
+    def author_volume_result(cls, ifc_file, result, terrain=None, cut_name="Earthwork Cut", fill_name="Earthwork Fill", cut_predefined_type="EXCAVATION", fill_predefined_type="BACKFILL"): pass
+    def clear(cls): pass
+
+
+@interface
 class Group:
     def get_group_props(cls): pass
     def get_groups_data(cls, group_type): pass

@@ -57,7 +57,134 @@ functions land alongside the tool methods they sequence.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from .. import tool  # noqa: F401
+
+
+def compute_earthwork_volumes(
+    ifc_tool: "type[tool.Ifc]",
+    surface_tool: "type[tool.Surface]",
+    earthwork_tool: "type[tool.Earthwork]",
+    existing_surface_guid: str,
+    proposed_surface_guid: str,
+    shrink_factor: float = 1.0,
+    swell_factor: float = 1.0,
+    cut_name: str = "Earthwork Cut",
+    fill_name: str = "Earthwork Fill",
+    cut_predefined_type: str = "EXCAVATION",
+    fill_predefined_type: str = "BACKFILL",
+    capture_per_triangle_deltas: bool = False,
+) -> Any:
+    """Compute cut/fill volumes between two surfaces and persist to IFC.
+
+    Business rules:
+
+    1. An IFC file must be loaded.
+    2. Both surfaces must resolve via :meth:`tool.Surface.get` — the
+       caller is responsible for prior authoring.
+    3. ``shrink_factor`` and ``swell_factor`` must be positive
+       (the dataclass enforces this; we surface it as a clean
+       :class:`ValueError` at the orchestration boundary).
+
+    Sequencing:
+
+    1. Resolve both surfaces.
+    2. Look up the existing surface's IFC host entity (typically an
+       :class:`IfcGeographicElement[TERRAIN]`) for void-relationship
+       authoring.
+    3. :meth:`tool.Earthwork.compute_volumes` with
+       ``build_solids=True`` — runs §6.4 prismoidal volume math and
+       builds prism-soup cut/fill solids.
+    4. :meth:`tool.Earthwork.author_volume_result` — authors
+       :class:`IfcEarthworksCut`, :class:`IfcEarthworksFill`,
+       :class:`IfcRelVoidsElement`, :class:`IfcRelFillsElement`,
+       both Qtos, and ``Pset_SaikeiGradingShrinkSwell``.
+
+    :param ifc_tool: the :class:`tool.Ifc` class.
+    :param surface_tool: the :class:`tool.Surface` class.
+    :param earthwork_tool: the :class:`tool.Earthwork` class.
+    :param existing_surface_guid: GUID of the existing-ground
+        :class:`bonsai.tool.surface.CivilSurface`.
+    :param proposed_surface_guid: GUID of the proposed-ground
+        :class:`CivilSurface`. May be a Phase 5 group composite.
+    :param shrink_factor: fill-side shrinkage ratio. Default 1.0.
+    :param swell_factor: cut-side swell ratio. Default 1.0.
+        ``LooseVolume = UndisturbedVolume × swell_factor``.
+    :param cut_name / fill_name: human-readable IFC entity names.
+    :param cut_predefined_type / fill_predefined_type: IFC enum
+        values. See :meth:`tool.Earthwork.author_volume_result` for
+        allowed sets.
+    :param capture_per_triangle_deltas: when True, the result's
+        ``per_triangle_deltas`` is populated for the optional
+        cut/fill heat-map overlay.
+    :returns: a :class:`bonsai.tool.earthwork.VolumeResult` with
+        all fields stamped: cut/fill magnitudes, cut_solid /
+        fill_solid geometry, ifc_cut_id / ifc_fill_id step ids.
+    :raises ValueError: on input validation failures.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    if shrink_factor <= 0:
+        raise ValueError(
+            f"shrink_factor must be > 0; got {shrink_factor}"
+        )
+    if swell_factor <= 0:
+        raise ValueError(
+            f"swell_factor must be > 0; got {swell_factor}"
+        )
+
+    existing_surface = surface_tool.get(ifc_file, existing_surface_guid)
+    proposed_surface = surface_tool.get(ifc_file, proposed_surface_guid)
+
+    terrain = _resolve_terrain_entity(ifc_file, existing_surface)
+
+    result = earthwork_tool.compute_volumes(
+        existing_surface,
+        proposed_surface,
+        shrink_factor=shrink_factor,
+        swell_factor=swell_factor,
+        capture_per_triangle_deltas=capture_per_triangle_deltas,
+        build_solids=True,
+    )
+
+    # Pure no-op (zero cut + zero fill) — skip authoring entirely.
+    # Authoring would still succeed but there's no IFC entity worth
+    # creating, and downstream consumers shouldn't see a 0-volume
+    # cut/fill in the project tree.
+    if (
+        result.cut_solid is None
+        and result.fill_solid is None
+    ):
+        return result
+
+    earthwork_tool.author_volume_result(
+        ifc_file,
+        result,
+        terrain=terrain,
+        cut_name=cut_name,
+        fill_name=fill_name,
+        cut_predefined_type=cut_predefined_type,
+        fill_predefined_type=fill_predefined_type,
+    )
+    return result
+
+
+def _resolve_terrain_entity(
+    ifc_file: Any, existing_surface: Any
+) -> Optional[Any]:
+    """Return the IFC entity hosting ``existing_surface``, or None
+    if it isn't yet authored to IFC.
+
+    A pure-fill scenario doesn't need a terrain entity — the
+    cut-side voiding chain isn't authored. A cut scenario without
+    a host terrain raises in
+    :meth:`tool.Earthwork.author_volume_result`.
+    """
+    host_id = getattr(existing_surface, "ifc_host_entity_id", None)
+    if host_id is None:
+        return None
+    return ifc_file.by_id(host_id)

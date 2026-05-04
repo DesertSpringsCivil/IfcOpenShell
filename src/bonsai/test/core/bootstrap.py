@@ -124,6 +124,13 @@ def grading():
 
 
 @pytest.fixture
+def earthwork():
+    prophet = Prophecy(bonsai.core.tool.Earthwork)
+    yield prophet
+    prophet.verify()
+
+
+@pytest.fixture
 def group():
     prophet = Prophecy(bonsai.core.tool.Group)
     yield prophet
