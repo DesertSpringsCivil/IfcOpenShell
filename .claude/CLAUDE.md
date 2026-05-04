@@ -104,6 +104,10 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_grading.py \
   -o "addopts=" -p pytest-blender -v \
   --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
 
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_earthwork.py \
+  -o "addopts=" -p pytest-blender -v \
+  --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
+
 # Operator tests — requires Blender headless (pytest-blender)
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/bim/module/alignment/test_alignment_operators.py \
   -o "addopts=" -p pytest-blender -m "alignment" -v \
@@ -115,14 +119,15 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_alignment.py te
   --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
 ```
 
-**Phase 4 / Phase 5 module note:** the tool tests at
-`test/tool/test_surface.py` and `test/tool/test_grading.py` include
-both the pure-math tool tests and operator-layer tests (via
-`NewIfc4X3` base class) since the `test/bim/module/{surface,grading}/`
-directories are currently blocked by an env-level pytest-bdd /
-parse-type compat issue in `test/bim/conftest.py`. Move the
-operator tests back to `test/bim/module/{surface,grading}/` once
-that's fixed upstream.
+**Phase 4 / 5 / 6 module note:** the tool tests at
+`test/tool/test_surface.py`, `test/tool/test_grading.py`, and
+`test/tool/test_earthwork.py` include both the pure-math tool tests
+and operator-layer tests (via `NewIfc4X3` base class) since the
+`test/bim/module/{surface,grading,earthwork}/` directories are
+currently blocked by an env-level pytest-bdd / parse-type compat
+issue in `test/bim/conftest.py`. Move the operator tests back to
+`test/bim/module/{surface,grading,earthwork}/` once that's fixed
+upstream.
 
 **Prerequisites:** `pytest-blender` and `pytest-bdd` must be installed in Blender's
 extensions site-packages (`%APPDATA%\Blender Foundation\Blender\5.0\extensions\.local\lib\python3.11\site-packages\`).
@@ -176,8 +181,25 @@ extensions site-packages (`%APPDATA%\Blender Foundation\Blender\5.0\extensions\.
   acceptance) + Phase 5 bSI validator integration test (full
   pad-grading scenario through `bpy.ops` chain) green.
 
+- **Phase 6 — Bonsai earthwork module:** `tool.Earthwork` math layer
+  (`SubTriangle` / `ClosedSolid` / `VolumeResult` dataclasses, TIN-to-TIN
+  prismoidal volume math via STRtree-accelerated triangle-pair
+  intersection + Shapely constrained Delaunay sub-triangulation,
+  prism-soup closed-solid construction per spec §6.5 MVP, IFC
+  authoring via `ifcopenshell.api.earthwork` with cut→terrain
+  voiding and cut→fill linkage), `core.earthwork.compute_earthwork_volumes`
+  orchestration (validates inputs, computes volumes, builds solids,
+  authors all entities + Qto + Pset_SaikeiGradingShrinkSwell),
+  UI (one operator `CIVIL_OT_compute_earthwork_volumes`, panel
+  `BIM_PT_tab_earthwork` with Inputs and Compute sub-panels,
+  `CivilEarthworkProperties` with persistent last-run report).
+  Closes the audit gap: `LooseVolume = UndisturbedVolume × SwellFactor`
+  is computed in `VolumeResult.__post_init__` and round-trips
+  through the Qto. 45 earthwork tests (37 tool + 5 core + 3 bSI
+  acceptance) green; full Saikei suite at 574 passed + 2 skipped.
+
 **Not done:** Vertical alignment, corridor generation, cross-sections,
-earthwork (volumes — Phase 6 next), drainage.
+drainage.
 
 ## Phase 5 Audit (May 2026)
 

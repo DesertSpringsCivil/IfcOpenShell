@@ -675,3 +675,164 @@ class TestAuthorVolumeResult:
             ifc_file, result, terrain=None
         )
         assert result.ifc_fill_id is not None
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 acceptance — bSI validator integration
+# ---------------------------------------------------------------------------
+
+
+import bpy  # noqa: E402  — used only by the bSI integration tests below.
+
+import bonsai.tool as tool  # noqa: E402
+from test.bim.bootstrap import NewIfc4X3  # noqa: E402
+
+
+class TestEarthworkBSIIntegration(NewIfc4X3):
+    """End-to-end integration test mirroring the Phase 4 + Phase 5
+    'done' criterion (parallel to TestSurfaceBSIIntegration and
+    TestGradingBSIIntegration).
+
+    Drives the full operator chain (existing-ground create →
+    proposed-surface from points → compute earthwork volumes)
+    through ``bpy.ops``, writes the result to disk, reopens via
+    :func:`ifcopenshell.open`, and runs
+    :func:`ifcopenshell.validate.validate` to assert no schema
+    warnings. When this passes, end users can author a complete
+    earthwork-volume scenario in Bonsai and round-trip the result
+    through IFC with a clean validator report.
+    """
+
+    @staticmethod
+    def _validate_clean(ifc_path) -> None:
+        """Re-open ``ifc_path`` and assert validate reports no
+        warnings."""
+        import logging
+
+        import ifcopenshell.validate
+
+        reopened = ifcopenshell.open(str(ifc_path))
+
+        records: list[logging.LogRecord] = []
+
+        class _CollectingHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.Logger("phase6-acceptance-validate")
+        logger.addHandler(_CollectingHandler(level=logging.DEBUG))
+        ifcopenshell.validate.validate(reopened, logger)
+
+        errors = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+        assert errors == [], f"ifcopenshell.validate() reported: {errors}"
+        return reopened
+
+    def _build_two_surfaces(self, tmp_path) -> tuple[str, str]:
+        """Author two flat surfaces (existing at z=110, proposed at
+        z=100) via the surface module's create operator. Returns
+        ``(existing_guid, proposed_guid)``."""
+        # Existing ground.
+        eg_path = tmp_path / "eg.csv"
+        eg_path.write_text(
+            "-50,-50,110\n50,-50,110\n50,50,110\n-50,50,110\n"
+        )
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = (
+            "bSI Earthwork EG"
+        )
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(eg_path)
+        )
+        existing_guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        # Proposed ground (lower → all cut).
+        pr_path = tmp_path / "pr.csv"
+        pr_path.write_text(
+            "-50,-50,100\n50,-50,100\n50,50,100\n-50,50,100\n"
+        )
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = (
+            "bSI Earthwork PR"
+        )
+        bpy.context.scene.CivilSurfaceProperties.new_surface_kind = "proposed_site"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(pr_path)
+        )
+        proposed_guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        return existing_guid, proposed_guid
+
+    def test_full_workflow_round_trip_and_validate(self, tmp_path) -> None:
+        """Author existing + proposed, run compute_earthwork_volumes,
+        round-trip the IFC file through ifcopenshell.validate."""
+        existing_guid, proposed_guid = self._build_two_surfaces(tmp_path)
+
+        bpy.ops.civil.compute_earthwork_volumes(
+            "EXEC_DEFAULT",
+            existing_surface_guid=existing_guid,
+            proposed_surface_guid=proposed_guid,
+            shrink_factor=1.0,
+            swell_factor=1.25,
+        )
+
+        ifc_path = tmp_path / "phase6_acceptance.ifc"
+        tool.Ifc.get().write(str(ifc_path))
+        reopened = self._validate_clean(ifc_path)
+
+        # Round-trip structure assertions: cut + voiding rel exist;
+        # Qto carries undisturbed + loose volumes.
+        cuts = reopened.by_type("IfcEarthworksCut")
+        assert len(cuts) == 1
+        cut = cuts[0]
+
+        rels = reopened.by_type("IfcRelVoidsElement")
+        assert len(rels) == 1
+        assert rels[0].RelatedOpeningElement.id() == cut.id()
+
+        # Qto check: LooseVolume = UndisturbedVolume * 1.25.
+        qto = next(
+            rel.RelatingPropertyDefinition
+            for rel in cut.IsDefinedBy or []
+            if rel.is_a("IfcRelDefinesByProperties")
+            and rel.RelatingPropertyDefinition.is_a("IfcElementQuantity")
+            and rel.RelatingPropertyDefinition.Name
+            == "Qto_EarthworksCutBaseQuantities"
+        )
+        values = {
+            q.Name: q.VolumeValue
+            for q in qto.Quantities or []
+            if q.is_a("IfcQuantityVolume")
+        }
+        assert values["LooseVolume"] == pytest.approx(
+            values["UndisturbedVolume"] * 1.25, rel=1e-6
+        )
+
+    def test_panel_cache_populated_after_operator(self, tmp_path) -> None:
+        """The CivilEarthworkProperties cache fields should hold the
+        last-run report after the operator finishes."""
+        existing_guid, proposed_guid = self._build_two_surfaces(tmp_path)
+
+        bpy.ops.civil.compute_earthwork_volumes(
+            "EXEC_DEFAULT",
+            existing_surface_guid=existing_guid,
+            proposed_surface_guid=proposed_guid,
+            swell_factor=1.25,
+        )
+
+        props = bpy.context.scene.CivilEarthworkProperties
+        # 100×100 m × 10m delta = 100,000 m³ cut.
+        assert props.last_cut_m3 == pytest.approx(100_000.0, rel=1e-6)
+        assert props.last_fill_m3 == pytest.approx(0.0, abs=1e-6)
+        assert props.last_net_m3 == pytest.approx(100_000.0, rel=1e-6)
+        # Loose cut = undisturbed × swell_factor.
+        assert props.last_loose_cut_m3 == pytest.approx(125_000.0, rel=1e-6)
+        assert props.last_run_existing_guid == existing_guid
+        assert props.last_run_proposed_guid == proposed_guid
+
+    def test_missing_guids_cancels_with_error(self) -> None:
+        """Operator should cancel cleanly when surface GUIDs are
+        empty rather than crashing."""
+        with pytest.raises(RuntimeError, match="required"):
+            bpy.ops.civil.compute_earthwork_volumes(
+                "EXEC_DEFAULT",
+                existing_surface_guid="",
+                proposed_surface_guid="",
+            )
