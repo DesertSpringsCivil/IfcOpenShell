@@ -55,10 +55,18 @@ that the rest of the module references.
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Optional
+
 import ifcopenshell
 import numpy as np
-from dataclasses import dataclass, field
-from typing import Optional
+import shapely
+
+if TYPE_CHECKING:
+    from .surface import CivilSurface
+
+_logger = logging.getLogger(__name__)
 
 
 # Cubic-yards conversion factor (1 m³ = 1.30795 cu yd). Used by the
@@ -324,3 +332,275 @@ class Earthwork:
         """Wipe the entire registry. Headless test teardown calls
         this to prevent cross-test contamination."""
         cls._registry.clear()
+
+    # ------------------------------------------------------------------
+    # TIN-to-TIN prismoidal volume — spec §6.4
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def compute_volumes(
+        cls,
+        existing_surface: "CivilSurface",
+        proposed_surface: "CivilSurface",
+        domain: Optional[shapely.Polygon] = None,
+        shrink_factor: float = 1.0,
+        swell_factor: float = 1.0,
+        capture_per_triangle_deltas: bool = False,
+    ) -> VolumeResult:
+        """Compute cut and fill volumes between two surfaces.
+
+        Implements the spec §6.4 algorithm: resolve the volume domain
+        as the intersection of the two outer boundaries (with
+        convex-hull fallback when boundaries are unset, per §6.4 step
+        1), then for every overlapping triangle pair clip and
+        triangulate the XY intersection, accumulating signed
+        prismoidal volume = ``area × (z_existing - z_proposed)``.
+        Positive contributions accumulate into ``undisturbed_cut_m3``;
+        negative contributions accumulate into ``compacted_fill_m3``
+        as a positive magnitude.
+
+        Broad phase uses a Shapely STRtree on existing triangles to
+        cull non-overlapping pairs in O(log N); narrow phase is the
+        explicit Shapely intersection. The implementation runs in
+        Python so per-call overhead matters for large surfaces; for
+        the typical Saikei pad / corridor scale (≤ 10⁴ triangles per
+        surface) this finishes well under one second.
+
+        :param existing_surface: the existing-ground TIN. Typically an
+            :class:`IfcGeographicElement[TERRAIN]`.
+        :param proposed_surface: the proposed-ground TIN. May be a
+            Phase 5 group composite (``IfcEarthworksFill[SUBGRADE]``).
+        :param domain: optional explicit volume-domain polygon. If
+            ``None``, derived from the intersection of the two
+            surfaces' outer boundaries; if either is unset, that
+            surface's convex hull stands in.
+        :param shrink_factor: forwarded into the result; default 1.0
+            (no shrinkage). See :class:`VolumeResult.shrink_factor`.
+        :param swell_factor: forwarded into the result; default 1.0
+            (no swell). See :class:`VolumeResult.swell_factor`.
+        :param capture_per_triangle_deltas: when True, the result's
+            ``per_triangle_deltas`` field is populated with one
+            entry per sub-triangle in iteration order. Used by the
+            optional cut/fill color-map overlay (Phase 6 commit 12+).
+        :returns: a :class:`VolumeResult` with cut / fill magnitudes
+            populated. ``cut_solid`` / ``fill_solid`` remain None
+            here — solid construction (§6.5) is a separate step on
+            the result.
+        """
+        domain = cls._resolve_volume_domain(
+            existing_surface, proposed_surface, domain
+        )
+        if domain.is_empty:
+            return VolumeResult(
+                existing_surface_guid=existing_surface.guid,
+                proposed_surface_guid=proposed_surface.guid,
+                undisturbed_cut_m3=0.0,
+                compacted_fill_m3=0.0,
+                shrink_factor=shrink_factor,
+                swell_factor=swell_factor,
+                per_triangle_deltas=(
+                    np.zeros(0, dtype=float)
+                    if capture_per_triangle_deltas else None
+                ),
+            )
+
+        existing_polys = cls._triangle_polygons(existing_surface)
+        proposed_polys = cls._triangle_polygons(proposed_surface)
+        existing_tree = shapely.STRtree(existing_polys)
+
+        cut_total = 0.0
+        fill_total = 0.0
+        deltas: list[float] = [] if capture_per_triangle_deltas else []
+
+        for proposed_poly in proposed_polys:
+            candidate_indices = existing_tree.query(proposed_poly)
+            if len(candidate_indices) == 0:
+                continue
+            for idx in candidate_indices:
+                existing_poly = existing_polys[int(idx)]
+                pair_intersection = proposed_poly.intersection(existing_poly)
+                if pair_intersection.is_empty:
+                    continue
+                clipped = pair_intersection.intersection(domain)
+                if clipped.is_empty or clipped.area <= 0:
+                    continue
+                # Triangulate the (possibly polygonal) overlap so
+                # prismoidal integration sees only triangles. Shapely's
+                # constrained_delaunay_triangles is the same primitive
+                # tool.Surface uses for breakline triangulation; it
+                # returns a GeometryCollection of Polygons, so we
+                # iterate.
+                for sub_geom in cls._iter_sub_triangles(clipped):
+                    sub_tri = cls._make_sub_triangle(
+                        sub_geom, existing_surface, proposed_surface
+                    )
+                    if sub_tri is None or sub_tri.area_m2 <= 0:
+                        continue
+                    signed = sub_tri.signed_volume_m3
+                    if capture_per_triangle_deltas:
+                        deltas.append(sub_tri.delta_z)
+                    if signed > 0:
+                        cut_total += signed
+                    elif signed < 0:
+                        fill_total += -signed
+
+        return VolumeResult(
+            existing_surface_guid=existing_surface.guid,
+            proposed_surface_guid=proposed_surface.guid,
+            undisturbed_cut_m3=float(cut_total),
+            compacted_fill_m3=float(fill_total),
+            shrink_factor=shrink_factor,
+            swell_factor=swell_factor,
+            per_triangle_deltas=(
+                np.asarray(deltas, dtype=float)
+                if capture_per_triangle_deltas else None
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Volume-math internals
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_volume_domain(
+        existing: "CivilSurface",
+        proposed: "CivilSurface",
+        explicit: Optional[shapely.Polygon],
+    ) -> shapely.Polygon:
+        """Resolve the volume domain per spec §6.4 step 1+2.
+
+        - Caller-supplied ``explicit`` wins.
+        - Otherwise, intersect each surface's ``outer_boundary``
+          (or convex hull when unset).
+        - Each surface's holes / voids are subtracted from its own
+          contribution before intersection.
+        """
+        if explicit is not None:
+            return explicit
+        existing_domain = Earthwork._surface_xy_domain(existing)
+        proposed_domain = Earthwork._surface_xy_domain(proposed)
+        return existing_domain.intersection(proposed_domain)
+
+    @staticmethod
+    def _surface_xy_domain(surface: "CivilSurface") -> shapely.Polygon:
+        """Build the XY domain of a single surface: outer_boundary
+        (or convex hull) minus holes minus voids."""
+        if surface.outer_boundary is not None:
+            outer = shapely.Polygon(surface.outer_boundary)
+        elif len(surface.points) >= 3:
+            outer = shapely.MultiPoint(
+                [(float(p[0]), float(p[1])) for p in surface.points]
+            ).convex_hull
+            if outer.geom_type != "Polygon":
+                # Degenerate (collinear / single point) — domain is empty.
+                return shapely.Polygon()
+        else:
+            return shapely.Polygon()
+        for hole in (getattr(surface, "holes", None) or []):
+            outer = outer.difference(shapely.Polygon(hole))
+        for void in (getattr(surface, "voids", None) or []):
+            outer = outer.difference(shapely.Polygon(void))
+        return outer
+
+    @staticmethod
+    def _triangle_polygons(
+        surface: "CivilSurface",
+    ) -> list[shapely.Polygon]:
+        """Return one Shapely polygon per triangle in ``surface``.
+        Used for STRtree broad-phase + narrow-phase intersection."""
+        polys: list[shapely.Polygon] = []
+        for triangle in surface.triangles:
+            a = surface.points[int(triangle[0])]
+            b = surface.points[int(triangle[1])]
+            c = surface.points[int(triangle[2])]
+            poly = shapely.Polygon(
+                [
+                    (float(a[0]), float(a[1])),
+                    (float(b[0]), float(b[1])),
+                    (float(c[0]), float(c[1])),
+                ]
+            )
+            if poly.is_valid and poly.area > 0:
+                polys.append(poly)
+            else:
+                # Defensive: the TIN should not contain degenerate
+                # triangles, but Phase 5 composite outputs occasionally
+                # do (zero-area edge case in the boundary triangulation).
+                # Drop them silently rather than fail the whole volume
+                # calculation.
+                polys.append(shapely.Polygon())
+        return polys
+
+    @staticmethod
+    def _iter_sub_triangles(geom):
+        """Yield triangle-shaped Polygons covering ``geom``.
+
+        Shapely's intersection of two convex triangles is itself
+        convex (triangle, quad, pentagon, or hexagon), so triangulating
+        always succeeds for non-degenerate inputs. ``constrained_delaunay_triangles``
+        returns a GeometryCollection of triangle Polygons even when
+        the input is already a triangle — uniform interface.
+        """
+        if geom.is_empty:
+            return
+        if geom.geom_type == "Polygon":
+            polys = [geom]
+        elif geom.geom_type in {"MultiPolygon", "GeometryCollection"}:
+            polys = [g for g in geom.geoms if g.geom_type == "Polygon"]
+        else:
+            return
+        for poly in polys:
+            if poly.area <= 0:
+                continue
+            try:
+                triangulated = shapely.constrained_delaunay_triangles(poly)
+            except Exception as exc:
+                _logger.debug(
+                    "skipping sub-polygon during volume integration: %s",
+                    exc,
+                )
+                continue
+            if triangulated.is_empty:
+                continue
+            for tri in triangulated.geoms:
+                if tri.geom_type == "Polygon" and tri.area > 0:
+                    yield tri
+
+    @staticmethod
+    def _make_sub_triangle(
+        tri: shapely.Polygon,
+        existing: "CivilSurface",
+        proposed: "CivilSurface",
+    ) -> Optional[SubTriangle]:
+        """Build a :class:`SubTriangle` from a Shapely triangle by
+        interpolating Z on both surfaces at each vertex.
+
+        Returns ``None`` if any vertex falls outside either surface's
+        triangulation — defensive guard for boundary-tolerance cases
+        where the volume domain extends past the actual triangulated
+        region by sub-millimetre amounts.
+        """
+        # Lazy import — surface module is the heavyweight one and
+        # importing it at module-top would force every earthwork
+        # import to pull in numpy / shapely / scipy.
+        from .surface import Surface as _SurfaceTool
+
+        coords = list(tri.exterior.coords)
+        if len(coords) < 4:  # triangle is 3 unique + closing repeat
+            return None
+        vertices_xy = np.array([(float(x), float(y)) for x, y in coords[:3]])
+        z_existing_vals: list[float] = []
+        z_proposed_vals: list[float] = []
+        for x, y in vertices_xy:
+            z_e = _SurfaceTool.z_at(existing, float(x), float(y))
+            z_p = _SurfaceTool.z_at(proposed, float(x), float(y))
+            if z_e is None or z_p is None:
+                return None
+            z_existing_vals.append(z_e)
+            z_proposed_vals.append(z_p)
+        return SubTriangle(
+            vertices_xy=vertices_xy,
+            z_existing_avg=float(np.mean(z_existing_vals)),
+            z_proposed_avg=float(np.mean(z_proposed_vals)),
+            area_m2=float(tri.area),
+        )
