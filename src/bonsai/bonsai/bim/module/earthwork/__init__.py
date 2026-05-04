@@ -42,11 +42,14 @@ the parent-module wiring at ``bim/__init__.py``.
 
 import bpy
 
-from . import prop
+from . import operator, prop, ui
 
 
 classes: tuple[type, ...] = (
     prop.CivilEarthworkProperties,
+    operator.CIVIL_OT_compute_earthwork_volumes,
+    ui.CIVIL_PT_earthwork_inputs,
+    ui.CIVIL_PT_earthwork_compute,
 )
 
 
