@@ -42,18 +42,28 @@ the parent-module wiring at ``bim/__init__.py``.
 
 import bpy
 
-classes: tuple[type, ...] = ()
+from . import prop
+
+
+classes: tuple[type, ...] = (
+    prop.CivilEarthworkProperties,
+)
 
 
 def register() -> None:
     """Module-level registration hook.
 
     Called by ``bonsai.bim`` after the parent has registered all
-    module classes. Currently a no-op — the
-    :class:`CivilEarthworkProperties` PointerProperty attaches in a
-    later commit once the prop layer lands.
+    module classes. Attaches :class:`CivilEarthworkProperties` to
+    ``bpy.types.Scene`` as a ``PointerProperty`` so the UI panel can
+    read / write earthwork state via
+    ``context.scene.CivilEarthworkProperties``.
     """
+    bpy.types.Scene.CivilEarthworkProperties = bpy.props.PointerProperty(
+        type=prop.CivilEarthworkProperties
+    )
 
 
 def unregister() -> None:
     """Module-level teardown hook (mirror of :func:`register`)."""
+    del bpy.types.Scene.CivilEarthworkProperties
