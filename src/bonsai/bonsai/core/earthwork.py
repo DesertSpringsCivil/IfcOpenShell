@@ -49,10 +49,10 @@ What does NOT live here:
 - Blender object/mesh manipulation (``bpy``) —
   :mod:`bonsai.tool.earthwork`.
 
-Subsequent commits add ``compute_earthwork_volumes`` orchestration
-once the math layer in :mod:`bonsai.tool.earthwork` is in place. This
-scaffold lands the package shell + module docstring; the orchestration
-functions land alongside the tool methods they sequence.
+Public surface: :func:`compute_earthwork_volumes` validates inputs,
+resolves both surfaces, runs the spec §6.4 prismoidal math via
+:meth:`tool.Earthwork.compute_volumes`, then authors the result via
+:meth:`tool.Earthwork.author_volume_result`.
 """
 
 from __future__ import annotations

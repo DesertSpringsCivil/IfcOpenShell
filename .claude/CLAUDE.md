@@ -193,10 +193,11 @@ extensions site-packages (`%APPDATA%\Blender Foundation\Blender\5.0\extensions\.
   UI (one operator `CIVIL_OT_compute_earthwork_volumes`, panel
   `BIM_PT_tab_earthwork` with Inputs and Compute sub-panels,
   `CivilEarthworkProperties` with persistent last-run report).
-  Closes the audit gap: `LooseVolume = UndisturbedVolume × SwellFactor`
-  is computed in `VolumeResult.__post_init__` and round-trips
-  through the Qto. 45 earthwork tests (37 tool + 5 core + 3 bSI
-  acceptance) green; full Saikei suite at 574 passed + 2 skipped.
+  Closes the audit gap: cut Qto `LooseVolume = UndisturbedVolume ×
+  SwellFactor` exposed via `VolumeResult.loose_cut_m3` `@property`,
+  fill Qto `LooseVolume = CompactedVolume / ShrinkFactor` via
+  `bank_fill_m3`. 48 earthwork tests (40 tool + 5 core + 3 bSI
+  acceptance) green; full Saikei suite at 577 passed + 2 skipped.
 
 **Not done:** Vertical alignment, corridor generation, cross-sections,
 drainage.

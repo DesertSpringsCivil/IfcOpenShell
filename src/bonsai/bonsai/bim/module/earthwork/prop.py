@@ -51,6 +51,9 @@ _CUT_PREDEFINED_TYPES = [
     ("STEPEXCAVATION", "Step Excavation", "Stepped widening"),
     ("TOPSOILREMOVAL", "Topsoil Removal", "Stripping organic topsoil"),
     ("TRENCH", "Trench", "Length >> depth/width"),
+    ("USERDEFINED", "User Defined",
+     "Custom type — set ObjectType manually via the pset editor"),
+    ("NOTDEFINED", "Not Defined", "Type not specified"),
 ]
 
 _FILL_PREDEFINED_TYPES = [
@@ -59,6 +62,9 @@ _FILL_PREDEFINED_TYPES = [
     ("COUNTERWEIGHT", "Counterweight", "Counterweight fill"),
     ("SUBGRADEBED", "Subgrade Bed", "Subgrade-bed material"),
     ("TRANSITIONSECTION", "Transition Section", "Transition material"),
+    ("USERDEFINED", "User Defined",
+     "Custom type — set ObjectType manually via the pset editor"),
+    ("NOTDEFINED", "Not Defined", "Type not specified"),
 ]
 
 
@@ -97,9 +103,11 @@ class CivilEarthworkProperties(PropertyGroup):
         name="Swell Factor",
         description="Cut-side swell ratio (loose / bank). Typical "
         "values 1.10-1.30. 1.0 means no swell. LooseVolume on the "
-        "Qto = UndisturbedVolume * SwellFactor.",
+        "cut Qto = UndisturbedVolume * SwellFactor. Excavated "
+        "material always occupies more space than its bank state, "
+        "so values < 1.0 are physically invalid.",
         default=1.0,
-        min=0.8,
+        min=1.0,
         max=1.5,
     )
 

@@ -75,9 +75,9 @@ class CIVIL_OT_compute_earthwork_volumes(Operator, tool.Ifc.Operator):
     bl_idname = "civil.compute_earthwork_volumes"
     bl_label = "Compute Earthwork Volumes"
     bl_description = (
-        "Compute cut/fill volumes between two surfaces (TIN-to-TIN "
-        "prismoidal). Authors IfcEarthworksCut/Fill entities with "
-        "Qto and shrink/swell pset. Spec §6.4 + §6.5."
+        "Compute cut and fill volumes between two surfaces and write "
+        "the result to IFC. Authors cut and fill entities with closed "
+        "solid bodies, quantity takeoffs, and shrink/swell properties."
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -91,16 +91,20 @@ class CIVIL_OT_compute_earthwork_volumes(Operator, tool.Ifc.Operator):
         description="GlobalId of the proposed-ground CivilSurface",
         default="",
     )
+    # Sentinel default 0.0 means "fall back to panel state in
+    # _execute". The valid ranges for both factors exclude 0.0
+    # (shrink ∈ [0.5, 1.5], swell ∈ [1.0, 1.5]) so 0.0 unambiguously
+    # signals "not explicitly supplied".
     shrink_factor: FloatProperty(
         name="Shrink Factor",
-        default=1.0,
-        min=0.5,
+        default=0.0,
+        min=0.0,
         max=1.5,
     )
     swell_factor: FloatProperty(
         name="Swell Factor",
-        default=1.0,
-        min=0.8,
+        default=0.0,
+        min=0.0,
         max=1.5,
     )
     cut_name: StringProperty(name="Cut Name", default="")
@@ -140,6 +144,13 @@ class CIVIL_OT_compute_earthwork_volumes(Operator, tool.Ifc.Operator):
         fill_predefined_type = (
             self.fill_predefined_type or props.fill_predefined_type
         )
+        # Sentinel default 0.0 means "fall back to panel state".
+        shrink_factor = (
+            self.shrink_factor if self.shrink_factor > 0 else props.shrink_factor
+        )
+        swell_factor = (
+            self.swell_factor if self.swell_factor > 0 else props.swell_factor
+        )
 
         try:
             result = core_earthwork.compute_earthwork_volumes(
@@ -148,8 +159,8 @@ class CIVIL_OT_compute_earthwork_volumes(Operator, tool.Ifc.Operator):
                 tool.Earthwork,
                 existing_surface_guid=existing_guid,
                 proposed_surface_guid=proposed_guid,
-                shrink_factor=self.shrink_factor,
-                swell_factor=self.swell_factor,
+                shrink_factor=shrink_factor,
+                swell_factor=swell_factor,
                 cut_name=cut_name,
                 fill_name=fill_name,
                 cut_predefined_type=cut_predefined_type,

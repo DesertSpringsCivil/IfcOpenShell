@@ -34,23 +34,21 @@ Phase 6 of the Saikei grading/earthwork sprint. This module owns:
   :class:`IfcRelVoidsElement` linkage to the host terrain, and
   pre-computed quantity-set authoring (``Qto_EarthworksCut/FillBaseQuantities``,
   ``Pset_SaikeiGradingShrinkSwell``).
-- Shrink/swell handling per spec §6.4 — caller supplies factors;
-  this module multiplies through to ``LooseVolume`` and writes both
-  the Qto and the pset consistently (closes the audit gap where
-  ``LooseVolume`` was a pass-through value rather than computed from
-  ``UndisturbedVolume × SwellFactor``).
-- Blender mesh linkage for the cut/fill solids and the optional
-  cut/fill color-map overlay — same pattern as :class:`bonsai.tool.surface`.
+- Shrink/swell handling per spec §6.4 — caller supplies factors,
+  the dataclass exposes derived ``loose_cut_m3`` and ``bank_fill_m3``
+  ``@property`` accessors, and this module writes the Qto and the
+  pset consistently (closes the audit gap where ``LooseVolume`` was
+  a pass-through value rather than derived from
+  ``UndisturbedVolume × SwellFactor`` on the cut side and
+  ``CompactedVolume / ShrinkFactor`` on the fill side).
+- Optional cut/fill color-map overlay plumbed via
+  :attr:`VolumeResult.per_triangle_deltas`. The corresponding GPU
+  decorator (``EarthworkDecorator``) is a Phase 6.1 follow-up; the
+  data plumbing is already in place.
 
 The tool layer is the only Saikei layer that imports ``numpy`` /
 ``shapely`` / ``bpy``. Core stays import-clean (only built-ins +
 ``ifcopenshell``); UI calls into core which calls into tool.
-
-Subsequent commits land the prismoidal volume algorithm, the
-closed-solid construction stages, and the IFC + Blender authoring
-wrappers. This commit lands the dataclasses
-(:class:`SubTriangle`, :class:`ClosedSolid`, :class:`VolumeResult`)
-that the rest of the module references.
 """
 
 from __future__ import annotations
@@ -194,30 +192,31 @@ class VolumeResult:
     swell_factor: float = 1.0
     """Cut-side swell ratio (loose / bank). Caller-supplied; typical
     values 1.10–1.30 depending on soil type. ``1.0`` means no swell.
-    Multiplied through to :attr:`loose_cut_m3` in :meth:`__post_init__`
-    so the Qto is internally consistent — closes the spec audit gap
+    Read out via the :attr:`loose_cut_m3` ``@property`` (= ``undisturbed
+    × swell_factor``) so callers cannot author an inconsistent
+    swell_factor / loose-volume pair — closes the spec audit gap
     where ``LooseVolume`` was a pass-through value."""
 
     cut_solid: Optional[ClosedSolid] = None
     """Closed-solid geometry for the cut. Authored as
     :class:`IfcEarthworksCut` body (PolygonalFaceSet, Closed=TRUE).
-    None until §6.5's solid construction runs; Phase 6 commit 5
-    populates this."""
+    Populated by :meth:`Earthwork.compute_volumes` when called with
+    ``build_solids=True``; otherwise ``None``."""
 
     fill_solid: Optional[ClosedSolid] = None
     """Closed-solid geometry for the fill. Authored as
-    :class:`IfcEarthworksFill` body. None until §6.5's solid
-    construction runs."""
+    :class:`IfcEarthworksFill` body. Populated by ``compute_volumes``
+    with ``build_solids=True`` when fill volume > 0."""
 
     per_triangle_deltas: Optional[np.ndarray] = None
     """Optional ``(N,)`` array of per-sub-triangle ``delta_z`` values
-    for the cut/fill color map. Aligned with the sub-triangle order
-    out of the §6.4 intersection. ``None`` if the caller didn't request
-    the color map."""
+    for the cut/fill color map overlay. Aligned with the sub-triangle
+    order out of the §6.4 intersection. ``None`` if the caller didn't
+    request the color map (i.e., ``capture_per_triangle_deltas=False``)."""
 
     ifc_cut_id: Optional[int] = None
     """Step id of the persisted :class:`IfcEarthworksCut`. Stamped by
-    :meth:`Earthwork.author_cut_solid` after IFC authoring runs."""
+    :meth:`Earthwork.author_volume_result` after IFC authoring runs."""
 
     ifc_fill_id: Optional[int] = None
     """Step id of the persisted :class:`IfcEarthworksFill`."""
@@ -317,9 +316,10 @@ class Earthwork:
     classmethods (no instance state); per-file caches live in
     :attr:`_registry` keyed by ``(id(ifc_file), guid)``.
 
-    Subsequent commits flesh this out with the prismoidal volume
-    method, the cut/fill solid constructors, and the IFC authoring
-    wrappers around :mod:`ifcopenshell.api.earthwork`.
+    Public surface: :meth:`compute_volumes` runs the spec §6.4
+    prismoidal volume math and optionally the §6.5 prism-soup
+    closed-solid construction; :meth:`author_volume_result`
+    persists the result to IFC via :mod:`ifcopenshell.api.earthwork`.
     """
 
     _registry: dict[tuple[int, str], object] = {}
@@ -382,8 +382,9 @@ class Earthwork:
             (no swell). See :class:`VolumeResult.swell_factor`.
         :param capture_per_triangle_deltas: when True, the result's
             ``per_triangle_deltas`` field is populated with one
-            entry per sub-triangle in iteration order. Used by the
-            optional cut/fill color-map overlay (Phase 6 commit 12+).
+            entry per sub-triangle in iteration order. Plumbed for
+            the optional cut/fill color-map overlay; the GPU
+            decorator that consumes it is a Phase 6.1 follow-up.
         :param build_solids: when True, the result's ``cut_solid``
             and ``fill_solid`` fields are populated with closed-solid
             geometry (a "prism soup" — one triangular prism per
@@ -459,10 +460,12 @@ class Earthwork:
                             fill_subs.append(sub_tri)
 
         cut_solid = (
-            cls._build_prism_soup_solid(cut_subs) if build_solids else None
+            cls._build_prism_soup_solid(cut_subs, is_cut=True)
+            if build_solids else None
         )
         fill_solid = (
-            cls._build_prism_soup_solid(fill_subs) if build_solids else None
+            cls._build_prism_soup_solid(fill_subs, is_cut=False)
+            if build_solids else None
         )
 
         return VolumeResult(
@@ -621,10 +624,15 @@ class Earthwork:
         - ``write_cut_quantities`` / ``write_fill_quantities`` —
           authors ``Qto_EarthworksCut/FillBaseQuantities`` with the
           dataclass's volume values. Length / Width / Depth are
-          derived from the solid's bounding box; ``LooseVolume`` is
-          taken from :attr:`VolumeResult.loose_cut_m3` (already
-          ``undisturbed × swell_factor`` per __post_init__) so the
-          Qto is internally consistent — closes the spec audit gap.
+          derived from the solid's bounding box. The cut Qto's
+          ``LooseVolume`` comes from :attr:`VolumeResult.loose_cut_m3`
+          (= ``undisturbed × swell_factor``); the fill Qto's
+          ``LooseVolume`` comes from :attr:`VolumeResult.bank_fill_m3`
+          (= ``compacted / shrink_factor`` — the bank-state source
+          volume of fill material). Both stay internally consistent
+          with the swell/shrink factors written into
+          ``Pset_SaikeiGradingShrinkSwell``, closing the spec audit
+          gap.
         - ``apply_shrink_swell_pset`` on whichever entities exist —
           attaches ``Pset_SaikeiGradingShrinkSwell`` with the result's
           shrink/swell factors.
@@ -705,7 +713,7 @@ class Earthwork:
                 width=width,
                 depth=depth,
                 compacted_volume=result.compacted_fill_m3,
-                loose_volume=result.loose_cut_m3,
+                loose_volume=result.bank_fill_m3,
             )
             ifcopenshell.api.earthwork.apply_shrink_swell_pset(
                 ifc_file,
@@ -760,6 +768,7 @@ class Earthwork:
     @staticmethod
     def _build_prism_soup_solid(
         sub_triangles: list[SubTriangle],
+        is_cut: bool = True,
     ) -> Optional[ClosedSolid]:
         """Build a prism-soup :class:`ClosedSolid` covering all
         ``sub_triangles``. One triangular prism per sub-triangle —
@@ -772,6 +781,23 @@ class Earthwork:
         cut/fill region (the §6.5 "stages" approach with zero-delta
         contour boundary stitching) is a Phase 6.1 refinement.
 
+        Outward-normal convention. For a cut prism (existing above
+        proposed), the existing-Z cap is the geometric top and its
+        normal points up (+Z); the proposed-Z cap is the bottom and
+        its normal points down (-Z); side quads have normals pointing
+        outward in XY. For a fill prism (proposed above existing),
+        the relationship inverts — proposed-Z is now the top — so
+        every face winding is reversed when ``is_cut=False``. This
+        keeps `Closed=TRUE` PolygonalFaceSet bodies consistent with
+        IFC viewers that derive face normals from winding direction.
+
+        :param sub_triangles: per-sub-triangle volume contributions.
+            All entries should have the same sign of ``delta_z`` —
+            mixing cut and fill in one call produces inverted normals
+            on whichever side doesn't match ``is_cut``.
+        :param is_cut: ``True`` if these sub-triangles are cut
+            (existing above proposed); ``False`` for fill (proposed
+            above existing). Reverses all face windings when False.
         :returns: ``None`` if ``sub_triangles`` is empty (no cut/fill
             volume to author); otherwise a :class:`ClosedSolid` with
             ``points.shape == (6N, 3)`` and ``len(faces) == 5N``.
@@ -785,33 +811,40 @@ class Earthwork:
         for sub in sub_triangles:
             base = len(all_points)
             xy = sub.vertices_xy
-            # 3 vertices on the proposed surface (bottom of cut, top
-            # of fill — orientation-agnostic; faces below define
-            # outward normals).
+            # 3 vertices on the proposed surface.
             for x, y in xy:
                 all_points.append(
                     (float(x), float(y), float(sub.z_proposed_avg))
                 )
-            # 3 vertices on the existing surface (top of cut, bottom
-            # of fill).
+            # 3 vertices on the existing surface (same XY, different Z).
             for x, y in xy:
                 all_points.append(
                     (float(x), float(y), float(sub.z_existing_avg))
                 )
             # Vertex layout per prism:
             #   p0,p1,p2 = proposed-Z triangle
-            #   p3,p4,p5 = existing-Z triangle (same XY, different Z)
+            #   p3,p4,p5 = existing-Z triangle (same XY)
             p0, p1, p2, p3, p4, p5 = (base + i for i in range(6))
-            # Cap faces. Order picks outward normals consistent for
-            # cut prisms (existing above proposed); fill prisms use
-            # the same definition geometrically since signed volumes
-            # are tracked by the dataclass, not the geometry.
-            all_faces.append([p3, p4, p5])  # top  (existing-Z tri)
-            all_faces.append([p2, p1, p0])  # bottom (proposed-Z tri, reversed)
-            # Side quads — 3 of them, one per prism edge.
-            all_faces.append([p0, p1, p4, p3])
-            all_faces.append([p1, p2, p5, p4])
-            all_faces.append([p2, p0, p3, p5])
+            # Cut-prism face windings (existing above proposed):
+            #   top    = [p3, p4, p5]      (existing-Z tri, CCW-from-above → +Z normal)
+            #   bottom = [p2, p1, p0]      (proposed-Z tri reversed, CCW-from-below → -Z normal)
+            #   sides  = [bottom_start, bottom_end, top_end, top_start]
+            #            for each of the 3 prism edges.
+            faces = [
+                [p3, p4, p5],
+                [p2, p1, p0],
+                [p0, p1, p4, p3],
+                [p1, p2, p5, p4],
+                [p2, p0, p3, p5],
+            ]
+            if not is_cut:
+                # Fill prism (proposed above existing): the geometric
+                # top is now p0..p2 and the bottom is p3..p5.
+                # Reversing every face's vertex order flips its normal
+                # direction so cap and side normals point outward
+                # again.
+                faces = [list(reversed(f)) for f in faces]
+            all_faces.extend(faces)
 
         points_array = np.asarray(all_points, dtype=float)
         return ClosedSolid(points=points_array, faces=all_faces)

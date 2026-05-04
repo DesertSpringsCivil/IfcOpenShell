@@ -519,6 +519,32 @@ class TestComputeVolumesBuildSolids:
         assert np.allclose(z_proposed, 100.0)
         assert np.allclose(z_existing, 110.0)
 
+    def test_fill_prism_face_winding_reversed_vs_cut(self) -> None:
+        """For fill prisms (proposed above existing), face windings
+        are reversed relative to cut prisms so outward-pointing
+        normals stay outward.
+
+        With existing=95 and proposed=100, the first sub-triangle's
+        prism has its top at z=100 (proposed) and bottom at z=95
+        (existing). The first cap face in the cut convention is
+        ``[p3, p4, p5]`` (existing-Z, CCW from above) — for fill we
+        want its reverse ``[p5, p4, p3]`` so the normal flips from
+        +Z (downward into the prism, since existing is the bottom)
+        to -Z (correctly pointing out the bottom).
+        """
+        existing = _flat_square_surface("eg", 95.0)
+        proposed = _flat_square_surface("pr", 100.0)
+        result = tool_earthwork.Earthwork.compute_volumes(
+            existing, proposed, build_solids=True
+        )
+        assert result.fill_solid is not None
+        # First face of the first prism — the cap that the cut convention
+        # would have set to [p3, p4, p5]. For a fill prism we expect the
+        # reverse winding so the cap normal points outward (downward).
+        first_face = result.fill_solid.faces[0]
+        # The fill convention reverses cut's [p3, p4, p5] -> [p5, p4, p3].
+        assert first_face == [5, 4, 3]
+
 
 class TestComputeVolumesNonOverlapping:
     """Two surfaces that don't overlap in XY produce zero volume."""
@@ -628,6 +654,54 @@ class TestAuthorVolumeResult:
                   if q.is_a("IfcQuantityVolume")}
         assert values["UndisturbedVolume"] == pytest.approx(1000.0, rel=1e-6)
         assert values["LooseVolume"] == pytest.approx(1250.0, rel=1e-6)
+
+    def test_fill_qto_loose_volume_uses_bank_fill_not_loose_cut(
+        self,
+    ) -> None:
+        """Regression: closes the cold-review bug where the fill
+        Qto's LooseVolume was being passed result.loose_cut_m3 (the
+        cut's swell-expanded volume) rather than the fill's bank
+        volume (compacted / shrink_factor). With non-unity factors
+        these two are different numbers, and the wrong one shipped
+        in the IFC file before this fix.
+
+        Fill scenario with shrink=0.85, swell=1.25:
+          - compacted_fill_m3 = some value F
+          - LooseVolume on fill Qto must equal F / 0.85, NOT
+            (cut volume) × 1.25 (which is unrelated to fill).
+        """
+        ifc_file, terrain, existing, proposed = self._setup(95.0, 100.0)
+        result = tool_earthwork.Earthwork.compute_volumes(
+            existing, proposed, build_solids=True,
+            shrink_factor=0.85, swell_factor=1.25,
+        )
+        tool_earthwork.Earthwork.author_volume_result(
+            ifc_file, result, terrain=terrain
+        )
+        fill = ifc_file.by_id(result.ifc_fill_id)
+        qto = next(
+            rel.RelatingPropertyDefinition
+            for rel in fill.IsDefinedBy or []
+            if rel.is_a("IfcRelDefinesByProperties")
+            and rel.RelatingPropertyDefinition.is_a("IfcElementQuantity")
+            and rel.RelatingPropertyDefinition.Name
+            == "Qto_EarthworksFillBaseQuantities"
+        )
+        values = {
+            q.Name: q.VolumeValue
+            for q in qto.Quantities or []
+            if q.is_a("IfcQuantityVolume")
+        }
+        # CompactedVolume × (1 / shrink_factor) = LooseVolume.
+        assert values["LooseVolume"] == pytest.approx(
+            values["CompactedVolume"] / 0.85, rel=1e-6
+        )
+        # Sanity: LooseVolume on a pure-fill scenario must NOT equal
+        # the cut's loose volume (which would be 0 since cut volume
+        # is 0 in this scenario, but the pre-fix code would have
+        # written 0 here regardless of the fill's actual loose volume).
+        assert values["CompactedVolume"] > 0
+        assert values["LooseVolume"] > values["CompactedVolume"]
 
     def test_shrink_swell_pset_attached(self) -> None:
         ifc_file, terrain, existing, proposed = self._setup(110.0, 100.0)
@@ -836,3 +910,31 @@ class TestEarthworkBSIIntegration(NewIfc4X3):
                 existing_surface_guid="",
                 proposed_surface_guid="",
             )
+
+    def test_headless_omitting_factors_falls_back_to_panel_state(
+        self, tmp_path
+    ) -> None:
+        """A headless caller that omits ``shrink_factor`` and
+        ``swell_factor`` kwargs should pick up the panel's values
+        (per the operator docstring contract). Pre-fix this silently
+        used the operator's hard 1.0 defaults, ignoring panel state."""
+        existing_guid, proposed_guid = self._build_two_surfaces(tmp_path)
+
+        # Set non-default factors via the panel.
+        props = bpy.context.scene.CivilEarthworkProperties
+        props.shrink_factor = 0.92
+        props.swell_factor = 1.30
+
+        # Headless call WITHOUT specifying factors.
+        bpy.ops.civil.compute_earthwork_volumes(
+            "EXEC_DEFAULT",
+            existing_surface_guid=existing_guid,
+            proposed_surface_guid=proposed_guid,
+        )
+
+        # last_loose_cut_m3 = last_cut_m3 × 1.30 if the panel state was used.
+        # If the operator had silently fallen back to its hard 1.0
+        # default, last_loose_cut_m3 would equal last_cut_m3.
+        assert props.last_loose_cut_m3 == pytest.approx(
+            props.last_cut_m3 * 1.30, rel=1e-6
+        )
