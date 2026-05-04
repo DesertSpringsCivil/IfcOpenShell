@@ -35,6 +35,7 @@ from bonsai.tool.debug import Debug
 from bonsai.tool.demo import Demo
 from bonsai.tool.document import Document
 from bonsai.tool.drawing import Drawing
+from bonsai.tool.earthwork import Earthwork
 from bonsai.tool.feature import Feature
 from bonsai.tool.geometry import Geometry
 from bonsai.tool.georeference import Georeference
