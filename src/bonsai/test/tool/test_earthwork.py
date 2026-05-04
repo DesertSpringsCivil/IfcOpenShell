@@ -28,11 +28,36 @@ Run via the canonical Phase 4/5/6 invocation (PowerShell, from src/bonsai)::
       --blender-executable "C:\\Program Files\\Blender Foundation\\Blender_5\\blender.exe"
 """
 
+import ifcopenshell
+import ifcopenshell.api.unit
+import ifcopenshell.guid
 import numpy as np
 import pytest
 
 import bonsai.tool.earthwork as tool_earthwork
 import bonsai.tool.surface as tool_surface
+
+
+def _make_ifc_file_with_site() -> ifcopenshell.file:
+    """Build a minimal IFC4X3 file with project + site + units, ready
+    for earthwork authoring tests. Mirrors the helper in
+    test_surface.py / test_grading.py."""
+    ifc_file = ifcopenshell.file(schema="IFC4X3_ADD2")
+    project = ifc_file.create_entity(
+        "IfcProject", GlobalId=ifcopenshell.guid.new(), Name="Test Project"
+    )
+    length = ifcopenshell.api.unit.add_si_unit(ifc_file, unit_type="LENGTHUNIT")
+    ifcopenshell.api.unit.assign_unit(ifc_file, units=[length])
+    site = ifc_file.create_entity(
+        "IfcSite", GlobalId=ifcopenshell.guid.new(), Name="Test Site"
+    )
+    ifc_file.create_entity(
+        "IfcRelAggregates",
+        GlobalId=ifcopenshell.guid.new(),
+        RelatingObject=project,
+        RelatedObjects=[site],
+    )
+    return ifc_file
 
 
 @pytest.fixture(autouse=True)
@@ -517,3 +542,136 @@ class TestComputeVolumesNonOverlapping:
         )
         assert result.undisturbed_cut_m3 == pytest.approx(0.0, abs=1e-9)
         assert result.compacted_fill_m3 == pytest.approx(0.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# IFC author wrappers (Phase 6 commit 5)
+# ---------------------------------------------------------------------------
+
+
+class TestAuthorVolumeResult:
+    """Tests for :meth:`Earthwork.author_volume_result`."""
+
+    @staticmethod
+    def _setup(z_existing: float, z_proposed: float):
+        """Build an IFC file with a real terrain entity, a flat
+        existing surface authored as IfcGeographicElement[TERRAIN],
+        and a flat proposed surface (in-memory dataclass only).
+        Returns (ifc_file, terrain_entity, existing_surface,
+        proposed_surface)."""
+        ifc_file = _make_ifc_file_with_site()
+        existing = _flat_square_surface("eg", z_existing)
+        proposed = _flat_square_surface("pr", z_proposed)
+        terrain = tool_surface.Surface.author_ifc_host(ifc_file, existing)
+        return ifc_file, terrain, existing, proposed
+
+    def test_authors_cut_for_pure_cut(self) -> None:
+        ifc_file, terrain, existing, proposed = self._setup(110.0, 100.0)
+        result = tool_earthwork.Earthwork.compute_volumes(
+            existing, proposed, build_solids=True
+        )
+        tool_earthwork.Earthwork.author_volume_result(
+            ifc_file, result, terrain=terrain
+        )
+        cuts = ifc_file.by_type("IfcEarthworksCut")
+        assert len(cuts) == 1
+        assert result.ifc_cut_id == cuts[0].id()
+        assert result.ifc_fill_id is None  # pure cut
+
+    def test_authors_fill_for_pure_fill(self) -> None:
+        ifc_file, terrain, existing, proposed = self._setup(95.0, 100.0)
+        result = tool_earthwork.Earthwork.compute_volumes(
+            existing, proposed, build_solids=True
+        )
+        tool_earthwork.Earthwork.author_volume_result(
+            ifc_file, result, terrain=terrain
+        )
+        fills = ifc_file.by_type("IfcEarthworksFill")
+        assert len(fills) == 1
+        assert result.ifc_fill_id == fills[0].id()
+        assert result.ifc_cut_id is None  # pure fill
+
+    def test_void_terrain_relationship_authored(self) -> None:
+        ifc_file, terrain, existing, proposed = self._setup(110.0, 100.0)
+        result = tool_earthwork.Earthwork.compute_volumes(
+            existing, proposed, build_solids=True
+        )
+        tool_earthwork.Earthwork.author_volume_result(
+            ifc_file, result, terrain=terrain
+        )
+        rels = ifc_file.by_type("IfcRelVoidsElement")
+        assert len(rels) == 1
+        assert rels[0].RelatingBuildingElement.id() == terrain.id()
+        assert rels[0].RelatedOpeningElement.id() == result.ifc_cut_id
+
+    def test_qto_carries_undisturbed_and_loose_volumes(self) -> None:
+        """Pin the audit fix: LooseVolume = UndisturbedVolume × SwellFactor.
+        Authoring 100 m³ cut with swell 1.25 must write 125 m³ loose."""
+        ifc_file, terrain, existing, proposed = self._setup(110.0, 100.0)
+        result = tool_earthwork.Earthwork.compute_volumes(
+            existing, proposed, build_solids=True, swell_factor=1.25
+        )
+        tool_earthwork.Earthwork.author_volume_result(
+            ifc_file, result, terrain=terrain
+        )
+        cut = ifc_file.by_id(result.ifc_cut_id)
+        # Find the cut's Qto and read the volume values back.
+        qto = next(
+            rel.RelatingPropertyDefinition
+            for rel in cut.IsDefinedBy or []
+            if rel.is_a("IfcRelDefinesByProperties")
+            and rel.RelatingPropertyDefinition.is_a("IfcElementQuantity")
+            and rel.RelatingPropertyDefinition.Name
+            == "Qto_EarthworksCutBaseQuantities"
+        )
+        values = {q.Name: q.VolumeValue for q in qto.Quantities or []
+                  if q.is_a("IfcQuantityVolume")}
+        assert values["UndisturbedVolume"] == pytest.approx(1000.0, rel=1e-6)
+        assert values["LooseVolume"] == pytest.approx(1250.0, rel=1e-6)
+
+    def test_shrink_swell_pset_attached(self) -> None:
+        ifc_file, terrain, existing, proposed = self._setup(110.0, 100.0)
+        result = tool_earthwork.Earthwork.compute_volumes(
+            existing, proposed, build_solids=True,
+            shrink_factor=0.92, swell_factor=1.25,
+        )
+        tool_earthwork.Earthwork.author_volume_result(
+            ifc_file, result, terrain=terrain
+        )
+        cut = ifc_file.by_id(result.ifc_cut_id)
+        psets = [
+            rel.RelatingPropertyDefinition
+            for rel in cut.IsDefinedBy or []
+            if rel.is_a("IfcRelDefinesByProperties")
+        ]
+        names = {p.Name for p in psets if p.is_a("IfcPropertySet")}
+        assert "Pset_SaikeiGradingShrinkSwell" in names
+
+    def test_cut_without_terrain_raises(self) -> None:
+        ifc_file = _make_ifc_file_with_site()
+        existing = _flat_square_surface("eg", 110.0)
+        proposed = _flat_square_surface("pr", 100.0)
+        result = tool_earthwork.Earthwork.compute_volumes(
+            existing, proposed, build_solids=True
+        )
+        with pytest.raises(
+            tool_earthwork.SaikeiEarthworkError, match="cut entities require a host terrain"
+        ):
+            tool_earthwork.Earthwork.author_volume_result(
+                ifc_file, result, terrain=None
+            )
+
+    def test_pure_fill_does_not_need_terrain(self) -> None:
+        """Fill-only result has no cut, so no IfcRelVoidsElement and
+        no terrain requirement."""
+        ifc_file = _make_ifc_file_with_site()
+        existing = _flat_square_surface("eg", 95.0)
+        proposed = _flat_square_surface("pr", 100.0)
+        result = tool_earthwork.Earthwork.compute_volumes(
+            existing, proposed, build_solids=True
+        )
+        # Should not raise.
+        tool_earthwork.Earthwork.author_volume_result(
+            ifc_file, result, terrain=None
+        )
+        assert result.ifc_fill_id is not None

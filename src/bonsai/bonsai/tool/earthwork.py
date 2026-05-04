@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 import ifcopenshell
+import ifcopenshell.api.earthwork
 import numpy as np
 import shapely
 
@@ -587,6 +588,174 @@ class Earthwork:
             for tri in triangulated.geoms:
                 if tri.geom_type == "Polygon" and tri.area > 0:
                     yield tri
+
+    # ------------------------------------------------------------------
+    # IFC authoring — wraps Phase 3's ifcopenshell.api.earthwork
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def author_volume_result(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        result: VolumeResult,
+        terrain: Optional["ifcopenshell.entity_instance"] = None,
+        cut_name: str = "Earthwork Cut",
+        fill_name: str = "Earthwork Fill",
+        cut_predefined_type: str = "EXCAVATION",
+        fill_predefined_type: str = "BACKFILL",
+    ) -> None:
+        """Persist a :class:`VolumeResult` to IFC.
+
+        Calls Phase 3's ``ifcopenshell.api.earthwork`` API for each
+        step:
+
+        - ``create_earthworks_cut`` if ``result.cut_solid`` is set;
+          stamps ``result.ifc_cut_id``.
+        - ``create_earthworks_fill`` if ``result.fill_solid`` is set;
+          stamps ``result.ifc_fill_id``.
+        - ``void_terrain`` to link the cut to its host terrain (when
+          both are present).
+        - ``link_fill_to_cut`` to link the fill to the cut (when both
+          are present), closing the canonical voiding chain
+          (terrain → cut → fill).
+        - ``write_cut_quantities`` / ``write_fill_quantities`` —
+          authors ``Qto_EarthworksCut/FillBaseQuantities`` with the
+          dataclass's volume values. Length / Width / Depth are
+          derived from the solid's bounding box; ``LooseVolume`` is
+          taken from :attr:`VolumeResult.loose_cut_m3` (already
+          ``undisturbed × swell_factor`` per __post_init__) so the
+          Qto is internally consistent — closes the spec audit gap.
+        - ``apply_shrink_swell_pset`` on whichever entities exist —
+          attaches ``Pset_SaikeiGradingShrinkSwell`` with the result's
+          shrink/swell factors.
+
+        :param ifc_file: the IFC file to author into.
+        :param result: a :class:`VolumeResult`. Must have non-None
+            cut_solid and/or fill_solid; call
+            :meth:`compute_volumes` with ``build_solids=True`` first.
+        :param terrain: the host :class:`IfcGeographicElement[TERRAIN]`
+            that the cut voids. Required when
+            ``result.cut_solid`` is non-None.
+        :param cut_name / fill_name: human-readable names for the
+            created entities.
+        :param cut_predefined_type: one of
+            :data:`ifcopenshell.api.earthwork._shared.ALLOWED_CUT_TYPES`.
+            Default ``EXCAVATION`` (general earthwork excavation).
+        :param fill_predefined_type: one of the volume-bearing fill
+            types — ``BACKFILL``, ``EMBANKMENT``, ``COUNTERWEIGHT``,
+            ``SUBGRADEBED``, ``TRANSITIONSECTION``. Default
+            ``BACKFILL``. ``SLOPEFILL`` and ``SUBGRADE`` are reserved
+            for Phase 2 grading composition and emit a warning if
+            passed here.
+        :raises SaikeiEarthworkError: if cut_solid is non-None but
+            terrain is None (cut needs a host to void).
+        """
+        if result.cut_solid is not None and terrain is None:
+            raise SaikeiEarthworkError(
+                "result has cut_solid but no terrain was supplied; "
+                "cut entities require a host terrain to void via "
+                "IfcRelVoidsElement"
+            )
+
+        cut_entity = None
+        fill_entity = None
+
+        if result.cut_solid is not None:
+            cut_entity = ifcopenshell.api.earthwork.create_earthworks_cut(
+                ifc_file,
+                name=cut_name,
+                points=cls._points_for_api(result.cut_solid),
+                faces=result.cut_solid.faces,
+                predefined_type=cut_predefined_type,
+            )
+            ifcopenshell.api.earthwork.void_terrain(
+                ifc_file, cut_entity, terrain
+            )
+            length, width, depth = cls._bounding_box_dims(result.cut_solid)
+            ifcopenshell.api.earthwork.write_cut_quantities(
+                ifc_file,
+                cut_entity,
+                length=length,
+                width=width,
+                depth=depth,
+                undisturbed_volume=result.undisturbed_cut_m3,
+                loose_volume=result.loose_cut_m3,
+            )
+            ifcopenshell.api.earthwork.apply_shrink_swell_pset(
+                ifc_file,
+                cut_entity,
+                shrink_factor=result.shrink_factor,
+                swell_factor=result.swell_factor,
+            )
+            result.ifc_cut_id = cut_entity.id()
+
+        if result.fill_solid is not None:
+            fill_entity = ifcopenshell.api.earthwork.create_earthworks_fill(
+                ifc_file,
+                name=fill_name,
+                points=cls._points_for_api(result.fill_solid),
+                faces=result.fill_solid.faces,
+                predefined_type=fill_predefined_type,
+            )
+            length, width, depth = cls._bounding_box_dims(result.fill_solid)
+            ifcopenshell.api.earthwork.write_fill_quantities(
+                ifc_file,
+                fill_entity,
+                length=length,
+                width=width,
+                depth=depth,
+                compacted_volume=result.compacted_fill_m3,
+                loose_volume=result.loose_cut_m3,
+            )
+            ifcopenshell.api.earthwork.apply_shrink_swell_pset(
+                ifc_file,
+                fill_entity,
+                shrink_factor=result.shrink_factor,
+                swell_factor=result.swell_factor,
+            )
+            result.ifc_fill_id = fill_entity.id()
+
+        # Cut → fill linkage closes the voiding chain when both
+        # entities exist.
+        if cut_entity is not None and fill_entity is not None:
+            ifcopenshell.api.earthwork.link_fill_to_cut(
+                ifc_file, cut_entity, fill_entity
+            )
+
+    @staticmethod
+    def _points_for_api(
+        solid: ClosedSolid,
+    ) -> list[tuple[float, float, float]]:
+        """Convert :class:`ClosedSolid.points` to the list-of-tuples
+        shape Phase 3's ``create_earthworks_cut`` / ``_fill`` expects."""
+        return [(float(x), float(y), float(z)) for x, y, z in solid.points]
+
+    @staticmethod
+    def _bounding_box_dims(
+        solid: ClosedSolid,
+    ) -> tuple[float, float, float]:
+        """Return ``(length, width, depth)`` — the X / Y / Z extents
+        of the solid's bounding box. Used by the Qto authoring path
+        to populate ``Length`` / ``Width`` / ``Depth``
+        ``IfcQuantityLength`` values per IFC 4.3
+        ``Qto_EarthworksCut/FillBaseQuantities``.
+
+        Defensive: zero extents are bumped to ``epsilon`` to satisfy
+        the schema's ``IfcPositiveLengthMeasure`` requirement on Qto
+        length values, mirroring the per-Qto handling Phase 3 already
+        does in its own bounding-box helper for fills/cuts."""
+        if solid.points.shape[0] == 0:
+            return (1e-6, 1e-6, 1e-6)
+        mins = solid.points.min(axis=0)
+        maxs = solid.points.max(axis=0)
+        extents = maxs - mins
+        # IfcPositiveLengthMeasure requires strictly positive values.
+        epsilon = 1e-6
+        return (
+            max(float(extents[0]), epsilon),
+            max(float(extents[1]), epsilon),
+            max(float(extents[2]), epsilon),
+        )
 
     @staticmethod
     def _build_prism_soup_solid(
