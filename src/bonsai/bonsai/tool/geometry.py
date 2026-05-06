@@ -39,7 +39,6 @@ from typing import (
 import bmesh
 import bpy
 import ifcopenshell
-import ifcopenshell.api
 import ifcopenshell.api.boundary
 import ifcopenshell.api.geometry
 import ifcopenshell.api.grid
@@ -81,7 +80,7 @@ if TYPE_CHECKING:
         BIMGeometryProperties,
         BIMObjectGeometryProperties,
     )
-    from bonsai.bim.prop import Attribute, BIMMeshProperties
+    from bonsai.bim.prop import BIMMeshProperties
 
 
 class Geometry(bonsai.core.tool.Geometry):
@@ -1408,8 +1407,6 @@ class Geometry(bonsai.core.tool.Geometry):
         :param representation_item: item to remove.
         :param element: item's element. Is used to unmark manual booleans.
         """
-        # NOTE: we assume it's not the last representation item
-        # otherwise we probably would need to remove representation too
         # NOTE: a lot of shared code with `geometry.remove_representation`
         ifc_file = tool.Ifc.get()
         shape_aspects: list[ifcopenshell.entity_instance] = []
@@ -1468,7 +1465,10 @@ class Geometry(bonsai.core.tool.Geometry):
             cls.remove_representation_items_from_shape_aspect([representation_item], shape_aspect)
 
         if representation:
-            representation.Items = tuple(set(representation.Items) - {representation_item})
+            new_items = tuple(set(representation.Items) - {representation_item})
+            if not new_items:
+                return
+            representation.Items = new_items
         also_consider = list(consider_inverses)
         ifcopenshell.util.element.remove_deep2(ifc_file, representation_item, also_consider=also_consider)
 

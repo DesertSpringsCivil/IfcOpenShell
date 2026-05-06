@@ -91,9 +91,7 @@ class IfcHeaderExtractor:
         data = HeaderMetadata()
         max_lines_to_parse = 50
         for _ in range(max_lines_to_parse):
-            line = next(ifc_file, None)
-            if line is None:
-                break
+            line = next(ifc_file)
             if isinstance(line, bytes):
                 line = line.decode("utf-8")
             if line.startswith("FILE_DESCRIPTION"):

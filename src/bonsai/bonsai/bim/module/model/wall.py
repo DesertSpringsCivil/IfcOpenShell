@@ -20,12 +20,11 @@
 
 import copy
 import math
-from math import acos, atan2, cos, degrees, pi, sin
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union, assert_never, get_args
+from math import atan2, cos, degrees, pi, sin
+from typing import TYPE_CHECKING, Any, Literal, Union, get_args
 
 import bpy
 import ifcopenshell
-import ifcopenshell.api
 import ifcopenshell.api.feature
 import ifcopenshell.api.geometry
 import ifcopenshell.api.material
@@ -45,11 +44,9 @@ from mathutils import Matrix, Vector
 import bonsai.core.geometry
 import bonsai.core.model as core
 import bonsai.core.root
-import bonsai.core.type
 import bonsai.tool as tool
 from bonsai.bim.ifc import IfcStore
 from bonsai.bim.module.model.decorator import PolylineDecorator, ProductDecorator
-from bonsai.bim.module.model.opening import FilledOpeningGenerator
 from bonsai.bim.module.model.polyline import PolylineOperator
 
 
@@ -1271,27 +1268,6 @@ class DumbWallJoiner:
         bonsai.core.root.copy_class(tool.Ifc, tool.Collector, tool.Geometry, tool.Root, obj=wall2)
         return wall2
 
-    def join_Z(self, wall1, slab2):
-        element1 = tool.Ifc.get_entity(wall1)
-        element2 = tool.Ifc.get_entity(slab2)
-
-        for rel in element1.ConnectedFrom:
-            if rel.is_a() == "IfcRelConnectsElements" and rel.Description == "TOP":
-                ifcopenshell.api.geometry.disconnect_element(
-                    tool.Ifc.get(),
-                    relating_element=rel.RelatingElement,
-                    related_element=element1,
-                )
-
-        ifcopenshell.api.geometry.connect_element(
-            tool.Ifc.get(),
-            relating_element=element2,
-            related_element=element1,
-            description="TOP",
-        )
-
-        tool.Model.recreate_wall(element1, wall1)
-
     def set_axis(self, wall, p1, p2):
         axis = ifcopenshell.util.representation.get_context(tool.Ifc.get(), "Plan", "Axis", "GRAPH_VIEW")
         builder = ifcopenshell.util.shape_builder.ShapeBuilder(tool.Ifc.get())
@@ -1335,29 +1311,6 @@ class DumbWallJoiner:
         p2[0] = p1[0] + si_length / unit_scale
         self.set_axis(element1, p1, p2)
         tool.Model.recreate_wall(element1, wall1)
-
-    def join_T(self, wall1: bpy.types.Object, wall2: bpy.types.Object) -> None:
-        element1 = tool.Ifc.get_entity(wall1)
-        element2 = tool.Ifc.get_entity(wall2)
-        axis1 = tool.Model.get_wall_axis(wall1)
-        axis2 = tool.Model.get_wall_axis(wall2)
-        intersect = tool.Cad.intersect_edges(axis1["reference"], axis2["reference"])
-        if intersect:
-            intersect, _ = intersect
-        else:
-            return
-        connection = "ATEND" if tool.Cad.edge_percent(intersect, axis1["reference"]) > 0.5 else "ATSTART"
-
-        ifcopenshell.api.geometry.connect_path(
-            tool.Ifc.get(),
-            related_element=element1,
-            relating_element=element2,
-            relating_connection="ATPATH",
-            related_connection=connection,
-            description="BUTT",
-        )
-
-        tool.Model.recreate_wall(element1, wall1, axis1["reference"], axis1["reference"])
 
     def connect(self, obj1: bpy.types.Object, obj2: bpy.types.Object) -> None:
         wall1 = tool.Ifc.get_entity(obj1)

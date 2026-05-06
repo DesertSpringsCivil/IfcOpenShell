@@ -17,15 +17,13 @@
 # along with Bonsai.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
-import sys
 from functools import partial
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 import bpy
 import bpy.utils.previews
 from bpy.types import Menu, WorkSpaceTool
 
-import bonsai.bim
 import bonsai.core.model as core
 import bonsai.tool as tool
 from bonsai.bim.helper import draw_attribute, prop_with_search
@@ -945,7 +943,7 @@ class EditObjectUI:
             if "LAYER2" in AuthoringData.data["selected_material_usages"]:
                 row = cls.layout.row(align=True) if ui_context != "TOOL_HEADER" else row
                 add_layout_hotkey_operator(
-                    cls.layout, "Extend To Underside", "S_E", bpy.ops.bim.extend_to_underside.__doc__, ui_context
+                    cls.layout, "Extend To Underside", "S_E", bpy.ops.bim.extend_walls_to_underside.__doc__, ui_context
                 )
 
         if AuthoringData.data["is_flippable_element"]:

@@ -53,6 +53,7 @@ Example:
     for wall in walls:
         print(wall.Name)
 """
+
 from __future__ import annotations
 
 import os
@@ -110,8 +111,8 @@ __all__ = [
 ]
 
 try:
-    from .stream import stream, stream_entity
-    from .stream import stream as _stream
+    from .stream import stream, stream_entity  # ty: ignore[possibly-missing-import]
+    from .stream import stream as _stream  # ty: ignore[possibly-missing-import]
 except:
     pass
 
@@ -198,11 +199,13 @@ def open(
         for ty in bypass_types:
             f.bypass_type(ty)
         if mmap:
-            f.initialize(str(path.absolute()), mmap=mmap)
+            # mmap parameter is only available for builds with USE_MMAP, not used in our main builds
+            f.initialize(str(path.absolute()), mmap=mmap)  # type: ignore[unknown-argument]
         else:
             f.initialize(str(path.absolute()))
     elif mmap:
-        f = ifcopenshell_wrapper.open(str(path.absolute()), mmap=mmap)
+        # mmap parameter is only available for builds with USE_MMAP, not used in our main builds
+        f = ifcopenshell_wrapper.open(str(path.absolute()), mmap=mmap)  # type: ignore[unknown-argument]
     else:
         f = ifcopenshell_wrapper.open(str(path.absolute()))
     return file(f)
@@ -379,5 +382,5 @@ def convert_path_to_rocksdb(ifcspf_path: Union[Path, str], rocksdb_path: Union[P
 
 
 version_core = ifcopenshell_wrapper.version()
-__version__ = version = "0.0.0"
+__version__ = version = "0.8.5-alpha260326"
 get_log = ifcopenshell_wrapper.get_log

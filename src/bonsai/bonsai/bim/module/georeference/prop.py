@@ -23,11 +23,7 @@ import ifcopenshell.util.geolocation
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
-    EnumProperty,
     FloatProperty,
-    FloatVectorProperty,
-    IntProperty,
-    PointerProperty,
     StringProperty,
 )
 from bpy.types import PropertyGroup
@@ -143,7 +139,9 @@ def update_local_coordinates(self: "BIMGeoreferenceProperties", context: bpy.typ
         tool.Georeference.set_coordinates(
             "blender",
             ifcopenshell.util.geolocation.enh2xyz(
-                *local_coordinates,
+                local_coordinates[0],
+                local_coordinates[1],
+                local_coordinates[2],
                 float(props.blender_offset_x),
                 float(props.blender_offset_y),
                 float(props.blender_offset_z),
@@ -166,7 +164,9 @@ def update_map_coordinates(self: "BIMGeoreferenceProperties", context: bpy.types
         tool.Georeference.set_coordinates(
             "blender",
             ifcopenshell.util.geolocation.enh2xyz(
-                *local_coordinates,
+                local_coordinates[0],
+                local_coordinates[1],
+                local_coordinates[2],
                 float(props.blender_offset_x),
                 float(props.blender_offset_y),
                 float(props.blender_offset_z),
@@ -271,6 +271,8 @@ class BIMGeoreferenceProperties(PropertyGroup):
         x_axis_ordinate: str
         x_axis_is_null: bool
 
+        model_is_georeferenced: bool
+        model_crs: str
         model_origin: str
         model_origin_si: str
         model_project_north: str

@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "bonsai"
-version = "0.0.0"
+version = "0.8.5-alpha260326"
 name = "Bonsai"
 tagline = "A native Building Information Model authoring platform using IFC"
 maintainer = "Dion Moult <dion@thinkmoult.com>"
@@ -28,7 +28,7 @@ tags = [
 ]
 blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
-platforms = ["os-arch"]
+platforms = ["windows-x64"]
 permissions.network = "Augin / Cove.Tool integration for VR and environmental analysis"
 permissions.files = "Load and save IFCs, IDS, BCF, etc from disk"
 permissions.clipboard = "Copy and paste error logs"

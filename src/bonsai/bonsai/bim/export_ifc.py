@@ -24,21 +24,14 @@ import os
 import tempfile
 import zipfile
 from logging import Logger
-from math import radians
 from typing import Union
 
 import bpy
 import ifcopenshell
-import ifcopenshell.api
 import ifcopenshell.util.element
-import ifcopenshell.util.placement
 import ifcopenshell.util.unit
-from mathutils import Vector
 
-import bonsai.core.aggregate
 import bonsai.core.geometry
-import bonsai.core.spatial
-import bonsai.core.style
 import bonsai.tool as tool
 from bonsai.bim.ifc import IfcStore
 
@@ -79,9 +72,7 @@ class IfcExporter:
 
     def set_header(self):
         self.file.header.file_name.name = os.path.basename(self.ifc_export_settings.output_file)
-        self.file.header.file_name.time_stamp = (
-            datetime.datetime.utcnow().replace(tzinfo=datetime.UTC).astimezone().replace(microsecond=0).isoformat()
-        )
+        self.file.header.file_name.time_stamp = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
         self.file.header.file_name.preprocessor_version = "IfcOpenShell {}".format(ifcopenshell.version)
         self.file.header.file_name.originating_system = "{} {}".format(
             self.get_application_name(), tool.Blender.get_bonsai_version()

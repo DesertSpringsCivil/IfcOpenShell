@@ -19,12 +19,11 @@
 # pyright: reportUnnecessaryTypeIgnoreComment=error
 
 import json
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union, assert_never, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 import bmesh
 import bpy
 import ifcopenshell
-import ifcopenshell.api
 import ifcopenshell.api.geometry
 import ifcopenshell.api.system
 import ifcopenshell.util.element
@@ -34,8 +33,6 @@ import ifcopenshell.util.shape_builder
 import ifcopenshell.util.system
 import ifcopenshell.util.type
 import ifcopenshell.util.unit
-import mathutils
-import numpy as np
 from bpy_extras.object_utils import AddObjectHelper
 from mathutils import Matrix, Vector
 
@@ -697,10 +694,14 @@ def generate_box(usecase_path: str, ifc_file: ifcopenshell.file, settings: dict[
 
         new_settings = settings.copy()
         new_settings["context"] = box_context
-        new_box = ifcopenshell.api.geometry.add_representation(ifc_file, should_run_listeners=False, **new_settings)
+        new_box = ifcopenshell.api.geometry.add_representation(
+            ifc_file,
+            should_run_listeners=False,  # ty:ignore[unknown-argument]
+            **new_settings,
+        )
         ifcopenshell.api.geometry.assign_representation(
             ifc_file,
-            should_run_listeners=False,
+            should_run_listeners=False,  # ty:ignore[unknown-argument]
             product=product,
             representation=new_box,
         )

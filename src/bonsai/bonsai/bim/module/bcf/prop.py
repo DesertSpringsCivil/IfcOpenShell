@@ -24,8 +24,6 @@ from bpy.props import (
     BoolProperty,
     CollectionProperty,
     EnumProperty,
-    FloatProperty,
-    FloatVectorProperty,
     IntProperty,
     PointerProperty,
     StringProperty,
@@ -232,7 +230,7 @@ class BcfTopic(PropertyGroup):
 
 
 def get_related_topics(self: "BCFProperties", context: bpy.types.Context) -> list[tuple[str, str, str]]:
-    global RELATED_TOPICS_ENUM_ITEMS
+    global RELATED_TOPICS_ENUM_ITEMS  # ty: ignore[unresolved-global]
     props = self
     active_topic = props.active_topic
     active_related_topics = active_topic.related_topics.keys()

@@ -39,8 +39,7 @@ import ifcopenshell.util.shape
 import ifcopenshell.util.system
 import ifcopenshell.util.unit
 
-filter_elements_grammar = lark.Lark(
-    """start: filter_group
+filter_elements_grammar = lark.Lark("""start: filter_group
     filter_group: facet_list ("+" facet_list)*
     facet_list: facet ("," facet)*
 
@@ -111,11 +110,9 @@ filter_elements_grammar = lark.Lark(
     NEWLINE: (CR? LF)+
 
     %ignore WS // Disregard spaces in text
-"""
-)
+""")
 
-get_element_grammar = lark.Lark(
-    """start: keys
+get_element_grammar = lark.Lark("""start: keys
 
     keys: key ("." key)*
     key: quoted_string | regex_string | unquoted_string
@@ -130,11 +127,9 @@ get_element_grammar = lark.Lark(
     WS: /[ \\t\\f\\r\\n]/+
 
     %ignore WS // Disregard spaces in text
- """
-)
+ """)
 
-format_grammar = lark.Lark(
-    """start: expression
+format_grammar = lark.Lark("""start: expression
 
     ?expression: add_sub
     ?add_sub: mul_div
@@ -193,8 +188,7 @@ format_grammar = lark.Lark(
     NEWLINE: (CR? LF)+
 
     %ignore WS // Disregard spaces in text
-"""
-)
+""")
 
 
 class FormatTransformer(lark.Transformer):
@@ -446,13 +440,13 @@ def _get_element_value(element: ifcopenshell.entity_instance, keys: list[str]) -
         elif key == "container":
             value = ifcopenshell.util.element.get_container(value)
         elif key == "space":
-            value = ifcopenshell.util.element.get_container(value, ifc_class="IfcSpace")
+            value = ifcopenshell.util.element.get_parent(value, ifc_class="IfcSpace")
         elif key == "storey":
-            value = ifcopenshell.util.element.get_container(value, ifc_class="IfcBuildingStorey")
+            value = ifcopenshell.util.element.get_parent(value, ifc_class="IfcBuildingStorey")
         elif key == "building":
-            value = ifcopenshell.util.element.get_container(value, ifc_class="IfcBuilding")
+            value = ifcopenshell.util.element.get_parent(value, ifc_class="IfcBuilding")
         elif key == "site":
-            value = ifcopenshell.util.element.get_container(value, ifc_class="IfcSite")
+            value = ifcopenshell.util.element.get_parent(value, ifc_class="IfcSite")
         elif key == "parent":
             value = ifcopenshell.util.element.get_parent(value)
         elif key in ("types", "occurrences"):

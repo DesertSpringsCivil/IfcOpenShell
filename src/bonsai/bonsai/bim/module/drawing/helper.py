@@ -17,10 +17,8 @@
 # along with Bonsai.  If not, see <http://www.gnu.org/licenses/>.
 
 import math
-from typing import Union
 
 import bpy
-import ifcopenshell
 import ifcopenshell.util.element
 import ifcopenshell.util.unit
 import mathutils.geometry
@@ -458,7 +456,8 @@ def format_distance(
                 tx_dist = fmt % d_cm
 
     else:
-        tx_dist = fmt % value
+        assert f"Unexpected unit_system - '{unit_system}'."
+        # tx_dist = fmt % value
 
     return tx_dist
 

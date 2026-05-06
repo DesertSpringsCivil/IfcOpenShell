@@ -40,7 +40,7 @@ APPENDABLE_ASSET = Literal[
     "IfcProfileDef",
     "IfcPresentationStyle",
 ]
-APPENDABLE_ASSET_TYPES = get_args(APPENDABLE_ASSET)
+APPENDABLE_ASSET_TYPES: tuple[APPENDABLE_ASSET, ...] = get_args(APPENDABLE_ASSET)
 MATERIAL_SETS = ("IfcMaterialLayerSet", "IfcMaterialConstituentSet", "IfcMaterialProfileSet")
 
 
@@ -431,7 +431,7 @@ class Usecase:
             )
             ifcopenshell.api.type.assign_type(
                 self.file,
-                should_run_listeners=False,
+                should_run_listeners=False,  # ty:ignore[unknown-argument]
                 related_objects=[element],
                 relating_type=new_type,
                 should_map_representations=False,

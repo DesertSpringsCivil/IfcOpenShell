@@ -21,8 +21,6 @@ import os
 from typing import TYPE_CHECKING, Any, Literal, Union, assert_never, get_args
 
 import bpy
-import ifcopenshell
-import ifcopenshell.util.pset
 import ifcopenshell.util.unit
 from bpy.props import (
     BoolProperty,
@@ -35,17 +33,9 @@ from bpy.props import (
     StringProperty,
 )
 from bpy.types import PropertyGroup
-from ifcopenshell.util.doc import (
-    get_attribute_doc,
-    get_entity_doc,
-    get_predefined_type_doc,
-    get_property_doc,
-    get_property_set_doc,
-)
 
 import bonsai.bim
 import bonsai.bim.handler
-import bonsai.bim.schema
 import bonsai.tool as tool
 
 cwd = os.path.dirname(os.path.realpath(__file__))
@@ -69,7 +59,8 @@ def update_is_visible(self: "BIMTabVisibility", context: bpy.types.Context) -> N
 def update_global_tab(self: "BIMTabProperties", context: bpy.types.Context) -> None:
     tool.Blender.setup_tabs()
     screen = context.id_data
-    aprops = screen.BIMAreaProperties[screen.areas[:].index(context.area)]
+    assert isinstance(screen, bpy.types.Screen)
+    aprops = tool.Blender.get_area_props(screen)[screen.areas[:].index(context.area)]
     aprops.tab = self.tab
 
 
@@ -498,16 +489,15 @@ def get_tab(
             ("PROJECT", "Project Overview", "", bonsai.bim.icons[icon_key].icon_id, 0),
             ("OBJECT", "Object Information", "", "FILE_3D", 1),
             ("GEOMETRY", "Geometry and Materials", "", "MATERIAL", 2),
-            ("CIVIL", "Civil Infrastructure", "", "CURVE_DATA", 3),
-            ("DRAWINGS", "Drawings and Documents", "", "DOCUMENTS", 4),
-            ("SERVICES", "Services and Systems", "", "NETWORK_DRIVE", 5),
-            ("STRUCTURE", "Structural Analysis", "", "EDITMODE_HLT", 6),
-            ("SCHEDULING", "Costing and Scheduling", "", "NLA", 7),
-            ("FM", "Facility Management", "", "PACKAGE", 8),
-            ("QUALITY", "Quality and Coordination", "", "COMMUNITY", 9),
-            ("BOOKMARK", "Bookmark", "", "SOLO_ON", 10),
+            ("DRAWINGS", "Drawings and Documents", "", "DOCUMENTS", 3),
+            ("SERVICES", "Services and Systems", "", "NETWORK_DRIVE", 4),
+            ("STRUCTURE", "Structural Analysis", "", "EDITMODE_HLT", 5),
+            ("SCHEDULING", "Costing and Scheduling", "", "NLA", 6),
+            ("FM", "Facility Management", "", "PACKAGE", 7),
+            ("QUALITY", "Quality and Coordination", "", "COMMUNITY", 8),
+            ("BOOKMARK", "Bookmark", "", "SOLO_ON", 9),
             None,
-            ("BLENDER", "Blender Properties", "", "BLENDER", 11),
+            ("BLENDER", "Blender Properties", "", "BLENDER", 10),
         ]
     return get_tab.enum_items
 
