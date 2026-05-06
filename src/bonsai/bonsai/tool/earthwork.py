@@ -889,6 +889,84 @@ class Earthwork:
         )
 
     # ------------------------------------------------------------------
+    # Volume label annotation — spec §6.3 (Phase 7b)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def author_volume_label(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        xyz: "tuple[float, float, float]",
+        cut_depth: float,
+        fill_depth: float,
+        label_text: "str | None" = None,
+    ) -> "ifcopenshell.entity_instance":
+        """Author an :class:`IfcAnnotation` at ``xyz`` stamping cut/fill
+        depth values as a ``Pset_SaikeiVolumeLabel`` property set.
+
+        Thin dispatcher: validates inputs, resolves the IFC site, then
+        delegates all entity authoring to
+        :func:`ifcopenshell.api.earthwork.add_volume_label_annotation` per
+        spec §1.6 (every Saikei Pset authored via an ``ifcopenshell.api.*``
+        helper, not inline in the Bonsai tool layer).
+
+        :param ifc_file: the open :class:`ifcopenshell.file`.
+        :param xyz: ``(x, y, z)`` position tuple in project coordinates.
+            Must be a 3-element iterable of real numbers; raises
+            :class:`ValueError` when coordinates are non-finite or xyz has
+            wrong length.
+        :param cut_depth: depth of cut at the probe point (metres). May be
+            0.0 for a pure-fill location; negative values raise
+            :class:`ValueError`.
+        :param fill_depth: depth of fill at the probe point (metres). May be
+            0.0 for a pure-cut location; negative values raise
+            :class:`ValueError`.
+        :param label_text: optional free-text override for the annotation
+            name (e.g. ``"Station 1+250"``).  When ``None`` the name is
+            auto-generated as ``"VolumeLabel C{cut_depth:.3f} F{fill_depth:.3f}"``.
+        :returns: the created :class:`IfcAnnotation` entity.
+        :raises ValueError: if ``xyz`` is not a 3-element sequence of finite
+            real numbers, or if ``cut_depth`` / ``fill_depth`` are negative.
+        :raises SaikeiEarthworkError: if no ``IfcSite`` exists in the file.
+        """
+        import math
+
+        # -- Validate xyz (before any IFC mutation) -----------------------
+        try:
+            x_val, y_val, z_val = (float(v) for v in xyz)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"xyz must be a 3-element sequence of real numbers; got {xyz!r}"
+            ) from exc
+        if not (math.isfinite(x_val) and math.isfinite(y_val) and math.isfinite(z_val)):
+            raise ValueError(
+                f"xyz coordinates must be finite; got ({x_val}, {y_val}, {z_val})"
+            )
+
+        # -- Validate depths (before any IFC mutation) --------------------
+        if cut_depth < 0:
+            raise ValueError(f"cut_depth must be >= 0; got {cut_depth}")
+        if fill_depth < 0:
+            raise ValueError(f"fill_depth must be >= 0; got {fill_depth}")
+
+        # -- Resolve site -------------------------------------------------
+        site = next(iter(ifc_file.by_type("IfcSite")), None)
+        if site is None:
+            raise SaikeiEarthworkError(
+                "No IfcSite in file; cannot anchor volume label"
+            )
+
+        # -- Delegate to IFC API helper (spec §1.6) -----------------------
+        return ifcopenshell.api.earthwork.add_volume_label_annotation(
+            ifc_file,
+            site=site,
+            xyz=(x_val, y_val, z_val),
+            cut_depth=cut_depth,
+            fill_depth=fill_depth,
+            label_text=label_text,
+        )
+
+    # ------------------------------------------------------------------
     # Delete results — spec §5.3
     # ------------------------------------------------------------------
 

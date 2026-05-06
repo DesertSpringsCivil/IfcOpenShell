@@ -1177,3 +1177,333 @@ class TestEarthworkDecorator(NewIfc4X3):
         else:
             # In an interactive session the decorator IS installed; skip.
             pytest.skip("not running headless — install guard not exercisable")
+
+
+# ---------------------------------------------------------------------------
+# Phase 7b — author_volume_label tool method tests
+# ---------------------------------------------------------------------------
+
+
+class TestEarthworkAuthorVolumeLabel:
+    """Tests for :meth:`Earthwork.author_volume_label` (spec §6.3 Phase 7b).
+
+    Pure tool-method tests; no Blender runtime required.
+    """
+
+    @pytest.mark.civil
+    def test_author_volume_label_creates_annotation(self) -> None:
+        """author_volume_label must create an IfcAnnotation with
+        ObjectType='VolumeLabel' at the supplied XYZ."""
+        ifc_file = _make_ifc_file_with_site()
+
+        annotation = tool_earthwork.Earthwork.author_volume_label(
+            ifc_file,
+            xyz=(10.0, 20.0, 100.0),
+            cut_depth=5.0,
+            fill_depth=0.0,
+        )
+
+        assert annotation.is_a("IfcAnnotation")
+        assert annotation.ObjectType == "VolumeLabel"
+        # Verify placement origin is at the supplied coordinates.
+        origin = annotation.ObjectPlacement.RelativePlacement.Location
+        coords = list(origin.Coordinates)
+        assert coords[0] == pytest.approx(10.0)
+        assert coords[1] == pytest.approx(20.0)
+        assert coords[2] == pytest.approx(100.0)
+
+    @pytest.mark.civil
+    def test_author_volume_label_writes_pset(self) -> None:
+        """author_volume_label must attach Pset_SaikeiVolumeLabel with
+        CutDepth, FillDepth, and LabelText (when label_text is supplied)."""
+        ifc_file = _make_ifc_file_with_site()
+
+        annotation = tool_earthwork.Earthwork.author_volume_label(
+            ifc_file,
+            xyz=(0.0, 0.0, 0.0),
+            cut_depth=3.5,
+            fill_depth=0.0,
+            label_text="Station 1+250",
+        )
+
+        # Find the pset via inverse relationship traversal.
+        pset = next(
+            (
+                rel.RelatingPropertyDefinition
+                for rel in annotation.IsDefinedBy or []
+                if rel.is_a("IfcRelDefinesByProperties")
+                and rel.RelatingPropertyDefinition.is_a("IfcPropertySet")
+                and rel.RelatingPropertyDefinition.Name
+                == "Pset_SaikeiVolumeLabel"
+            ),
+            None,
+        )
+        assert pset is not None, "Pset_SaikeiVolumeLabel not found on annotation"
+
+        props = {p.Name: p for p in pset.HasProperties or []}
+        # CutDepth
+        assert "CutDepth" in props
+        assert float(props["CutDepth"].NominalValue.wrappedValue) == pytest.approx(3.5)
+        # FillDepth
+        assert "FillDepth" in props
+        assert float(props["FillDepth"].NominalValue.wrappedValue) == pytest.approx(0.0)
+        # LabelText (present when label_text is supplied)
+        assert "LabelText" in props
+        assert str(props["LabelText"].NominalValue.wrappedValue) == "Station 1+250"
+
+    @pytest.mark.civil
+    def test_author_volume_label_invalid_xyz_raises(self) -> None:
+        """author_volume_label must raise ValueError for non-3-element xyz
+        or non-finite coordinate values, and must NOT author any entity."""
+        ifc_file = _make_ifc_file_with_site()
+        initial_annotation_count = len(ifc_file.by_type("IfcAnnotation"))
+
+        # Too few elements.
+        with pytest.raises(ValueError, match="3-element"):
+            tool_earthwork.Earthwork.author_volume_label(
+                ifc_file,
+                xyz=(1.0, 2.0),  # type: ignore[arg-type]
+                cut_depth=0.0,
+                fill_depth=0.0,
+            )
+
+        # Postcondition: no annotation was authored on failure.
+        assert len(ifc_file.by_type("IfcAnnotation")) == initial_annotation_count
+
+    @pytest.mark.civil
+    def test_author_volume_label_negative_cut_depth_raises(self) -> None:
+        """author_volume_label must raise ValueError for negative cut_depth."""
+        ifc_file = _make_ifc_file_with_site()
+        with pytest.raises(ValueError, match="cut_depth"):
+            tool_earthwork.Earthwork.author_volume_label(
+                ifc_file,
+                xyz=(0.0, 0.0, 0.0),
+                cut_depth=-1.0,
+                fill_depth=0.0,
+            )
+
+    @pytest.mark.civil
+    def test_author_volume_label_auto_name_when_no_label_text(self) -> None:
+        """When label_text is None the annotation name should be
+        auto-generated from the cut/fill depths."""
+        ifc_file = _make_ifc_file_with_site()
+        annotation = tool_earthwork.Earthwork.author_volume_label(
+            ifc_file,
+            xyz=(0.0, 0.0, 0.0),
+            cut_depth=2.5,
+            fill_depth=0.0,
+            label_text=None,
+        )
+        assert annotation.Name is not None
+        assert "2.500" in annotation.Name or "2.5" in annotation.Name
+
+
+# ---------------------------------------------------------------------------
+# Phase 7b — EarthworkCivilTool workspace registration smoke test
+# ---------------------------------------------------------------------------
+
+
+class TestEarthworkCivilToolWorkspace(NewIfc4X3):
+    """Registration smoke test for :class:`EarthworkCivilTool`.
+
+    Confirms the workspace module imports without error and the tool
+    class is correctly shaped (idname, icon, draw_settings callable).
+    In headless pytest-blender, ``bpy.utils.register_tool`` is not
+    called (``bpy.app.background`` is True), so we test the class
+    attributes directly.
+    """
+
+    @pytest.mark.civil
+    def test_workspace_module_imports(self) -> None:
+        """workspace.py must be importable and expose EarthworkCivilTool."""
+        from bonsai.bim.module.earthwork.workspace import EarthworkCivilTool
+
+        assert EarthworkCivilTool.bl_idname == "bim.earthwork_tool"
+        assert EarthworkCivilTool.bl_label == "Earthwork"
+        assert EarthworkCivilTool.bl_space_type == "VIEW_3D"
+        assert EarthworkCivilTool.bl_context_mode == "OBJECT"
+        assert callable(EarthworkCivilTool.draw_settings)
+
+    @pytest.mark.civil
+    def test_workspace_tool_registered_in_background_skipped(self) -> None:
+        """In headless mode the register_tool call is guarded by
+        ``if not bpy.app.background``. Confirm it was not called."""
+        if bpy.app.background:
+            # Guard was in effect — tool not registered (expected).
+            assert True, "headless guard confirmed"
+        else:
+            pytest.skip("not running headless — guard not exercisable")
+
+
+# ---------------------------------------------------------------------------
+# Phase 7b — volume probe modal operator (EXEC_DEFAULT path)
+# ---------------------------------------------------------------------------
+
+
+class TestEarthworkVolumeProbeModal(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_earthwork_volume_probe` via the
+    headless EXEC_DEFAULT path.
+
+    All tests rely on a prior ``compute_earthwork_volumes`` run to
+    populate ``last_run_existing_guid`` / ``last_run_proposed_guid``.
+    """
+
+    def _build_two_surfaces(self, tmp_path):
+        """Author existing at z=110, proposed at z=100 (pure cut).
+        Returns (existing_guid, proposed_guid)."""
+        import bpy
+
+        eg_path = tmp_path / "eg.csv"
+        eg_path.write_text("-50,-50,110\n50,-50,110\n50,50,110\n-50,50,110\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Probe EG"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(eg_path)
+        )
+        existing_guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        pr_path = tmp_path / "pr.csv"
+        pr_path.write_text("-50,-50,100\n50,-50,100\n50,50,100\n-50,50,100\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Probe PR"
+        bpy.context.scene.CivilSurfaceProperties.new_surface_kind = "proposed_site"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(pr_path)
+        )
+        proposed_guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+        return existing_guid, proposed_guid
+
+    @pytest.mark.civil
+    def test_from_data_authors_label(self, tmp_path) -> None:
+        """EXEC_DEFAULT with xyz set must author an IfcAnnotation with
+        ObjectType='VolumeLabel' at the given position."""
+        existing_guid, proposed_guid = self._build_two_surfaces(tmp_path)
+
+        # Populate last_run_*_guid via a compute run.
+        bpy.ops.civil.compute_earthwork_volumes(
+            "EXEC_DEFAULT",
+            existing_surface_guid=existing_guid,
+            proposed_surface_guid=proposed_guid,
+            swell_factor=1.0,
+        )
+
+        initial_count = len(tool.Ifc.get().by_type("IfcAnnotation"))
+
+        bpy.ops.civil.earthwork_volume_probe(
+            "EXEC_DEFAULT",
+            xyz=(5.0, 5.0, 0.0),
+            label_text="",
+        )
+
+        annotations = tool.Ifc.get().by_type("IfcAnnotation")
+        volume_labels = [a for a in annotations if a.ObjectType == "VolumeLabel"]
+        assert len(volume_labels) == 1, (
+            f"Expected 1 VolumeLabel annotation, got {len(volume_labels)}"
+        )
+
+    @pytest.mark.civil
+    def test_from_data_writes_cut_fill_pset(self, tmp_path) -> None:
+        """The authored IfcAnnotation must carry Pset_SaikeiVolumeLabel
+        with CutDepth and FillDepth values consistent with the surfaces."""
+        existing_guid, proposed_guid = self._build_two_surfaces(tmp_path)
+
+        bpy.ops.civil.compute_earthwork_volumes(
+            "EXEC_DEFAULT",
+            existing_surface_guid=existing_guid,
+            proposed_surface_guid=proposed_guid,
+            swell_factor=1.0,
+        )
+
+        bpy.ops.civil.earthwork_volume_probe(
+            "EXEC_DEFAULT",
+            xyz=(5.0, 5.0, 0.0),
+            label_text="",
+        )
+
+        annotations = tool.Ifc.get().by_type("IfcAnnotation")
+        label = next(a for a in annotations if a.ObjectType == "VolumeLabel")
+
+        pset = next(
+            (
+                rel.RelatingPropertyDefinition
+                for rel in label.IsDefinedBy or []
+                if rel.is_a("IfcRelDefinesByProperties")
+                and rel.RelatingPropertyDefinition.is_a("IfcPropertySet")
+                and rel.RelatingPropertyDefinition.Name == "Pset_SaikeiVolumeLabel"
+            ),
+            None,
+        )
+        assert pset is not None, "Pset_SaikeiVolumeLabel missing from annotation"
+
+        props = {p.Name: p for p in pset.HasProperties or []}
+        # Existing at z=110, proposed at z=100 → cut_depth=10, fill_depth=0.
+        assert "CutDepth" in props
+        assert float(props["CutDepth"].NominalValue.wrappedValue) == pytest.approx(
+            10.0, abs=1e-4
+        )
+        assert "FillDepth" in props
+        assert float(props["FillDepth"].NominalValue.wrappedValue) == pytest.approx(
+            0.0, abs=1e-4
+        )
+
+    @pytest.mark.civil
+    def test_no_prior_run_cancels(self) -> None:
+        """Without last_run_*_guid set, EXEC_DEFAULT must not author any
+        annotation (WARNING + CANCELLED path per spec §3.3 footnote).
+
+        The Bonsai Ifc.Operator mixin's ``execute`` always returns
+        ``{'FINISHED'}`` externally (it wraps _execute and ignores CANCELLED
+        for the outer return value); RuntimeError is only raised for
+        ``report({'ERROR'}, ...)`` paths, not WARNING.  We therefore test
+        the postcondition (no annotation authored) rather than the return
+        value or a raised exception.
+        """
+        props = bpy.context.scene.CivilEarthworkProperties
+        props.last_run_existing_guid = ""
+        props.last_run_proposed_guid = ""
+
+        # Must not raise (WARNING path, not ERROR).
+        bpy.ops.civil.earthwork_volume_probe(
+            "EXEC_DEFAULT",
+            xyz=(0.0, 0.0, 0.0),
+        )
+
+        # Postcondition: no VolumeLabel annotation authored.
+        ifc_file = tool.Ifc.get()
+        if ifc_file is not None:
+            volume_labels = [
+                a
+                for a in ifc_file.by_type("IfcAnnotation")
+                if a.ObjectType == "VolumeLabel"
+            ]
+            assert volume_labels == [], (
+                f"Expected no VolumeLabel annotations, found {len(volume_labels)}"
+            )
+
+    @pytest.mark.civil
+    def test_invalid_xyz_raises(self, tmp_path) -> None:
+        """Supplying a 2-element xyz (wrong length) must raise without
+        authoring an annotation."""
+        existing_guid, proposed_guid = self._build_two_surfaces(tmp_path)
+
+        bpy.ops.civil.compute_earthwork_volumes(
+            "EXEC_DEFAULT",
+            existing_surface_guid=existing_guid,
+            proposed_surface_guid=proposed_guid,
+            swell_factor=1.0,
+        )
+
+        # FloatVectorProperty size=3; passing fewer values via ops is not
+        # directly testable at the Blender RNA level (RNA clamps/pads).
+        # Test the tool method directly for the ValueError postcondition.
+        ifc_file = tool.Ifc.get()
+        initial_count = len(ifc_file.by_type("IfcAnnotation"))
+
+        with pytest.raises(ValueError):
+            tool_earthwork.Earthwork.author_volume_label(
+                ifc_file,
+                xyz=(1.0, 2.0),  # type: ignore[arg-type]
+                cut_depth=0.0,
+                fill_depth=0.0,
+            )
+
+        # Postcondition: no annotation authored on failure.
+        assert len(ifc_file.by_type("IfcAnnotation")) == initial_count

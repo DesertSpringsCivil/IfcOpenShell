@@ -2387,6 +2387,532 @@ class TestSurfaceDecorator(NewIfc4X3):
             SurfaceDecorator.COLOR_ELEVATION_HIGH
         )
 
+
+# ---------------------------------------------------------------------------
+# Phase 7b tests — WorkSpaceTool, modal operators, simplify, translate_z
+# ---------------------------------------------------------------------------
+
+
+class TestSurfaceSimplify(NewIfc4X3):
+    """Tests for :meth:`Surface.simplify`.
+
+    Uses ``NewIfc4X3`` so ``tool.Ifc.get()`` returns the Bonsai-active IFC
+    file that ``simplify`` reads internally.
+    """
+
+    def _create_five_point_surface(self, tmp_path) -> tuple[str, int]:
+        """Create a surface with 5 points (4 corners + collinear mid-edge).
+
+        The 5 points form a convex boundary: bottom-left, bottom-middle
+        (collinear on the bottom edge), bottom-right, top-right, top-left.
+        Returns ``(surface_guid, host_step_id)``.
+        """
+        # Write a CSV with 5 points that form a convex shape but with one
+        # collinear mid-edge vertex on the bottom side.
+        path = tmp_path / "pts5.csv"
+        path.write_text(
+            "0,0,5\n"
+            "5,0,5\n"   # collinear on bottom edge between (0,0) and (10,0)
+            "10,0,5\n"
+            "10,10,5\n"
+            "0,10,5\n"
+        )
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        props = bpy.context.scene.CivilSurfaceProperties
+        surface_guid = props.active_surface_guid
+        ifc_file = tool.Ifc.get()
+        surface = tool.Surface.get(ifc_file, surface_guid)
+        return surface_guid, ifc_file.by_id(surface.ifc_host_entity_id).id()
+
+    @pytest.mark.civil
+    def test_simplify_zero_tolerance_no_op(self, tmp_path) -> None:
+        """When tolerance == 0.0 the method is a guaranteed no-op."""
+        surface_guid, host_id = self._create_five_point_surface(tmp_path)
+        ifc_file = tool.Ifc.get()
+        surface = tool.Surface.get(ifc_file, surface_guid)
+        point_count_before = len(surface.points)
+
+        removed = tool_surface.Surface.simplify(ifc_file, host_id, 0.0)
+
+        assert removed == 0
+        # Point count unchanged (surface not re-fetched; simplify returned early).
+        assert len(surface.points) == point_count_before
+
+    @pytest.mark.civil
+    def test_simplify_no_op_when_no_removable_vertices(self, tmp_path) -> None:
+        """simplify() returns 0 and leaves points unchanged when the boundary
+        has no removable vertices (all corners are already tight)."""
+        surface_guid, host_id = self._create_five_point_surface(tmp_path)
+        ifc_file = tool.Ifc.get()
+        surface = tool.Surface.get(ifc_file, surface_guid)
+
+        # Set a clean 4-corner boundary with no collinear vertices.
+        import shapely as _shapely
+
+        tight_boundary = _shapely.Polygon(
+            [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+        )
+        surface.outer_boundary = tight_boundary
+        points_before = surface.points.copy()
+
+        removed = tool_surface.Surface.simplify(ifc_file, host_id, 0.5)
+
+        assert removed == 0
+        # Surface points should be unchanged.
+        np.testing.assert_array_equal(surface.points, points_before)
+
+    @pytest.mark.civil
+    def test_simplify_removes_collinear_boundary_vertices(self, tmp_path) -> None:
+        """A collinear mid-edge vertex on an explicitly set outer boundary is removed.
+
+        Build a surface, then explicitly set its outer boundary to a polygon
+        that has 5 corners (4 actual corners + 1 collinear midpoint on the
+        bottom edge).  With a tolerance > 0, Douglas-Peucker drops the
+        collinear vertex.  Returns 1 removed vertex.
+
+        The boundary must be set explicitly because the convex-hull fallback
+        already drops collinear points — only an explicitly authored boundary
+        polygon (from ``set_outer_boundary``) retains them, giving
+        ``simplify`` something to reduce.
+        """
+        surface_guid, host_id = self._create_five_point_surface(tmp_path)
+        ifc_file = tool.Ifc.get()
+        surface = tool.Surface.get(ifc_file, surface_guid)
+
+        # Explicitly set an outer boundary that includes the collinear midpoint.
+        # Shapely allows collinear vertices in an explicit Polygon ring.
+        import shapely as _shapely
+
+        boundary_with_collinear = _shapely.Polygon(
+            [(0.0, 0.0), (5.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+        )
+        # Verify shapely keeps the collinear vertex in the explicit ring.
+        coords = list(boundary_with_collinear.exterior.coords)
+        assert len(coords) == 6  # 5 unique + closing repeat
+
+        surface.outer_boundary = boundary_with_collinear
+
+        removed = tool_surface.Surface.simplify(ifc_file, host_id, 0.5)
+
+        assert removed == 1
+        # Force rehydration so the registry reflects the post-simplify state.
+        tool.Surface.invalidate(ifc_file, surface_guid)
+        surface_after = tool.Surface.get(ifc_file, surface_guid)
+        assert len(surface_after.points) == 4
+
+    @pytest.mark.civil
+    def test_simplify_invalid_surface_id_raises(self, tmp_path) -> None:
+        """A step-id that resolves to no entity raises SaikeiSurfaceError."""
+        # Create at least one surface so the IFC file is initialized.
+        path = tmp_path / "pts.csv"
+        path.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        surface_guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+        ifc_file = tool.Ifc.get()
+        surface = tool.Surface.get(ifc_file, surface_guid)
+        points_before = len(surface.points)
+
+        with pytest.raises(tool_surface.SaikeiSurfaceError):
+            tool_surface.Surface.simplify(ifc_file, 999999, 1.0)
+
+        # Postcondition: original surface unmodified.
+        assert len(surface.points) == points_before
+
+
+class TestSurfaceWorkspaceToolRegistration:
+    """Smoke test: :class:`SurfaceCivilTool` class is importable and has
+    the correct ``bl_idname``.
+
+    A full T-bar registration smoke test requires an interactive 3D
+    viewport workspace which is not available in headless pytest-blender.
+    Per spec §10.3, the registration smoke test only asserts
+    ``bpy.utils.register_tool()`` succeeded — which our module-level
+    ``register()`` already calls at import time (the module is imported by
+    Bonsai's ``bim/__init__.py`` registration chain during test setup via
+    ``NewIfc4X3``).  We therefore assert the class attributes here rather
+    than calling register_tool again (idempotent call in headless fails
+    silently; duplicating it doesn't add coverage).
+    """
+
+    @pytest.mark.civil
+    def test_workspace_tool_class_has_correct_idname(self) -> None:
+        from bonsai.bim.module.surface.workspace import SurfaceCivilTool
+
+        assert SurfaceCivilTool.bl_idname == "bim.surface_tool"
+
+    @pytest.mark.civil
+    def test_workspace_tool_class_has_correct_label(self) -> None:
+        from bonsai.bim.module.surface.workspace import SurfaceCivilTool
+
+        assert SurfaceCivilTool.bl_label == "Surface"
+
+    @pytest.mark.civil
+    def test_workspace_tool_icon(self) -> None:
+        from bonsai.bim.module.surface.workspace import SurfaceCivilTool
+
+        assert SurfaceCivilTool.bl_icon == "MESH_GRID"
+
+    @pytest.mark.civil
+    def test_workspace_tool_no_gizmo(self) -> None:
+        from bonsai.bim.module.surface.workspace import SurfaceCivilTool
+
+        # Per spec §6.4: gizmos deferred; bl_widget must be None.
+        assert SurfaceCivilTool.bl_widget is None
+
+
+class TestSurfacePickBreaklineModal(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_surface_pick_breakline`.
+
+    Exercises the ``_from_data`` headless path (``EXEC_DEFAULT`` with
+    properties pre-set) per spec §3.5 and §10.3.
+    """
+
+    def _make_surface_with_curve(self, tmp_path) -> tuple[str, str]:
+        """Create a registered surface and a Blender curve object.
+
+        Returns ``(surface_guid, curve_object_name)``.
+        """
+        path = tmp_path / "pts.csv"
+        path.write_text("0,0,0\n10,0,0\n10,10,0\n0,10,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        surface_guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        # Build a Blender curve as the headless polyline source.
+        curve_data = bpy.data.curves.new("TestBreaklineCurve", type="CURVE")
+        curve_data.dimensions = "3D"
+        spline = curve_data.splines.new("POLY")
+        spline.points.add(1)  # 2 points total
+        spline.points[0].co = (0.0, 5.0, 0.0, 1.0)
+        spline.points[1].co = (10.0, 5.0, 0.0, 1.0)
+        obj = bpy.data.objects.new("TestBreaklineCurve", curve_data)
+        bpy.context.scene.collection.objects.link(obj)
+
+        return surface_guid, obj.name
+
+    @pytest.mark.civil
+    def test_smoke_register_and_instantiate(self) -> None:
+        """The operator class is registered; instantiation does not raise."""
+        assert hasattr(bpy.types, "CIVIL_OT_surface_pick_breakline")
+
+    @pytest.mark.civil
+    def test_from_data_authors_breakline(self, tmp_path) -> None:
+        """EXEC_DEFAULT path with polyline_object_name set authors a breakline
+        IFC entity and re-triangulates the surface."""
+        surface_guid, curve_name = self._make_surface_with_curve(tmp_path)
+
+        ifc_file = tool.Ifc.get()
+        breaklines_before = len(ifc_file.by_type("IfcAnnotation"))
+
+        bpy.ops.civil.surface_pick_breakline(
+            "EXEC_DEFAULT",
+            polyline_object_name=curve_name,
+            surface_guid=surface_guid,
+            breakline_name="TestBL",
+        )
+
+        # One new IfcAnnotation authored for the breakline.
+        annotations_after = ifc_file.by_type("IfcAnnotation")
+        assert len(annotations_after) == breaklines_before + 1
+        names = {a.Name for a in annotations_after}
+        assert "TestBL" in names
+
+    @pytest.mark.civil
+    def test_invalid_polyline_object_raises(self, tmp_path) -> None:
+        """A nonexistent curve object name raises RuntimeError at the bpy.ops
+        boundary and leaves no new IFC annotation."""
+        path = tmp_path / "pts.csv"
+        path.write_text("0,0,0\n10,0,0\n10,10,0\n0,10,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        surface_guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        ifc_file = tool.Ifc.get()
+        annotations_before = len(ifc_file.by_type("IfcAnnotation"))
+
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.surface_pick_breakline(
+                "EXEC_DEFAULT",
+                polyline_object_name="__does_not_exist__",
+                surface_guid=surface_guid,
+            )
+
+        # Postcondition: no annotation authored.
+        assert len(ifc_file.by_type("IfcAnnotation")) == annotations_before
+
+
+class TestSurfacePickBoundaryModal(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_surface_pick_boundary`.
+
+    Exercises the ``_from_data`` headless path per spec §3.5 and §10.3.
+    """
+
+    def _make_surface_and_boundary_curve(self, tmp_path) -> tuple[str, str]:
+        """Create a registered surface and a Blender curve with >= 3 vertices.
+
+        The boundary polygon uses the same XY coordinates as 3 of the surface
+        corners, so constrained Delaunay does not need to introduce Steiner
+        points (which fail Phase 4's triangulator).
+
+        Returns ``(surface_guid, curve_object_name)``.
+        """
+        path = tmp_path / "pts.csv"
+        # 4-corner square at Z=0.
+        path.write_text("0,0,0\n20,0,0\n20,20,0\n0,20,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        surface_guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        # Build a triangular boundary from 3 of the 4 corners — these exact XY
+        # coordinates already exist in the TIN so no Steiner points are needed.
+        curve_data = bpy.data.curves.new("TestBoundaryCurve", type="CURVE")
+        curve_data.dimensions = "3D"
+        spline = curve_data.splines.new("POLY")
+        spline.points.add(2)  # 3 points total
+        spline.points[0].co = (0.0, 0.0, 0.0, 1.0)
+        spline.points[1].co = (20.0, 0.0, 0.0, 1.0)
+        spline.points[2].co = (0.0, 20.0, 0.0, 1.0)
+        obj = bpy.data.objects.new("TestBoundaryCurve", curve_data)
+        bpy.context.scene.collection.objects.link(obj)
+
+        return surface_guid, obj.name
+
+    @pytest.mark.civil
+    def test_smoke_register_and_instantiate(self) -> None:
+        """The operator class is registered; instantiation does not raise."""
+        assert hasattr(bpy.types, "CIVIL_OT_surface_pick_boundary")
+
+    @pytest.mark.civil
+    def test_from_data_sets_outer_boundary(self, tmp_path) -> None:
+        """EXEC_DEFAULT path with polyline_object_name sets the surface's
+        outer boundary polygon and retriangulates.
+
+        Verifies that the committed polygon's shape matches the input vertex
+        list (not just that outer_boundary is non-None).  The input curve
+        uses 3 vertices forming a right triangle at (0,0), (20,0), (0,20) —
+        the boundary polygon must contain all three corners.
+        """
+        surface_guid, curve_name = self._make_surface_and_boundary_curve(tmp_path)
+
+        ifc_file = tool.Ifc.get()
+
+        bpy.ops.civil.surface_pick_boundary(
+            "EXEC_DEFAULT",
+            polyline_object_name=curve_name,
+            surface_guid=surface_guid,
+        )
+
+        # After setting a boundary the surface is retriangulated.
+        tool.Surface.invalidate(ifc_file, surface_guid)
+        surface_after = tool.Surface.get(ifc_file, surface_guid)
+
+        # The outer boundary must be set.
+        assert surface_after.outer_boundary is not None
+
+        # The boundary polygon must cover all three input corner XY pairs
+        # (the curve was authored at these exact coordinates).  "covers"
+        # is true for both interior containment and boundary coincidence,
+        # which is what we need for a polygon whose vertices sit ON the ring.
+        boundary = surface_after.outer_boundary
+        for corner_x, corner_y, label in [
+            (0.0, 0.0, "(0,0)"),
+            (20.0, 0.0, "(20,0)"),
+            (0.0, 20.0, "(0,20)"),
+        ]:
+            pt = shapely.Point(corner_x, corner_y)
+            assert boundary.covers(pt) or boundary.distance(pt) < 1e-6, (
+                f"Boundary does not cover input corner {label}"
+            )
+
+        # The boundary must be non-degenerate (positive area).
+        assert boundary.area > 0.0, "Boundary polygon has zero area"
+
+    @pytest.mark.civil
+    def test_invalid_polyline_object_raises(self, tmp_path) -> None:
+        """A nonexistent curve object name raises RuntimeError and leaves the
+        IFC annotation count unchanged (no partial authoring on failure)."""
+        path = tmp_path / "pts.csv"
+        path.write_text("0,0,0\n10,0,0\n10,10,0\n0,10,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        surface_guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        ifc_file = tool.Ifc.get()
+        annotations_before = len(ifc_file.by_type("IfcAnnotation"))
+
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.surface_pick_boundary(
+                "EXEC_DEFAULT",
+                polyline_object_name="__does_not_exist__",
+                surface_guid=surface_guid,
+            )
+
+        # Postcondition: no annotation authored on failure.
+        assert len(ifc_file.by_type("IfcAnnotation")) == annotations_before
+
+
+class TestSurfaceRaiseLowerModal(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_surface_raise_lower`.
+
+    Exercises the ``_from_data`` headless path (``EXEC_DEFAULT`` with
+    ``surface_guid`` and ``delta_z`` pre-set) per spec §3.5 and §10.3.
+    """
+
+    def _make_flat_surface(self, tmp_path, z: float = 10.0) -> str:
+        """Create a flat surface at elevation ``z`` and return its GUID."""
+        path = tmp_path / "pts.csv"
+        path.write_text(
+            f"0,0,{z}\n10,0,{z}\n10,10,{z}\n0,10,{z}\n"
+        )
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        return bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+    @pytest.mark.civil
+    def test_smoke_register_and_instantiate(self) -> None:
+        """The operator class is registered; instantiation does not raise."""
+        assert hasattr(bpy.types, "CIVIL_OT_surface_raise_lower")
+
+    @pytest.mark.civil
+    def test_from_data_translates_z(self, tmp_path) -> None:
+        """EXEC_DEFAULT path with delta_z=5.0 raises every TIN vertex by 5 m."""
+        surface_guid = self._make_flat_surface(tmp_path, z=10.0)
+
+        ifc_file = tool.Ifc.get()
+        surface_before = tool.Surface.get(ifc_file, surface_guid)
+        z_before = float(surface_before.points[0, 2])
+
+        bpy.ops.civil.surface_raise_lower(
+            "EXEC_DEFAULT",
+            surface_guid=surface_guid,
+            delta_z=5.0,
+        )
+
+        # Invalidate to force a fresh read from IFC.
+        tool.Surface.invalidate(ifc_file, surface_guid)
+        surface_after = tool.Surface.get(ifc_file, surface_guid)
+        z_after = float(surface_after.points[0, 2])
+
+        assert z_after == pytest.approx(z_before + 5.0, abs=1e-3)
+        # All vertices should be at the same elevation (flat surface).
+        for z_val in surface_after.points[:, 2]:
+            assert float(z_val) == pytest.approx(z_before + 5.0, abs=1e-3)
+
+    @pytest.mark.civil
+    def test_zero_delta_no_op(self, tmp_path) -> None:
+        """delta_z=0.0 leaves the surface unchanged (no IFC write performed)."""
+        surface_guid = self._make_flat_surface(tmp_path, z=20.0)
+
+        ifc_file = tool.Ifc.get()
+        surface_before = tool.Surface.get(ifc_file, surface_guid)
+        points_before = surface_before.points.copy()
+
+        bpy.ops.civil.surface_raise_lower(
+            "EXEC_DEFAULT",
+            surface_guid=surface_guid,
+            delta_z=0.0,
+        )
+
+        # No change — tool.Surface.translate_z returns early for delta_z==0.
+        surface_after = tool.Surface.get(ifc_file, surface_guid)
+        np.testing.assert_array_almost_equal(surface_after.points, points_before)
+
+    @pytest.mark.civil
+    def test_invalid_surface_guid_raises(self, tmp_path) -> None:
+        """A GUID that resolves to no surface raises RuntimeError."""
+        # Create at least one surface so the IFC file is initialized.
+        path = tmp_path / "pts.csv"
+        path.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.surface_raise_lower(
+                "EXEC_DEFAULT",
+                surface_guid="00000000-0000-0000-0000-000000000000",
+                delta_z=1.0,
+            )
+
+        # Postcondition: IFC still has exactly one surface (not corrupted).
+        ifc_file = tool.Ifc.get()
+        terrains = ifc_file.by_type("IfcGeographicElement")
+        assert len(terrains) == 1
+
+    @pytest.mark.civil
+    def test_translate_z_also_translates_breaklines(self, tmp_path) -> None:
+        """translate_z shifts scoped IfcAnnotation breakline Z coordinates too.
+
+        Regression for FIX 4: after translate_z, the surface's scoped
+        breakline annotations must have their polyline Z values shifted by
+        delta_z — not remain at the original Z.  Without the fix, the TIN
+        would be at Z+5 while the breakline stayed at Z+0, leaving the
+        surface internally inconsistent.
+        """
+        # Create a flat surface at Z=10.
+        surface_guid = self._make_flat_surface(tmp_path, z=10.0)
+
+        # Add a breakline at Z=10 using the CSV path.
+        bl_path = tmp_path / "bl.csv"
+        bl_path.write_text("0,5,10\n10,5,10\n")
+        bpy.ops.civil.surface_add_breakline(
+            "EXEC_DEFAULT",
+            csv_filepath=str(bl_path),
+            breakline_name="FIX4Breakline",
+        )
+
+        ifc_file = tool.Ifc.get()
+
+        # Confirm the annotation was authored at Z=10.
+        annotations = [
+            a for a in ifc_file.by_type("IfcAnnotation")
+            if a.ObjectType == "BREAKLINE" and a.Name == "FIX4Breakline"
+        ]
+        assert len(annotations) == 1
+
+        def _bl_z_values(ifc_f, ann):
+            """Extract all Z values from the first IfcPolyline in annotation."""
+            zs = []
+            rep = ann.Representation
+            if rep is None:
+                return zs
+            for shape_rep in rep.Representations or []:
+                for item in shape_rep.Items or []:
+                    if item.is_a("IfcPolyline"):
+                        for pt in item.Points or []:
+                            coords = pt.Coordinates
+                            if coords and len(coords) >= 3:
+                                zs.append(float(coords[2]))
+            return zs
+
+        z_values_before = _bl_z_values(ifc_file, annotations[0])
+        assert all(abs(z - 10.0) < 1e-3 for z in z_values_before), (
+            f"Expected all breakline Z ≈ 10, got {z_values_before}"
+        )
+
+        # Raise the surface by 5 m.
+        bpy.ops.civil.surface_raise_lower(
+            "EXEC_DEFAULT",
+            surface_guid=surface_guid,
+            delta_z=5.0,
+        )
+
+        # Re-query the same annotation (same step id, IFC in-memory).
+        z_values_after = _bl_z_values(ifc_file, annotations[0])
+        assert len(z_values_after) > 0, "No breakline Z values found after translate"
+        assert all(abs(z - 15.0) < 1e-3 for z in z_values_after), (
+            f"Expected all breakline Z ≈ 15 after +5 translate, got {z_values_after}"
+        )
+
     def test_load_post_handler_registered_and_uninstalls_decorator(self) -> None:
         """Closes the cold-review-flagged decorator handler leak. The
         @persistent load_post handler must be installed at module-register

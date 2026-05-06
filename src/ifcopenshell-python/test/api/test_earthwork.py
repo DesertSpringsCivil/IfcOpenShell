@@ -1666,3 +1666,132 @@ class TestSchemaValidation:
             f"bSI validator returned {result.returncode}\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestAddVolumeLabelAnnotation — spec §1.6 / §6.3 (Phase 7b)
+# ---------------------------------------------------------------------------
+
+
+class TestAddVolumeLabelAnnotation:
+    """Tests for :func:`ifcopenshell.api.earthwork.add_volume_label_annotation`.
+
+    Per spec §1.6 this helper is the canonical author of
+    ``Pset_SaikeiVolumeLabel``; the Bonsai tool layer delegates to it.
+    """
+
+    def test_creates_annotation_at_xyz(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """Annotation is an IfcAnnotation with ObjectType='VolumeLabel' at xyz."""
+        import ifcopenshell.api.earthwork
+
+        site = _site(empty_project_file)
+        annotation = ifcopenshell.api.earthwork.add_volume_label_annotation(
+            empty_project_file,
+            site=site,
+            xyz=(10.0, 20.0, 100.0),
+            cut_depth=3.0,
+            fill_depth=0.0,
+        )
+
+        assert annotation.is_a("IfcAnnotation")
+        assert annotation.ObjectType == "VolumeLabel"
+        coords = list(annotation.ObjectPlacement.RelativePlacement.Location.Coordinates)
+        assert coords[0] == pytest.approx(10.0)
+        assert coords[1] == pytest.approx(20.0)
+        assert coords[2] == pytest.approx(100.0)
+
+    def test_writes_pset_with_cut_fill(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """CutDepth and FillDepth must be written to Pset_SaikeiVolumeLabel."""
+        import ifcopenshell.api.earthwork
+
+        site = _site(empty_project_file)
+        annotation = ifcopenshell.api.earthwork.add_volume_label_annotation(
+            empty_project_file,
+            site=site,
+            xyz=(0.0, 0.0, 0.0),
+            cut_depth=2.5,
+            fill_depth=0.0,
+        )
+
+        pset_props = _read_pset(annotation, "Pset_SaikeiVolumeLabel")
+        assert "CutDepth" in pset_props
+        assert float(pset_props["CutDepth"]) == pytest.approx(2.5)
+        assert "FillDepth" in pset_props
+        assert float(pset_props["FillDepth"]) == pytest.approx(0.0)
+
+    def test_writes_label_text_when_supplied(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """LabelText must appear in the Pset when label_text is not None."""
+        import ifcopenshell.api.earthwork
+
+        site = _site(empty_project_file)
+        annotation = ifcopenshell.api.earthwork.add_volume_label_annotation(
+            empty_project_file,
+            site=site,
+            xyz=(0.0, 0.0, 0.0),
+            cut_depth=1.0,
+            fill_depth=0.0,
+            label_text="Station 1+250",
+        )
+
+        pset_props = _read_pset(annotation, "Pset_SaikeiVolumeLabel")
+        assert "LabelText" in pset_props
+        assert str(pset_props["LabelText"]) == "Station 1+250"
+
+    def test_omits_label_text_when_none(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """LabelText must be absent from the Pset when label_text is None."""
+        import ifcopenshell.api.earthwork
+
+        site = _site(empty_project_file)
+        annotation = ifcopenshell.api.earthwork.add_volume_label_annotation(
+            empty_project_file,
+            site=site,
+            xyz=(0.0, 0.0, 0.0),
+            cut_depth=1.0,
+            fill_depth=0.0,
+            label_text=None,
+        )
+
+        pset_props = _read_pset(annotation, "Pset_SaikeiVolumeLabel")
+        assert "LabelText" not in pset_props
+        # Auto-generated name should contain the depth values.
+        assert annotation.Name is not None
+        assert "1.000" in annotation.Name or "1.0" in annotation.Name
+
+    def test_invalid_xyz_raises(
+        self, empty_project_file: ifcopenshell.file
+    ) -> None:
+        """Non-finite or wrong-length xyz must raise ValueError before authoring."""
+        import math
+
+        import ifcopenshell.api.earthwork
+
+        site = _site(empty_project_file)
+        initial_count = len(empty_project_file.by_type("IfcAnnotation"))
+
+        with pytest.raises(ValueError, match="3-element"):
+            ifcopenshell.api.earthwork.add_volume_label_annotation(
+                empty_project_file,
+                site=site,
+                xyz=(1.0, 2.0),  # type: ignore[arg-type]
+                cut_depth=0.0,
+                fill_depth=0.0,
+            )
+        assert len(empty_project_file.by_type("IfcAnnotation")) == initial_count
+
+        with pytest.raises(ValueError, match="finite"):
+            ifcopenshell.api.earthwork.add_volume_label_annotation(
+                empty_project_file,
+                site=site,
+                xyz=(float("nan"), 0.0, 0.0),
+                cut_depth=0.0,
+                fill_depth=0.0,
+            )
+        assert len(empty_project_file.by_type("IfcAnnotation")) == initial_count

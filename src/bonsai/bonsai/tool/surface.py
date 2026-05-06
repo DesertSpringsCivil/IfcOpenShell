@@ -1835,3 +1835,205 @@ class Surface:
         mesh.from_pydata(verts, [], faces)
         mesh.update()
         return mesh
+
+    @classmethod
+    def simplify(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        surface_id: int,
+        tolerance: float,
+    ) -> int:
+        """Reduce the vertex count of the surface identified by ``surface_id``.
+
+        **Phase 7b shippable algorithm — boundary-only Douglas-Peucker.**
+        Runs the Ramer-Douglas-Peucker algorithm on the outer-boundary polygon
+        vertices with the given ``tolerance`` (in project coordinate units).
+        Vertices that the algorithm marks for removal are dropped from
+        :attr:`CivilSurface.points`; the TIN is then retriangulated with the
+        reduced point set. Interior nodes are left unchanged.
+
+        .. note::
+
+            Boundary-only simplification; interior TIN simplification deferred
+            to a future phase that needs quadric-error decimation.  Douglas-
+            Peucker is a polyline algorithm that operates on ordered chains of
+            points — it cannot simplify the unordered interior mesh of a TIN
+            without first rebuilding the mesh adjacency graph (which is the
+            quadric-error-metric problem, deferred here).
+
+        :param ifc_file: open IFC file — caller obtains via ``tool.Ifc.get()``.
+        :param surface_id: IFC step id (``entity.id()``) of the surface host
+            entity (:class:`IfcGeographicElement` or
+            :class:`IfcEarthworksFill`).
+        :param tolerance: maximum allowed deviation in project units. A value
+            of ``0.0`` is a guaranteed no-op (returns 0 immediately).
+        :returns: the count of vertices removed from the point set.
+        :raises SaikeiSurfaceError: if ``surface_id`` does not resolve to a
+            registered surface in the current IFC file, or if the surface has
+            no outer boundary to simplify.
+        """
+        if tolerance <= 0.0:
+            return 0
+
+        if ifc_file is None:
+            raise SaikeiSurfaceError("No IFC file loaded")
+
+        # Resolve host entity and surface guid.
+        try:
+            host = ifc_file.by_id(surface_id)
+        except Exception as exc:
+            raise SaikeiSurfaceError(
+                f"no IFC entity with step id {surface_id}: {exc}"
+            ) from exc
+        if host is None:
+            raise SaikeiSurfaceError(f"no IFC entity with step id {surface_id}")
+
+        guid = getattr(host, "GlobalId", None)
+        if guid is None:
+            raise SaikeiSurfaceError(
+                f"entity id {surface_id} has no GlobalId — not a surface host"
+            )
+
+        surface = cls.get(ifc_file, guid)
+        original_count = len(surface.points)
+
+        # Build or reuse the outer boundary from the convex hull of current
+        # points (matching the rehydration fallback in _rehydrate_from_ifc).
+        if surface.outer_boundary is None:
+            xy_points = [(float(p[0]), float(p[1])) for p in surface.points]
+            try:
+                hull = shapely.MultiPoint(xy_points).convex_hull
+            except Exception as exc:
+                raise SaikeiSurfaceError(
+                    f"could not compute convex hull for surface {guid!r}: {exc}"
+                ) from exc
+            if not isinstance(hull, shapely.Polygon):
+                # Degenerate (collinear, too few points).
+                return 0
+            boundary_polygon = hull
+        else:
+            boundary_polygon = surface.outer_boundary
+
+        # Extract the exterior ring coords (shapely closes rings: last == first).
+        exterior_coords = list(boundary_polygon.exterior.coords)
+        if len(exterior_coords) < 4:
+            # 3 unique corners + closing repeat; nothing to simplify.
+            return 0
+
+        # Apply Douglas-Peucker to the 2D exterior ring.
+        # shapely.simplify with preserve_topology=True prevents self-intersection.
+        simplified_polygon = shapely.simplify(
+            boundary_polygon, tolerance=tolerance, preserve_topology=True
+        )
+        simplified_coords = set(simplified_polygon.exterior.coords)
+
+        # Identify which boundary vertices were removed.  A boundary vertex is a
+        # point in ``surface.points`` whose (x, y) pair appears in the original
+        # exterior ring but not in the simplified ring.
+        original_boundary_xy = {
+            (float(x), float(y)) for x, y in exterior_coords[:-1]
+        }
+        kept_boundary_xy = {
+            (float(x), float(y)) for x, y in simplified_coords
+        }
+        removed_boundary_xy = original_boundary_xy - kept_boundary_xy
+
+        if not removed_boundary_xy:
+            return 0
+
+        # Remove those points from surface.points.
+        keep_mask = np.ones(len(surface.points), dtype=bool)
+        for vertex_index, point in enumerate(surface.points):
+            if (float(point[0]), float(point[1])) in removed_boundary_xy:
+                keep_mask[vertex_index] = False
+
+        removed_count = int(np.sum(~keep_mask))
+        if removed_count == 0:
+            return 0
+
+        surface.points = surface.points[keep_mask]
+        surface.outer_boundary = simplified_polygon
+
+        # Retriangulate with the reduced point set and persist to IFC.
+        cls.retriangulate(surface)
+        cls.update_ifc_tin(ifc_file, surface)
+
+        # Invalidate the tool-layer registry. UI-cache invalidation
+        # (SurfaceData.is_loaded) is the operator/core layer's
+        # responsibility per the 3-layer rule.
+        cls.invalidate(ifc_file, guid)
+
+        return removed_count
+
+    @classmethod
+    def translate_z(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        surface_guid: str,
+        delta_z: float,
+    ) -> None:
+        """Uniformly shift all TIN vertices (and scoped breaklines) by ``delta_z``.
+
+        Adds ``delta_z`` to the Z coordinate of every point in
+        :attr:`CivilSurface.points`, retriangulates (topology does not change
+        for a pure Z-translation, but the TIN psets and IFC TIN representation
+        must be refreshed), and persists the updated TIN to IFC via
+        :meth:`update_ifc_tin`.
+
+        Also iterates every :class:`IfcAnnotation` with ``ObjectType="BREAKLINE"``
+        that is scoped to this surface (via :class:`IfcRelAssignsToProduct`)
+        and adds ``delta_z`` to each polyline point's Z coordinate so the
+        breakline geometry stays consistent with the shifted TIN.
+
+        A ``delta_z`` of ``0.0`` is a guaranteed no-op (returns immediately).
+
+        :param ifc_file: open IFC file — caller obtains via ``tool.Ifc.get()``.
+        :param surface_guid: ``GlobalId`` of the surface host entity.
+        :param delta_z: signed Z offset in project units (positive = raise,
+            negative = lower).
+        :raises SaikeiSurfaceError: if ``surface_guid`` does not resolve to a
+            registered surface in the current IFC file.
+        """
+        if delta_z == 0.0:
+            return
+
+        if ifc_file is None:
+            raise SaikeiSurfaceError("No IFC file loaded")
+
+        surface = cls.get(ifc_file, surface_guid)
+        surface.points = surface.points.copy()
+        surface.points[:, 2] += delta_z
+
+        # Shift scoped breakline IFC polylines.
+        host = cls.get_host_entity(ifc_file, surface_guid)
+        if host is not None:
+            for annotation in ifc_file.by_type("IfcAnnotation"):
+                if getattr(annotation, "ObjectType", None) != "BREAKLINE":
+                    continue
+                if not _annotation_belongs_to_host(annotation, host):
+                    continue
+                # Shift each IfcCartesianPoint inside the IfcPolyline.
+                representation = annotation.Representation
+                if representation is None:
+                    continue
+                for shape_rep in representation.Representations or []:
+                    for item in shape_rep.Items or []:
+                        if not item.is_a("IfcPolyline"):
+                            continue
+                        for pt in item.Points or []:
+                            coords = pt.Coordinates
+                            if coords is not None and len(coords) >= 3:
+                                pt.Coordinates = (
+                                    float(coords[0]),
+                                    float(coords[1]),
+                                    float(coords[2]) + delta_z,
+                                )
+            # Invalidate the registry for this surface so the next get()
+            # rehydrates the shifted breaklines from IFC.
+            cls.invalidate(ifc_file, surface_guid)
+
+        # Retriangulate to rebuild the triangle_flags (topology is preserved but
+        # the breakline-edge bitmask may need refreshing if the backend recomputes
+        # it from geometry).
+        cls.retriangulate(surface)
+        cls.update_ifc_tin(ifc_file, surface)

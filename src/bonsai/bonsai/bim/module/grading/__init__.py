@@ -57,7 +57,7 @@ old file's context and races the new file's initialization.
 import bpy
 from bpy.app.handlers import persistent
 
-from . import operator, prop, ui
+from . import operator, prop, ui, workspace
 
 
 classes: tuple[type, ...] = (
@@ -80,6 +80,10 @@ classes: tuple[type, ...] = (
     operator.CIVIL_OT_grading_rebuild_group,
     operator.CIVIL_OT_grading_remove_object,
     operator.CIVIL_OT_grading_delete_criteria,
+    operator.CIVIL_OT_feature_line_draw_modal,
+    operator.CIVIL_OT_feature_line_grab_elevation,
+    operator.CIVIL_OT_grading_stepped_offset_modal,
+    operator.CIVIL_OT_grading_fillet_modal,
     ui.CIVIL_PT_grading_feature_lines,
     ui.CIVIL_PT_grading_criteria,
     ui.CIVIL_PT_grading_groups,
@@ -128,10 +132,19 @@ def register() -> None:
     )
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
+    if not bpy.app.background:
+        bpy.utils.register_tool(
+            workspace.GradingCivilTool, separator=True, group=False
+        )
 
 
 def unregister() -> None:
     """Module-level teardown hook (mirror of :func:`register`)."""
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
+    if not bpy.app.background:
+        try:
+            bpy.utils.unregister_tool(workspace.GradingCivilTool)
+        except Exception:
+            pass
     del bpy.types.Scene.CivilGradingProperties

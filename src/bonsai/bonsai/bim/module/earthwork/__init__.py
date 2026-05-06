@@ -43,7 +43,7 @@ the parent-module wiring at ``bim/__init__.py``.
 import bpy
 from bpy.app.handlers import persistent
 
-from . import decorator, operator, prop, ui
+from . import decorator, operator, prop, ui, workspace
 
 
 @persistent
@@ -71,6 +71,7 @@ classes: tuple[type, ...] = (
     operator.CIVIL_OT_compute_earthwork_volumes,
     operator.CIVIL_OT_earthwork_clear_report,
     operator.CIVIL_OT_earthwork_delete_results,
+    operator.CIVIL_OT_earthwork_volume_probe,
     ui.CIVIL_PT_earthwork_inputs,
     ui.CIVIL_PT_earthwork_compute,
 )
@@ -98,6 +99,8 @@ def register() -> None:
     # False (prevents stale handlers from carrying across open-file calls).
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
+    if not bpy.app.background:
+        bpy.utils.register_tool(workspace.EarthworkCivilTool, separator=True, group=False)
 
 
 def unregister() -> None:
@@ -105,4 +108,6 @@ def unregister() -> None:
     decorator.EarthworkDecorator.uninstall()
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
+    if not bpy.app.background:
+        bpy.utils.unregister_tool(workspace.EarthworkCivilTool)
     del bpy.types.Scene.CivilEarthworkProperties

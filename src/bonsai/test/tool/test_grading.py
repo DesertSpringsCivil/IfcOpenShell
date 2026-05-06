@@ -29,6 +29,7 @@ Run via the canonical Phase 4/5 invocation (PowerShell, from src/bonsai)::
 """
 
 import bpy
+import math
 import ifcopenshell
 import ifcopenshell.api.unit
 import ifcopenshell.guid
@@ -3628,3 +3629,645 @@ class TestGradingHelpers:
             ifc_file, criteria.guid
         )
         assert dependents == ["test-group"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 7b — WorkSpaceTool smoke tests
+# ---------------------------------------------------------------------------
+
+
+class TestGradingCivilToolWorkspace:
+    """Smoke tests for :class:`GradingCivilTool`.
+
+    A full T-bar registration test requires an interactive 3D viewport; we
+    assert class attributes only (same pattern as
+    :class:`TestSurfaceWorkspaceToolRegistration` in ``test_surface.py``).
+    """
+
+    @pytest.mark.civil
+    def test_workspace_tool_class_has_correct_idname(self) -> None:
+        from bonsai.bim.module.grading.workspace import GradingCivilTool
+
+        assert GradingCivilTool.bl_idname == "bim.grading_tool"
+
+    @pytest.mark.civil
+    def test_workspace_tool_class_has_correct_label(self) -> None:
+        from bonsai.bim.module.grading.workspace import GradingCivilTool
+
+        assert GradingCivilTool.bl_label == "Grading"
+
+    @pytest.mark.civil
+    def test_workspace_tool_icon(self) -> None:
+        from bonsai.bim.module.grading.workspace import GradingCivilTool
+
+        assert GradingCivilTool.bl_icon == "OUTLINER_OB_CURVE"
+
+    @pytest.mark.civil
+    def test_workspace_tool_no_gizmo(self) -> None:
+        from bonsai.bim.module.grading.workspace import GradingCivilTool
+
+        # Per spec §6.4: gizmos deferred; bl_widget must be None.
+        assert GradingCivilTool.bl_widget is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 7b — Grading.compute_stepped_offset (pure tool method)
+# ---------------------------------------------------------------------------
+
+
+class TestGradingComputeSteppedOffset:
+    """Tests for :meth:`Grading.compute_stepped_offset`."""
+
+    @pytest.mark.civil
+    def test_stepped_offset_straight_line(self) -> None:
+        """A line along X-axis offset 2 m left (in Y) at each vertex."""
+        ifc_file = _make_ifc_file_with_site()
+        fl = tool_grading.FeatureLine(
+            name="straight",
+            vertices=[(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (20.0, 0.0, 0.0)],
+        )
+        alignment = tool_grading.Grading.author_feature_line(ifc_file, fl)
+        tool_grading.Grading.register(ifc_file, fl)
+
+        result = tool_grading.Grading.compute_stepped_offset(
+            ifc_file, alignment.id(), offset=2.0, step_dz=0.0
+        )
+        assert len(result) == 3
+        # Left perpendicular to +X is +Y
+        for i, (x, y, z) in enumerate(result):
+            assert abs(y - 2.0) < 1e-6, f"vertex {i}: expected y=2.0, got {y}"
+            assert abs(z - 0.0) < 1e-6, f"vertex {i}: expected z=0.0, got {z}"
+
+    @pytest.mark.civil
+    def test_stepped_offset_zero_offset_returns_input(self) -> None:
+        """offset=0, step_dz=0 returns a copy of the input vertices."""
+        ifc_file = _make_ifc_file_with_site()
+        verts = [(0.0, 0.0, 5.0), (5.0, 5.0, 5.0), (10.0, 0.0, 5.0)]
+        fl = tool_grading.FeatureLine(name="tri", vertices=verts)
+        alignment = tool_grading.Grading.author_feature_line(ifc_file, fl)
+        tool_grading.Grading.register(ifc_file, fl)
+
+        result = tool_grading.Grading.compute_stepped_offset(
+            ifc_file, alignment.id(), offset=0.0, step_dz=0.0
+        )
+        assert len(result) == len(verts)
+        for orig, out in zip(verts, result):
+            assert abs(orig[0] - out[0]) < 1e-6
+            assert abs(orig[1] - out[1]) < 1e-6
+            assert abs(orig[2] - out[2]) < 1e-6
+
+    @pytest.mark.civil
+    def test_stepped_offset_applies_dz(self) -> None:
+        """step_dz=1.0 adds cumulative Z to each vertex."""
+        ifc_file = _make_ifc_file_with_site()
+        verts = [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (20.0, 0.0, 0.0)]
+        fl = tool_grading.FeatureLine(name="dz-test", vertices=verts)
+        alignment = tool_grading.Grading.author_feature_line(ifc_file, fl)
+        tool_grading.Grading.register(ifc_file, fl)
+
+        result = tool_grading.Grading.compute_stepped_offset(
+            ifc_file, alignment.id(), offset=0.0, step_dz=1.0
+        )
+        expected_z = [0.0, 1.0, 2.0]
+        for i, ((x, y, z), ez) in enumerate(zip(result, expected_z)):
+            assert abs(z - ez) < 1e-6, f"vertex {i}: expected z={ez}, got {z}"
+
+    @pytest.mark.civil
+    def test_stepped_offset_invalid_fl_raises(self) -> None:
+        """Passing an invalid IFC step id raises SaikeiGradingError."""
+        ifc_file = _make_ifc_file_with_site()
+
+        with pytest.raises(tool_grading.SaikeiGradingError):
+            tool_grading.Grading.compute_stepped_offset(
+                ifc_file, 999999, offset=1.0, step_dz=0.0
+            )
+
+    @pytest.mark.civil
+    def test_stepped_offset_l_corner_maintains_offset_distance(self) -> None:
+        """Regression for FIX 1: corner vertex must be exactly ``offset``
+        distance from BOTH adjacent segments after the bisector-scale fix.
+
+        For a 90-degree L-corner at (10,0,0) with offset=1.0 and left-hand
+        perpendicular convention:
+          - Segment A: (0,0,0)→(10,0,0), left-perp = (0,+1)
+          - Segment B: (10,0,0)→(10,10,0), left-perp = (-1,0)
+          - Bisector unit: (-1/sqrt(2), 1/sqrt(2))
+          - sin(45 deg) = sqrt(2)/2
+          - Corner offset point = (10,0,0) + (-1,+1,0) = (9, 1, 0)
+        The point (9,1) is exactly 1.0 from segment A (y-distance = 1.0)
+        and exactly 1.0 from segment B (x-distance = |9-10| = 1.0).
+        """
+        ifc_file = _make_ifc_file_with_site()
+        fl = tool_grading.FeatureLine(
+            name="l-corner",
+            vertices=[(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (10.0, 10.0, 0.0)],
+        )
+        alignment = tool_grading.Grading.author_feature_line(ifc_file, fl)
+        tool_grading.Grading.register(ifc_file, fl)
+
+        result = tool_grading.Grading.compute_stepped_offset(
+            ifc_file, alignment.id(), offset=1.0, step_dz=0.0
+        )
+
+        assert len(result) == 3
+        cx, cy, cz = result[1]  # corner vertex
+        # Left-perpendicular of +X is +Y; left-perp of +Y is -X.
+        # Expected inside offset point: (9, 1, 0).
+        assert abs(cx - 9.0) < 1e-6, f"corner x expected 9.0, got {cx}"
+        assert abs(cy - 1.0) < 1e-6, f"corner y expected 1.0, got {cy}"
+        assert abs(cz - 0.0) < 1e-6, f"corner z expected 0.0, got {cz}"
+
+        # Verify perpendicular distance to BOTH adjacent segments = 1.0.
+        # Segment A: y=0 for x in [0,10].  Perpendicular distance = |cy - 0| = cy.
+        dist_to_seg_a = abs(cy - 0.0)
+        # Segment B: x=10 for y in [0,10].  Perpendicular distance = |cx - 10|.
+        dist_to_seg_b = abs(cx - 10.0)
+        assert abs(dist_to_seg_a - 1.0) < 1e-6, (
+            f"distance to segment A: expected 1.0, got {dist_to_seg_a}"
+        )
+        assert abs(dist_to_seg_b - 1.0) < 1e-6, (
+            f"distance to segment B: expected 1.0, got {dist_to_seg_b}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7b — Grading.insert_fillet (pure tool method)
+# ---------------------------------------------------------------------------
+
+
+class TestGradingInsertFillet:
+    """Tests for :meth:`Grading.insert_fillet`."""
+
+    def _author_l_shaped_fl(
+        self, ifc_file
+    ) -> tuple["tool_grading.FeatureLine", int]:
+        """Author a 90-degree L-shaped feature line and return
+        ``(feature_line, alignment_id)``."""
+        fl = tool_grading.FeatureLine(
+            name="L-shape",
+            vertices=[(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (10.0, 10.0, 0.0)],
+        )
+        alignment = tool_grading.Grading.author_feature_line(ifc_file, fl)
+        tool_grading.Grading.register(ifc_file, fl)
+        return fl, alignment.id()
+
+    @pytest.mark.civil
+    def test_insert_fillet_replaces_corner_with_arc(self) -> None:
+        """Fillet at vertex_index=1 replaces the corner with 16 arc points."""
+        ifc_file = _make_ifc_file_with_site()
+        _fl, al_id = self._author_l_shaped_fl(ifc_file)
+
+        tool_grading.Grading.insert_fillet(
+            ifc_file, fl_id=al_id, vertex_index=1, radius=1.0
+        )
+
+        # Re-fetch the feature line from the updated IFC entity.
+        alignment = ifc_file.by_id(al_id)
+        fl_updated = tool_grading.Grading.get_feature_line(
+            ifc_file, alignment.GlobalId
+        )
+        # Original had 3 vertices; fillet replaces vertex 1 with 16 arc points.
+        expected_count = 2 + tool_grading.Grading._FILLET_ARC_SAMPLES
+        assert len(fl_updated.vertices) == expected_count
+
+    @pytest.mark.civil
+    def test_insert_fillet_invalid_index_raises(self) -> None:
+        """vertex_index out of range [1, n-2] raises SaikeiGradingError."""
+        ifc_file = _make_ifc_file_with_site()
+        _fl, al_id = self._author_l_shaped_fl(ifc_file)
+
+        # index 0 is an endpoint — not filletable.
+        with pytest.raises(tool_grading.SaikeiGradingError):
+            tool_grading.Grading.insert_fillet(
+                ifc_file, fl_id=al_id, vertex_index=0, radius=1.0
+            )
+
+    @pytest.mark.civil
+    def test_insert_fillet_too_large_radius_raises(self) -> None:
+        """radius > half of either adjacent segment length raises SaikeiGradingError."""
+        ifc_file = _make_ifc_file_with_site()
+        _fl, al_id = self._author_l_shaped_fl(ifc_file)
+
+        # Segments are 10 m long; radius=6 → tan_dist > 5 → error.
+        with pytest.raises(tool_grading.SaikeiGradingError):
+            tool_grading.Grading.insert_fillet(
+                ifc_file, fl_id=al_id, vertex_index=1, radius=6.0
+            )
+
+    @pytest.mark.civil
+    def test_insert_fillet_invalid_fl_raises(self) -> None:
+        """Non-existent fl_id raises SaikeiGradingError."""
+        ifc_file = _make_ifc_file_with_site()
+
+        with pytest.raises(tool_grading.SaikeiGradingError):
+            tool_grading.Grading.insert_fillet(
+                ifc_file, fl_id=999999, vertex_index=1, radius=1.0
+            )
+
+    @pytest.mark.civil
+    def test_inserted_fillet_vertices_lie_on_circle(self) -> None:
+        """Arc vertices must all lie on the expected circle of the given radius.
+
+        For a 90-degree L-corner at (10,0,0) with radius=1.0:
+          - v_in unit vector (from corner toward prev): (-1, 0, 0)
+          - v_out unit vector (from corner toward next): (0, 1, 0)
+          - bisector unit: (-1/sqrt(2), 1/sqrt(2))
+          - sin(half_angle) = sin(45 deg) = sqrt(2)/2
+          - arc centre = corner + bisector_unit * (radius / sin(half_angle))
+                       = (10,0,0) + (-1/sqrt(2), 1/sqrt(2)) * sqrt(2)
+                       = (10,0,0) + (-1, 1, 0)
+                       = (9, 1, 0)
+        """
+        ifc_file = _make_ifc_file_with_site()
+        _fl, al_id = self._author_l_shaped_fl(ifc_file)
+
+        tool_grading.Grading.insert_fillet(
+            ifc_file, fl_id=al_id, vertex_index=1, radius=1.0
+        )
+
+        alignment = ifc_file.by_id(al_id)
+        fl_updated = tool_grading.Grading.get_feature_line(
+            ifc_file, alignment.GlobalId
+        )
+
+        # The fillet replaced the single corner vertex with _FILLET_ARC_SAMPLES
+        # arc points.  Indices [1, 1+_FILLET_ARC_SAMPLES) are the arc.
+        arc_start = 1
+        arc_end = arc_start + tool_grading.Grading._FILLET_ARC_SAMPLES
+        arc_verts = fl_updated.vertices[arc_start:arc_end]
+        assert len(arc_verts) == tool_grading.Grading._FILLET_ARC_SAMPLES, (
+            "Arc vertex count mismatch"
+        )
+
+        expected_centre_xy = (9.0, 1.0)
+        for idx, (ax, ay, az) in enumerate(arc_verts):
+            dist = math.hypot(ax - expected_centre_xy[0], ay - expected_centre_xy[1])
+            assert abs(dist - 1.0) < 1e-5, (
+                f"Arc vertex {idx}: distance from centre {expected_centre_xy} "
+                f"is {dist:.8f}, expected 1.0"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7b — CIVIL_OT_feature_line_draw_modal (_from_data headless path)
+# ---------------------------------------------------------------------------
+
+
+class TestFeatureLineDrawModal(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_feature_line_draw_modal` (headless path)."""
+
+    @pytest.mark.civil
+    def test_smoke_register_and_instantiate(self) -> None:
+        """The operator class is registered and bl_idname resolves."""
+        from bonsai.bim.module.grading.operator import (
+            CIVIL_OT_feature_line_draw_modal,
+        )
+
+        assert CIVIL_OT_feature_line_draw_modal.bl_idname == "civil.feature_line_draw_modal"
+        assert hasattr(bpy.ops.civil, "feature_line_draw_modal")
+
+    @pytest.mark.civil
+    def test_from_data_authors_feature_line(self) -> None:
+        """EXEC_DEFAULT with vertices_json authors a new feature line."""
+        import json
+        import ifcopenshell
+        from bonsai.bim.ifc import IfcStore
+
+        verts = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]]
+        bpy.ops.civil.feature_line_draw_modal(
+            "EXEC_DEFAULT",
+            vertices_json=json.dumps(verts),
+            feature_line_name="Test FL",
+            closed=False,
+        )
+        ifc_file = IfcStore.get_file()
+        alignments = [
+            a
+            for a in ifc_file.by_type("IfcAlignment")
+            if tool.Grading.is_feature_line_alignment(a)
+        ]
+        assert len(alignments) == 1
+        assert alignments[0].Name == "Test FL"
+
+    @pytest.mark.civil
+    def test_from_data_closed_polyline(self) -> None:
+        """closed=True authors a feature line with IsClosed pset True."""
+        import json
+        import ifcopenshell
+        from bonsai.bim.ifc import IfcStore
+
+        verts = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]]
+        bpy.ops.civil.feature_line_draw_modal(
+            "EXEC_DEFAULT",
+            vertices_json=json.dumps(verts),
+            feature_line_name="Closed FL",
+            closed=True,
+        )
+        ifc_file = IfcStore.get_file()
+        alignments = [
+            a
+            for a in ifc_file.by_type("IfcAlignment")
+            if tool.Grading.is_feature_line_alignment(a)
+        ]
+        assert len(alignments) == 1
+        fl = tool.Grading.get_feature_line(ifc_file, alignments[0].GlobalId)
+        assert fl.closed is True
+
+    @pytest.mark.civil
+    def test_invalid_vertices_json_raises(self) -> None:
+        """Malformed vertices_json causes a RuntimeError at the bpy.ops boundary.
+        No new IfcAlignment must be authored on failure (per spec §10.3).
+        """
+        ifc_file = tool.Ifc.get()
+        before_count = len(ifc_file.by_type("IfcAlignment"))
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.feature_line_draw_modal(
+                "EXEC_DEFAULT",
+                vertices_json="not-valid-json",
+            )
+        assert len(ifc_file.by_type("IfcAlignment")) == before_count
+
+    @pytest.mark.civil
+    def test_too_few_vertices_raises(self) -> None:
+        """A single vertex is not enough for a feature line.
+        No new IfcAlignment must be authored on failure (per spec §10.3).
+        """
+        import json
+
+        ifc_file = tool.Ifc.get()
+        before_count = len(ifc_file.by_type("IfcAlignment"))
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.feature_line_draw_modal(
+                "EXEC_DEFAULT",
+                vertices_json=json.dumps([[0.0, 0.0, 0.0]]),
+            )
+        assert len(ifc_file.by_type("IfcAlignment")) == before_count
+
+
+# ---------------------------------------------------------------------------
+# Phase 7b — CIVIL_OT_feature_line_grab_elevation (_from_data headless path)
+# ---------------------------------------------------------------------------
+
+
+class TestFeatureLineGrabElevationModal(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_feature_line_grab_elevation` (headless path)."""
+
+    def _author_fl_via_op(self, verts) -> str:
+        """Author a feature line via the draw-modal operator; return GUID."""
+        import json
+        from bonsai.bim.ifc import IfcStore
+
+        bpy.ops.civil.feature_line_draw_modal(
+            "EXEC_DEFAULT",
+            vertices_json=json.dumps(verts),
+            feature_line_name="Grab Test FL",
+            closed=False,
+        )
+        ifc_file = IfcStore.get_file()
+        alignments = [
+            a
+            for a in ifc_file.by_type("IfcAlignment")
+            if tool.Grading.is_feature_line_alignment(a)
+        ]
+        assert alignments, "No feature line was authored to IFC"
+        return alignments[-1].GlobalId
+
+    @pytest.mark.civil
+    def test_smoke_register_and_instantiate(self) -> None:
+        from bonsai.bim.module.grading.operator import (
+            CIVIL_OT_feature_line_grab_elevation,
+        )
+
+        assert CIVIL_OT_feature_line_grab_elevation.bl_idname == "civil.feature_line_grab_elevation"
+
+    @pytest.mark.civil
+    def test_from_data_modifies_vertex_z(self) -> None:
+        """EXEC_DEFAULT with delta_z=5.0 adds 5 m to vertex 0."""
+        import ifcopenshell
+        from bonsai.bim.ifc import IfcStore
+
+        verts = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]]
+        fl_guid = self._author_fl_via_op(verts)
+        assert fl_guid, "No active feature line after creation"
+
+        bpy.ops.civil.feature_line_grab_elevation(
+            "EXEC_DEFAULT",
+            feature_line_guid=fl_guid,
+            vertex_index=0,
+            delta_z=5.0,
+        )
+
+        ifc_file = IfcStore.get_file()
+        fl = tool.Grading.get_feature_line(ifc_file, fl_guid)
+        # Registry may cache old value; invalidate first.
+        tool.Grading.invalidate(ifc_file, fl_guid)
+        fl = tool.Grading.get_feature_line(ifc_file, fl_guid)
+        assert abs(fl.vertices[0][2] - 5.0) < 1e-4, (
+            f"Expected z=5.0, got {fl.vertices[0][2]}"
+        )
+
+    @pytest.mark.civil
+    def test_invalid_index_raises(self) -> None:
+        """Out-of-range vertex_index raises RuntimeError at bpy.ops boundary.
+        No new IfcAlignment must be authored on failure (per spec §10.3).
+        """
+        verts = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]
+        fl_guid = self._author_fl_via_op(verts)
+        ifc_file = tool.Ifc.get()
+        before_count = len(ifc_file.by_type("IfcAlignment"))
+
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.feature_line_grab_elevation(
+                "EXEC_DEFAULT",
+                feature_line_guid=fl_guid,
+                vertex_index=99,
+                delta_z=1.0,
+            )
+        assert len(ifc_file.by_type("IfcAlignment")) == before_count
+
+
+# ---------------------------------------------------------------------------
+# Phase 7b — CIVIL_OT_grading_stepped_offset_modal (_from_data headless path)
+# ---------------------------------------------------------------------------
+
+
+class TestGradingSteppedOffsetModal(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_grading_stepped_offset_modal` (headless path)."""
+
+    def _author_source_fl(self) -> int:
+        """Author a simple FL via draw-modal; return the IFC alignment step id."""
+        import json
+        from bonsai.bim.ifc import IfcStore
+
+        verts = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [20.0, 0.0, 0.0]]
+        bpy.ops.civil.feature_line_draw_modal(
+            "EXEC_DEFAULT",
+            vertices_json=json.dumps(verts),
+            feature_line_name="Source FL",
+            closed=False,
+        )
+        ifc_file = IfcStore.get_file()
+        alignments = [
+            a
+            for a in ifc_file.by_type("IfcAlignment")
+            if tool.Grading.is_feature_line_alignment(a)
+        ]
+        assert len(alignments) == 1
+        return alignments[0].id()
+
+    @pytest.mark.civil
+    def test_smoke_register_and_instantiate(self) -> None:
+        from bonsai.bim.module.grading.operator import (
+            CIVIL_OT_grading_stepped_offset_modal,
+        )
+
+        assert CIVIL_OT_grading_stepped_offset_modal.bl_idname == "civil.grading_stepped_offset_modal"
+
+    @pytest.mark.civil
+    def test_from_data_creates_offset_fl(self) -> None:
+        """EXEC_DEFAULT creates a new FL with the correct vertex count."""
+        from bonsai.bim.ifc import IfcStore
+
+        al_id = self._author_source_fl()
+
+        bpy.ops.civil.grading_stepped_offset_modal(
+            "EXEC_DEFAULT",
+            source_fl_id=al_id,
+            offset=3.0,
+            step_dz=0.0,
+            new_name="Offset FL",
+        )
+
+        ifc_file = IfcStore.get_file()
+        fl_alignments = [
+            a
+            for a in ifc_file.by_type("IfcAlignment")
+            if tool.Grading.is_feature_line_alignment(a)
+        ]
+        assert len(fl_alignments) == 2, (
+            f"Expected 2 feature lines (source + offset), got {len(fl_alignments)}"
+        )
+        names = sorted(a.Name for a in fl_alignments)
+        assert "Offset FL" in names
+
+        # Offset FL should have same vertex count as source.
+        offset_fl = next(a for a in fl_alignments if a.Name == "Offset FL")
+        fl_dc = tool.Grading.get_feature_line(ifc_file, offset_fl.GlobalId)
+        assert len(fl_dc.vertices) == 3
+
+    @pytest.mark.civil
+    def test_zero_offset_creates_collinear_fl(self) -> None:
+        """offset=0, step_dz=0 creates an FL whose vertices match the source."""
+        from bonsai.bim.ifc import IfcStore
+
+        al_id = self._author_source_fl()
+        source_al = IfcStore.get_file().by_id(al_id)
+        source_fl = tool.Grading.get_feature_line(
+            IfcStore.get_file(), source_al.GlobalId
+        )
+        source_verts = list(source_fl.vertices)
+
+        bpy.ops.civil.grading_stepped_offset_modal(
+            "EXEC_DEFAULT",
+            source_fl_id=al_id,
+            offset=0.0,
+            step_dz=0.0,
+            new_name="Zero Offset",
+        )
+
+        ifc_file = IfcStore.get_file()
+        zero_al = next(
+            a
+            for a in ifc_file.by_type("IfcAlignment")
+            if tool.Grading.is_feature_line_alignment(a) and a.Name == "Zero Offset"
+        )
+        zero_fl = tool.Grading.get_feature_line(ifc_file, zero_al.GlobalId)
+        for i, (orig, out) in enumerate(zip(source_verts, zero_fl.vertices)):
+            for j in range(3):
+                assert abs(orig[j] - out[j]) < 1e-5, (
+                    f"vertex {i} coord {j}: expected {orig[j]}, got {out[j]}"
+                )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7b — CIVIL_OT_grading_fillet_modal (_from_data headless path)
+# ---------------------------------------------------------------------------
+
+
+class TestGradingFilletModal(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_grading_fillet_modal` (headless path)."""
+
+    def _author_l_fl(self) -> str:
+        """Author a 90-degree L-shaped FL via draw-modal; return GUID."""
+        import json
+        from bonsai.bim.ifc import IfcStore
+
+        verts = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0]]
+        bpy.ops.civil.feature_line_draw_modal(
+            "EXEC_DEFAULT",
+            vertices_json=json.dumps(verts),
+            feature_line_name="L-FL",
+            closed=False,
+        )
+        ifc_file = IfcStore.get_file()
+        alignments = [
+            a
+            for a in ifc_file.by_type("IfcAlignment")
+            if tool.Grading.is_feature_line_alignment(a)
+        ]
+        assert alignments, "No feature line was authored to IFC"
+        return alignments[-1].GlobalId
+
+    @pytest.mark.civil
+    def test_smoke_register_and_instantiate(self) -> None:
+        from bonsai.bim.module.grading.operator import (
+            CIVIL_OT_grading_fillet_modal,
+        )
+
+        assert CIVIL_OT_grading_fillet_modal.bl_idname == "civil.grading_fillet_modal"
+
+    @pytest.mark.civil
+    def test_from_data_inserts_arc(self) -> None:
+        """EXEC_DEFAULT replaces vertex_index=1 with 16 arc points."""
+        import ifcopenshell
+        from bonsai.bim.ifc import IfcStore
+
+        fl_guid = self._author_l_fl()
+        assert fl_guid, "No active feature line after creation"
+
+        bpy.ops.civil.grading_fillet_modal(
+            "EXEC_DEFAULT",
+            fl_guid=fl_guid,
+            vertex_index=1,
+            radius=1.0,
+        )
+
+        ifc_file = IfcStore.get_file()
+        # Invalidate cache so we read the updated polyline from IFC.
+        tool.Grading.invalidate(ifc_file, fl_guid)
+        fl = tool.Grading.get_feature_line(ifc_file, fl_guid)
+        expected = 2 + tool_grading.Grading._FILLET_ARC_SAMPLES
+        assert len(fl.vertices) == expected, (
+            f"Expected {expected} vertices after fillet, got {len(fl.vertices)}"
+        )
+
+    @pytest.mark.civil
+    def test_invalid_radius_raises(self) -> None:
+        """radius larger than half the adjacent segment length raises RuntimeError.
+
+        The L-shape FL has two 10 m segments; radius=8 gives a tangent
+        distance > 5 m which exceeds half the segment length.
+        No new IfcAlignment must be authored on failure (per spec §10.3).
+        """
+        fl_guid = self._author_l_fl()
+        ifc_file = tool.Ifc.get()
+        before_count = len(ifc_file.by_type("IfcAlignment"))
+
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.grading_fillet_modal(
+                "EXEC_DEFAULT",
+                fl_guid=fl_guid,
+                vertex_index=1,
+                radius=8.0,
+            )
+        assert len(ifc_file.by_type("IfcAlignment")) == before_count

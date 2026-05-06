@@ -2304,3 +2304,340 @@ class Grading:
             cached_group.members = [
                 m for m in cached_group.members if m.guid != object_guid
             ]
+
+    # ------------------------------------------------------------------
+    # Phase 7b stepped-offset + fillet helpers (spec §6.2)
+    # ------------------------------------------------------------------
+
+    #: Number of arc sample points used by :meth:`insert_fillet`.
+    #: 16 matches common Civil 3D defaults for plan curves; future phases
+    #: can expose this as a kwarg or a scene-property preference.
+    _FILLET_ARC_SAMPLES: int = 16
+
+    @classmethod
+    def compute_stepped_offset(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        fl_id: int,
+        offset: float,
+        step_dz: float,
+    ) -> list[tuple[float, float, float]]:
+        """Compute a parallel offset polyline with a per-vertex Z step.
+
+        Returns the offset polyline vertices for a "stepped offset" —
+        each vertex is shifted perpendicular to the local segment
+        direction by ``offset`` metres and incremented in Z by
+        ``step_dz`` relative to the *source* vertex.
+
+        Algorithm:
+        1. Load the source feature line by IFC step id ``fl_id``.
+        2. For each interior vertex, compute the averaged perpendicular
+           direction from the two flanking segments; for end vertices
+           use the single adjacent segment.
+        3. Shift by ``offset`` in the XY plane along that perpendicular.
+        4. Add ``step_dz * vertex_index`` to Z.
+
+        This is a pure computation — no IFC entities are mutated.
+
+        :param ifc_file: active IFC file.
+        :param fl_id: IFC step id of the source :class:`IfcAlignment`.
+        :param offset: perpendicular offset distance in project units
+            (positive = left of direction of travel, negative = right).
+        :param step_dz: Z increment applied cumulatively along the
+            polyline (positive = uphill, negative = downhill).
+        :returns: list of ``(x, y, z)`` tuples for the offset polyline.
+        :raises SaikeiGradingError: if ``fl_id`` does not exist in
+            ``ifc_file`` or is not a Saikei feature line.
+        """
+        alignment = None
+        try:
+            alignment = ifc_file.by_id(fl_id)
+        except Exception:
+            pass
+        if alignment is None or not alignment.is_a("IfcAlignment"):
+            raise SaikeiGradingError(
+                f"No IfcAlignment with step id {fl_id} in this file"
+            )
+        if not cls.is_feature_line_alignment(alignment):
+            raise SaikeiGradingError(
+                f"IfcAlignment #{fl_id} is not a Saikei feature line "
+                "(missing Pset_SaikeiFeatureLineCommon)"
+            )
+
+        feature_line = cls.get_feature_line(ifc_file, alignment.GlobalId)
+        verts = feature_line.vertices
+        n = len(verts)
+        if n < 2:
+            raise SaikeiGradingError(
+                f"Feature line #{fl_id} has fewer than 2 vertices; "
+                "cannot compute perpendicular offset"
+            )
+
+        # Build per-vertex perpendicular directions (2D).
+        def _perp_2d(ax: float, ay: float, bx: float, by: float) -> tuple[float, float]:
+            """Left-hand perpendicular of segment (a→b), normalised."""
+            dx = bx - ax
+            dy = by - ay
+            length = math.hypot(dx, dy)
+            if length < 1e-12:
+                return (0.0, 1.0)
+            # Left perpendicular: (-dy, dx)
+            return (-dy / length, dx / length)
+
+        perps: list[tuple[float, float]] = []
+        for i in range(n):
+            if i == 0:
+                px, py = _perp_2d(verts[0][0], verts[0][1], verts[1][0], verts[1][1])
+            elif i == n - 1:
+                px, py = _perp_2d(
+                    verts[n - 2][0], verts[n - 2][1],
+                    verts[n - 1][0], verts[n - 1][1],
+                )
+            else:
+                # Bisector direction: average of the two flanking left-hand
+                # perpendiculars.  The offset point must lie at perpendicular
+                # distance ``offset`` from BOTH adjacent segments.
+                #
+                # The bisector unit vector b satisfies:
+                #   b · perp_in = sin(half_angle)
+                # so the point at distance d along b has perpendicular distance
+                #   d * sin(half_angle) from each segment.
+                # Setting that equal to |offset| gives d = offset / sin(half_angle).
+                #
+                # Equivalently: scale the averaged-perpendicular sum vector by
+                # 1 / cos(half_angle) where the averaged vector has length
+                # 2 * cos(half_angle) when the inputs are unit vectors.
+                # The simpler form used here: normalise the bisector to unit
+                # length, then scale the result by 1 / sin(half_angle).
+                px0, py0 = _perp_2d(
+                    verts[i - 1][0], verts[i - 1][1],
+                    verts[i][0], verts[i][1],
+                )
+                px1, py1 = _perp_2d(
+                    verts[i][0], verts[i][1],
+                    verts[i + 1][0], verts[i + 1][1],
+                )
+                # Bisector direction (unit) is (perp_in + perp_out) normalised.
+                # The point at distance d along this bisector has perpendicular
+                # distance d * sin(half_angle) from each segment.  To get
+                # perpendicular distance = offset, set d = offset / sin(half_angle).
+                bisector_x = px0 + px1
+                bisector_y = py0 + py1
+                bis_mag = math.hypot(bisector_x, bisector_y)
+                if bis_mag < 1e-12:
+                    # Near-collinear: fall back to incoming perpendicular.
+                    px, py = px0, py0
+                else:
+                    # Normalise bisector to unit vector.
+                    bux = bisector_x / bis_mag
+                    buy = bisector_y / bis_mag
+                    # sin(half_angle) = dot(bisector_unit, either perp_in/out).
+                    # Since perp_in and perp_out are already unit vectors,
+                    # sin_half = bux * px0 + buy * py0 (dot product).
+                    sin_half = bux * px0 + buy * py0
+                    # Guard near-collinear corners (sin_half ≈ 0 → scale blows up).
+                    scale = 1.0 / max(abs(sin_half), 1e-6)
+                    px = bux * scale
+                    py = buy * scale
+            perps.append((px, py))
+
+        result: list[tuple[float, float, float]] = []
+        for i, (x, y, z) in enumerate(verts):
+            px, py = perps[i]
+            result.append((
+                x + offset * px,
+                y + offset * py,
+                z + step_dz * i,
+            ))
+
+        return result
+
+    @classmethod
+    def insert_fillet(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        fl_id: int,
+        vertex_index: int,
+        radius: float,
+    ) -> None:
+        """Replace a sharp corner at ``vertex_index`` with a circular arc.
+
+        The arc replaces the original vertex with :attr:`_FILLET_ARC_SAMPLES`
+        uniformly-sampled points along a circle of ``radius`` metres tangent
+        to both adjacent segments. Updates the IFC entity's
+        :class:`IfcIndexedPolyCurve` and the linked Blender curve in place.
+
+        Algorithm:
+        1. Locate the two adjacent segment vectors.
+        2. Compute the interior half-angle ``θ/2`` between the two
+           reversed inbound/outbound unit vectors.
+        3. The tangent points are at distance
+           ``t = radius / tan(θ/2)`` from the corner.  Raise
+           :class:`SaikeiGradingError` if ``t > min(seg_len)/2``.
+        4. Place arc centre along the angle bisector at distance
+           ``radius / sin(θ/2)`` from the corner.
+        5. Sample the arc from tangent point A to tangent point B
+           (:attr:`_FILLET_ARC_SAMPLES` points).
+        6. Splice the sample points into the vertex list, replacing the
+           original corner vertex.
+
+        :param ifc_file: active IFC file.
+        :param fl_id: IFC step id of the source :class:`IfcAlignment`.
+        :param vertex_index: index of the corner vertex to fillet.
+        :param radius: fillet radius in project units.
+        :raises SaikeiGradingError: for invalid index, nonpositive radius,
+            or radius larger than either adjacent segment's half-length.
+        """
+        alignment = None
+        try:
+            alignment = ifc_file.by_id(fl_id)
+        except Exception:
+            pass
+        if alignment is None or not alignment.is_a("IfcAlignment"):
+            raise SaikeiGradingError(
+                f"No IfcAlignment with step id {fl_id} in this file"
+            )
+        if not cls.is_feature_line_alignment(alignment):
+            raise SaikeiGradingError(
+                f"IfcAlignment #{fl_id} is not a Saikei feature line"
+            )
+
+        if radius <= 0.0:
+            raise SaikeiGradingError(
+                f"Fillet radius must be positive; got {radius}"
+            )
+
+        feature_line = cls.get_feature_line(ifc_file, alignment.GlobalId)
+        verts = list(feature_line.vertices)
+        n = len(verts)
+
+        if not (1 <= vertex_index <= n - 2):
+            raise SaikeiGradingError(
+                f"vertex_index {vertex_index} is out of range [1, {n - 2}]; "
+                "the fillet requires vertices on both sides of the corner"
+            )
+
+        prev_v = np.array(verts[vertex_index - 1], dtype=float)
+        corner = np.array(verts[vertex_index], dtype=float)
+        next_v = np.array(verts[vertex_index + 1], dtype=float)
+
+        # Vectors from corner to neighbours.
+        v_in = prev_v - corner
+        v_out = next_v - corner
+        len_in = float(np.linalg.norm(v_in))
+        len_out = float(np.linalg.norm(v_out))
+
+        if len_in < 1e-12 or len_out < 1e-12:
+            raise SaikeiGradingError(
+                "Adjacent segment has zero length — cannot insert fillet"
+            )
+
+        u_in = v_in / len_in
+        u_out = v_out / len_out
+
+        # Half-angle between the two legs.
+        cos_half = float(np.clip(np.dot(u_in[:2], u_out[:2]), -1.0, 1.0))
+        # cos_half here is cos(full_angle_between_reversed_legs/2)?
+        # Actually dot(u_in, u_out) = cos(angle between them in 2D).
+        # The angle between the two directed vectors from the corner is
+        # alpha = acos(dot(u_in, u_out)) where alpha is the "opening"
+        # angle of the bend. The tangent distance is radius/tan(alpha/2).
+        full_cos = float(np.clip(np.dot(u_in[:2], u_out[:2]), -1.0, 1.0))
+        full_angle = math.acos(full_cos)  # angle between the two legs (0..π)
+        if full_angle < 1e-9 or abs(full_angle - math.pi) < 1e-9:
+            raise SaikeiGradingError(
+                "Corner angle is 0 or 180 degrees — fillet is degenerate"
+            )
+        half_angle = full_angle / 2.0
+        tan_dist = radius / math.tan(half_angle)
+
+        if tan_dist > len_in / 2.0 or tan_dist > len_out / 2.0:
+            raise SaikeiGradingError(
+                f"Fillet radius {radius} is too large for this corner: "
+                f"tangent distance {tan_dist:.4f} exceeds half the adjacent "
+                f"segment lengths ({len_in / 2:.4f}, {len_out / 2:.4f})"
+            )
+
+        # Tangent points on each leg.
+        pt_a = corner + u_in * tan_dist
+        pt_b = corner + u_out * tan_dist
+
+        # Arc centre: bisector direction, distance = radius / sin(half_angle).
+        bisector_2d = u_in[:2] + u_out[:2]
+        bis_len = float(np.linalg.norm(bisector_2d))
+        if bis_len < 1e-12:
+            raise SaikeiGradingError("Degenerate corner bisector — cannot insert fillet")
+        bisector_unit = np.zeros(3, dtype=float)
+        bisector_unit[:2] = bisector_2d / bis_len
+        # Z of centre interpolated between the two tangent points.
+        centre_z = float(0.5 * (pt_a[2] + pt_b[2]))
+        arc_centre = np.array(
+            [
+                corner[0] + bisector_unit[0] * (radius / math.sin(half_angle)),
+                corner[1] + bisector_unit[1] * (radius / math.sin(half_angle)),
+                centre_z,
+            ],
+            dtype=float,
+        )
+
+        # Angles from centre to tangent points in XY plane.
+        def _angle_2d(centre: np.ndarray, pt: np.ndarray) -> float:
+            return math.atan2(float(pt[1] - centre[1]), float(pt[0] - centre[0]))
+
+        angle_a = _angle_2d(arc_centre, pt_a)
+        angle_b = _angle_2d(arc_centre, pt_b)
+
+        # The arc must go the short way (< π) between the tangent points,
+        # in the direction that stays on the correct side of the corner.
+        # Determine the sign of the turn using 2D cross product of u_in × u_out.
+        cross_z = float(u_in[0] * u_out[1] - u_in[1] * u_out[0])
+        # cross_z > 0 → left turn (counter-clockwise); < 0 → right turn (cw).
+        # The fillet arc wraps on the *inside* of the bend.
+        # CCW bend → arc goes CW from A to B (angle decreasing); and vice versa.
+        if cross_z > 0:
+            # Left turn: sweep CW (i.e., angle_a → angle_b clockwise).
+            if angle_b > angle_a:
+                angle_b -= 2 * math.pi
+        else:
+            # Right turn: sweep CCW.
+            if angle_b < angle_a:
+                angle_b += 2 * math.pi
+
+        arc_points: list[tuple[float, float, float]] = []
+        for k in range(cls._FILLET_ARC_SAMPLES):
+            t = k / (cls._FILLET_ARC_SAMPLES - 1)
+            angle = angle_a + t * (angle_b - angle_a)
+            ax = arc_centre[0] + radius * math.cos(angle)
+            ay = arc_centre[1] + radius * math.sin(angle)
+            # Linear Z interpolation along the arc.
+            az = float(pt_a[2]) + t * (float(pt_b[2]) - float(pt_a[2]))
+            arc_points.append((ax, ay, az))
+
+        # Splice: replace vertex_index with the arc samples.
+        new_verts = verts[:vertex_index] + arc_points + verts[vertex_index + 1:]
+        feature_line.vertices = new_verts
+
+        try:
+            cls.update_feature_line_vertices(ifc_file, feature_line)
+        except SaikeiGradingError:
+            raise
+
+        try:
+            cls.update_blender_curve(ifc_file, feature_line)
+        except SaikeiGradingError:
+            # No linked Blender curve yet (headless / pure-IFC authoring path).
+            # This is expected when insert_fillet is called without a prior
+            # create_blender_curve.  Silent no-op is correct here.
+            pass
+        except Exception as exc:
+            # Unexpected Blender error — log a warning rather than swallowing
+            # silently so developers can see it during debugging.
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "insert_fillet: update_blender_curve failed unexpectedly: %s", exc
+            )
+
+        # Invalidate the registry entry so the next get_feature_line
+        # rehydrates the updated polyline from IFC.
+        cls.invalidate(ifc_file, alignment.GlobalId)

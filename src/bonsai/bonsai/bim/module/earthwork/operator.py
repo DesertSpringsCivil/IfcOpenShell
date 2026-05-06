@@ -26,7 +26,7 @@ wraps the underscore form with the IFC operator boilerplate.
 """
 
 import bpy
-from bpy.props import EnumProperty, FloatProperty, StringProperty
+from bpy.props import EnumProperty, FloatProperty, FloatVectorProperty, StringProperty
 from bpy.types import Operator
 
 import bonsai.core.earthwork as core_earthwork
@@ -305,4 +305,163 @@ class CIVIL_OT_earthwork_delete_results(Operator, tool.Ifc.Operator):
         props.last_run_fill_guid = ""
 
         self.report({"INFO"}, "Earthwork volume results deleted.")
+        return {"FINISHED"}
+
+
+class CIVIL_OT_earthwork_volume_probe(Operator, tool.Ifc.Operator):
+    """Hover or click to probe cut and fill volumes at any point.
+
+    Modal entry (``invoke``): move the mouse to preview the cut/fill
+    depth under the cursor via a status-bar info message; left-click
+    commits a :class:`IfcAnnotation` volume label at that position;
+    Esc cancels without authoring.
+
+    Headless / ``_from_data`` path: invoke with ``EXEC_DEFAULT`` and
+    supply ``xyz`` directly.  The operator reads the last-run surface
+    GUIDs from :class:`CivilEarthworkProperties` and computes depths
+    from the cached surfaces::
+
+        bpy.ops.civil.earthwork_volume_probe(
+            "EXEC_DEFAULT",
+            xyz=(500.0, 300.0, 0.0),
+            label_text="Station 1+250",
+        )
+
+    Guard: if ``CivilEarthworkProperties.last_run_existing_guid`` or
+    ``last_run_proposed_guid`` is empty (no prior ``Compute Volumes``
+    run in the current session), ``invoke`` / ``_execute`` cancels
+    immediately with a ``WARNING`` report.
+    """
+
+    bl_idname = "civil.earthwork_volume_probe"
+    bl_label = "Probe Volume"
+    bl_description = (
+        "Click to place a cut/fill volume label at any point. "
+        "Requires a prior Compute Volumes run to identify the surfaces."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    xyz: FloatVectorProperty(
+        name="Probe Position",
+        description="World-space XYZ position of the probe point",
+        size=3,
+        default=(0.0, 0.0, 0.0),
+    )
+    label_text: StringProperty(
+        name="Label Text",
+        description="Optional free-text override for the annotation name",
+        default="",
+    )
+
+    # --- Modal state (not operator properties — not serialised) ----------
+    _existing_guid: str
+    _proposed_guid: str
+
+    def invoke(self, context, event):
+        props = context.scene.CivilEarthworkProperties
+        existing_guid = props.last_run_existing_guid
+        proposed_guid = props.last_run_proposed_guid
+
+        if not existing_guid or not proposed_guid:
+            self.report(
+                {"WARNING"},
+                "No prior Compute Volumes run found. "
+                "Run 'Compute Volumes' first to identify surfaces.",
+            )
+            return {"CANCELLED"}
+
+        self._existing_guid = existing_guid
+        self._proposed_guid = proposed_guid
+
+        context.window_manager.modal_handler_add(self)
+        self.report(
+            {"INFO"},
+            "Move mouse to preview cut/fill depth; "
+            "left-click to place label; Esc to cancel",
+        )
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type == "MOUSEMOVE":
+            # Ray-cast mouse onto Z=0 plane — same pattern as surface modal.
+            region = context.region
+            rv3d = context.region_data
+            if region is None or rv3d is None:
+                return {"PASS_THROUGH"}
+            from bpy_extras import view3d_utils
+
+            coord = (event.mouse_region_x, event.mouse_region_y)
+            view_vector = view3d_utils.region_2d_to_vector_3d(region, rv3d, coord)
+            ray_origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)
+            if view_vector.z != 0:
+                t = -ray_origin.z / view_vector.z
+                hit = ray_origin + t * view_vector
+            else:
+                hit = ray_origin
+            # Stash the current probe position on the operator property
+            # (no IFC work here — modal must stay side-effect free).
+            self.xyz = (float(hit.x), float(hit.y), float(hit.z))
+            context.area.tag_redraw()
+            return {"PASS_THROUGH"}
+
+        elif event.type == "LEFTMOUSE" and event.value == "PRESS":
+            # Commit: dispatch IFC authoring via _execute.
+            return self.execute(context)
+
+        elif event.type in {"ESC", "RIGHTMOUSE"} and event.value == "PRESS":
+            self.report({"INFO"}, "Volume probe cancelled")
+            return {"CANCELLED"}
+
+        return {"PASS_THROUGH"}
+
+    def _execute(self, context):
+        props = context.scene.CivilEarthworkProperties
+
+        # Accept either modal-set self.xyz or headless-supplied property.
+        probe_xyz = tuple(self.xyz)
+
+        existing_guid = (
+            getattr(self, "_existing_guid", None)
+            or props.last_run_existing_guid
+        )
+        proposed_guid = (
+            getattr(self, "_proposed_guid", None)
+            or props.last_run_proposed_guid
+        )
+
+        if not existing_guid or not proposed_guid:
+            self.report(
+                {"WARNING"},
+                "No prior Compute Volumes run found. "
+                "Run 'Compute Volumes' first to identify surfaces.",
+            )
+            return {"CANCELLED"}
+
+        try:
+            core_earthwork.author_volume_label_at_surfaces(
+                tool.Ifc,
+                tool.Earthwork,
+                tool.Surface,
+                existing_surface_guid=existing_guid,
+                proposed_surface_guid=proposed_guid,
+                xyz=probe_xyz,
+                label_text=self.label_text,
+            )
+        except (ValueError, tool_earthwork.SaikeiEarthworkError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        # Invalidate data cache if it exists (optional module, Phase 7b+).
+        try:
+            from .data import EarthworkData  # noqa: PLC0415
+
+            EarthworkData.is_loaded = False
+        except ImportError:
+            pass
+
+        self.report(
+            {"INFO"},
+            f"Volume label placed at "
+            f"({probe_xyz[0]:.2f}, {probe_xyz[1]:.2f}, {probe_xyz[2]:.2f})",
+        )
         return {"FINISHED"}

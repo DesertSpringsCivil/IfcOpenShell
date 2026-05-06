@@ -546,6 +546,8 @@ class Grading:
     def clear(cls): pass
     def create_blender_curve(cls, ifc_file, feature_line): pass
     def create_blender_empty_for_group(cls, ifc_file, group): pass
+    def compute_stepped_offset(cls, ifc_file, fl_id, offset, step_dz): pass
+    def insert_fillet(cls, ifc_file, fl_id, vertex_index, radius): pass
 
 
 @interface
@@ -553,6 +555,7 @@ class Earthwork:
     # Saikei earthwork tool — Phase 6. TIN-to-TIN volumes + cut/fill solid construction + IFC authoring.
     def compute_volumes(cls, existing_surface, proposed_surface, domain=None, shrink_factor=1.0, swell_factor=1.0, capture_per_triangle_deltas=False, build_solids=False): pass
     def author_volume_result(cls, ifc_file, result, terrain=None, cut_name="Earthwork Cut", fill_name="Earthwork Fill", cut_predefined_type="EXCAVATION", fill_predefined_type="BACKFILL"): pass
+    def author_volume_label(cls, ifc_file, xyz, cut_depth, fill_depth, label_text=None): pass
     def clear(cls): pass
 
 
@@ -1155,6 +1158,9 @@ class Surface:
     def get_host_entity(cls, ifc_file, guid): pass
     def iter_surfaces(cls, ifc_file): pass
     def iter_proposed_surfaces(cls, ifc_file): pass
+    def simplify(cls, ifc_file, surface_id, tolerance): pass
+    def translate_z(cls, ifc_file, surface_guid, delta_z): pass
+    def build_boundary_polygon_from_ring(cls, ring_points): pass
 
 
 @interface

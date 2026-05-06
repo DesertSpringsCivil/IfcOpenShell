@@ -48,7 +48,7 @@ leaks across .blend reloads).
 import bpy
 from bpy.app.handlers import persistent
 
-from . import operator, prop, ui
+from . import operator, prop, ui, workspace
 
 
 classes: tuple[type, ...] = (
@@ -62,6 +62,9 @@ classes: tuple[type, ...] = (
     operator.CIVIL_OT_surface_rename,
     operator.CIVIL_OT_surface_delete,
     operator.CIVIL_OT_surface_select,
+    operator.CIVIL_OT_surface_pick_breakline,
+    operator.CIVIL_OT_surface_pick_boundary,
+    operator.CIVIL_OT_surface_raise_lower,
     ui.CIVIL_MT_add_element,
     ui.CIVIL_PT_surface_creation,
     ui.CIVIL_PT_surface_list,
@@ -96,8 +99,17 @@ def register() -> None:
     classes. Attaches :class:`CivilSurfaceProperties` to ``bpy.types.Scene``
     as a ``PointerProperty`` so the UI panel can read / write surface state
     via ``context.scene.CivilSurfaceProperties``. Also registers the
-    file-load cleanup handler.
+    file-load cleanup handler and the :class:`SurfaceCivilTool` T-bar entry.
+
+    The T-bar tool is skipped in headless (``bpy.app.background``) mode to
+    match the alignment module's guard (``alignment/__init__.py:72``).
     """
+    if not bpy.app.background:
+        bpy.utils.register_tool(
+            workspace.SurfaceCivilTool,
+            separator=True,
+            group=False,
+        )
     bpy.types.Scene.CivilSurfaceProperties = bpy.props.PointerProperty(
         type=prop.CivilSurfaceProperties
     )
@@ -107,6 +119,8 @@ def register() -> None:
 
 def unregister() -> None:
     """Module-level teardown hook (mirror of :func:`register`)."""
+    if not bpy.app.background:
+        bpy.utils.unregister_tool(workspace.SurfaceCivilTool)
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
     del bpy.types.Scene.CivilSurfaceProperties

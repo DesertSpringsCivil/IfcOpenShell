@@ -610,3 +610,97 @@ def delete_criteria(
         raise ValueError("criteria_guid is required")
 
     grading_tool.delete_criteria(ifc_file, criteria_guid)
+
+
+def compute_stepped_offset(
+    ifc_tool: "type[tool.Ifc]",
+    grading_tool: "type[tool.Grading]",
+    fl_guid: str,
+    offset: float,
+    step_dz: float,
+) -> list[tuple[float, float, float]]:
+    """Compute a parallel stepped-offset polyline for a feature line.
+
+    Resolves ``fl_guid`` to an IFC step id, delegates the geometric
+    computation to :meth:`tool.Grading.compute_stepped_offset`, and
+    returns the offset vertex list.
+
+    Business rules:
+
+    1. An IFC file must be loaded.
+    2. ``fl_guid`` must be a non-empty string.
+    3. The IFC entity must exist and be a Saikei feature line.
+
+    :raises ValueError: if no IFC file is loaded or ``fl_guid`` is empty.
+    :raises SaikeiGradingError: propagated from the tool layer.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+    if not fl_guid:
+        raise ValueError("fl_guid is required")
+
+    # Resolve GUID → IFC step id.
+    alignment = next(
+        (
+            e
+            for e in ifc_file.by_type("IfcAlignment")
+            if e.GlobalId == fl_guid
+        ),
+        None,
+    )
+    if alignment is None:
+        raise ValueError(
+            f"No IfcAlignment with GlobalId {fl_guid!r} in this file"
+        )
+
+    return grading_tool.compute_stepped_offset(
+        ifc_file, alignment.id(), offset, step_dz
+    )
+
+
+def insert_fillet(
+    ifc_tool: "type[tool.Ifc]",
+    grading_tool: "type[tool.Grading]",
+    fl_guid: str,
+    vertex_index: int,
+    radius: float,
+) -> None:
+    """Replace a sharp corner in a feature line with a circular arc.
+
+    Resolves ``fl_guid`` to an IFC step id and delegates arc insertion
+    to :meth:`tool.Grading.insert_fillet`.
+
+    Business rules:
+
+    1. An IFC file must be loaded.
+    2. ``fl_guid`` must be a non-empty string.
+    3. ``radius`` must be positive.
+    4. ``vertex_index`` must be in range [1, n-2].
+
+    :raises ValueError: if no IFC file is loaded or ``fl_guid`` is empty.
+    :raises SaikeiGradingError: propagated from the tool layer (invalid
+        index, negative radius, radius too large for adjacent segments).
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+    if not fl_guid:
+        raise ValueError("fl_guid is required")
+    if radius <= 0.0:
+        raise ValueError(f"radius must be positive; got {radius}")
+
+    alignment = next(
+        (
+            e
+            for e in ifc_file.by_type("IfcAlignment")
+            if e.GlobalId == fl_guid
+        ),
+        None,
+    )
+    if alignment is None:
+        raise ValueError(
+            f"No IfcAlignment with GlobalId {fl_guid!r} in this file"
+        )
+
+    grading_tool.insert_fillet(ifc_file, alignment.id(), vertex_index, radius)

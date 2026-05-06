@@ -345,3 +345,58 @@ def retriangulate_surface(
     surface_tool.retriangulate(surface)
     surface_tool.update_ifc_tin(ifc_file, surface)
     return surface
+
+
+def simplify_surface(
+    ifc_tool: "type[tool.Ifc]",
+    surface_tool: "type[tool.Surface]",
+    surface_guid: str,
+    tolerance: float,
+) -> int:
+    """Reduce the boundary vertex count of a surface by applying Douglas-Peucker.
+
+    Business rules:
+    1. An IFC file must be loaded.
+    2. ``surface_guid`` must resolve to a supported surface host entity.
+
+    Delegates all math to :meth:`tool.Surface.simplify`; returns the count of
+    vertices removed (0 for a no-op).
+
+    :raises ValueError: if no IFC file is loaded.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    host = surface_tool.get_host_entity(ifc_file, surface_guid)
+    if host is None:
+        from bonsai.tool.surface import SaikeiSurfaceError
+
+        raise SaikeiSurfaceError(
+            f"no IFC entity with GlobalId {surface_guid!r} in this file"
+        )
+
+    return surface_tool.simplify(ifc_file, host.id(), tolerance)
+
+
+def translate_surface_z(
+    ifc_tool: "type[tool.Ifc]",
+    surface_tool: "type[tool.Surface]",
+    surface_guid: str,
+    delta_z: float,
+) -> None:
+    """Uniformly shift all TIN vertices (and scoped breaklines) of a surface.
+
+    Business rules:
+    1. An IFC file must be loaded.
+    2. ``surface_guid`` must resolve to a supported surface host entity.
+
+    Delegates all math and IFC persistence to :meth:`tool.Surface.translate_z`.
+
+    :raises ValueError: if no IFC file is loaded.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    surface_tool.translate_z(ifc_file, surface_guid, delta_z)

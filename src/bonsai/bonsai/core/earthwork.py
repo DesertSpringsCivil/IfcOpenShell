@@ -202,6 +202,69 @@ def delete_earthwork_results(
     earthwork_tool.delete_results(ifc_file, cut_guid=cut_guid, fill_guid=fill_guid)
 
 
+def author_volume_label_at_surfaces(
+    ifc_tool: "type[tool.Ifc]",
+    earthwork_tool: "type[tool.Earthwork]",
+    surface_tool: "type[tool.Surface]",
+    existing_surface_guid: str,
+    proposed_surface_guid: str,
+    xyz: "tuple[float, float, float]",
+    label_text: str = "",
+) -> Any:
+    """Author a volume-label annotation at ``xyz`` with cut/fill depths
+    computed from two surfaces.
+
+    Derives depths by sampling the existing and proposed surfaces at
+    the XY probe location:
+
+    - ``cut_depth = max(0, z_existing - z_proposed)``
+    - ``fill_depth = max(0, z_proposed - z_existing)``
+
+    :param ifc_tool: the :class:`tool.Ifc` class.
+    :param earthwork_tool: the :class:`tool.Earthwork` class.
+    :param surface_tool: the :class:`tool.Surface` class.
+    :param existing_surface_guid: GlobalId of the existing-ground surface.
+    :param proposed_surface_guid: GlobalId of the proposed-ground surface.
+    :param xyz: 3-element probe position.  The z component is used as the
+        annotation placement; x/y are used for TIN elevation lookup.
+    :param label_text: optional free-text override.
+    :returns: the created :class:`IfcAnnotation` entity.
+    :raises ValueError: if no IFC file is loaded or a surface GUID is empty.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+    if not existing_surface_guid or not proposed_surface_guid:
+        raise ValueError(
+            "Both existing_surface_guid and proposed_surface_guid are required"
+        )
+
+    x, y = float(xyz[0]), float(xyz[1])
+
+    existing_surface = surface_tool.get(ifc_file, existing_surface_guid)
+    proposed_surface = surface_tool.get(ifc_file, proposed_surface_guid)
+
+    z_existing = surface_tool.z_at(existing_surface, x, y)
+    z_proposed = surface_tool.z_at(proposed_surface, x, y)
+
+    # If either surface doesn't cover the XY point, fall back to 0.
+    if z_existing is None or z_proposed is None:
+        cut_depth = 0.0
+        fill_depth = 0.0
+    else:
+        delta = float(z_existing) - float(z_proposed)
+        cut_depth = max(0.0, delta)
+        fill_depth = max(0.0, -delta)
+
+    return earthwork_tool.author_volume_label(
+        ifc_file,
+        xyz=xyz,
+        cut_depth=cut_depth,
+        fill_depth=fill_depth,
+        label_text=label_text if label_text else None,
+    )
+
+
 def _resolve_terrain_entity(
     ifc_file: Any, existing_surface: Any
 ) -> Optional[Any]:

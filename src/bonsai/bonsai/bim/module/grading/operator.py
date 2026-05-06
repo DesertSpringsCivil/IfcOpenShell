@@ -44,7 +44,8 @@ boilerplate.
 import json
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
+from bpy.props import BoolProperty, FloatProperty, IntProperty, StringProperty
+from bpy.props import EnumProperty
 from bpy.types import Operator
 
 import bonsai.core.grading as core_grading
@@ -885,4 +886,721 @@ class CIVIL_OT_grading_delete_criteria(Operator, tool.Ifc.Operator):
 
         GradingData.is_loaded = False
         self.report({"INFO"}, "Criteria deleted")
+        return {"FINISHED"}
+
+
+class CIVIL_OT_feature_line_draw_modal(Operator, tool.Ifc.Operator):
+    """Draw a new feature line by clicking vertices in the 3D viewport.
+
+    Modal entry (``invoke``): click to place vertices; Enter commits; Esc
+    cancels. On commit the captured vertex list is JSON-encoded into
+    ``vertices_json`` and ``_execute`` authors the feature line.
+
+    Headless / ``_from_data`` path: invoke with ``EXEC_DEFAULT`` and set
+    ``vertices_json`` directly.
+
+    Headless usage::
+
+        bpy.ops.civil.feature_line_draw_modal(
+            "EXEC_DEFAULT",
+            vertices_json='[[0,0,0],[10,0,0],[10,10,0]]',
+            feature_line_name="Pad Perimeter",
+            closed=True,
+        )
+    """
+
+    bl_idname = "civil.feature_line_draw_modal"
+    bl_label = "Draw Feature Line"
+    bl_description = (
+        "Click to place vertices in the viewport; Enter commits the "
+        "feature line to IFC; Esc cancels."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    vertices_json: StringProperty(
+        name="Vertices JSON",
+        description="JSON-encoded [[x,y,z], ...] vertex list set by the modal "
+        "on commit. Supply directly for the headless EXEC_DEFAULT path.",
+        default="",
+        options={"SKIP_SAVE"},
+    )
+    feature_line_name: StringProperty(
+        name="Feature Line Name",
+        description="Human-readable name for the new feature line.",
+        default="Feature Line",
+    )
+    closed: BoolProperty(
+        name="Closed Loop",
+        description="True for closed loops (e.g., pad perimeters); "
+        "False for open lines (e.g., ditch centerlines).",
+        default=False,
+    )
+
+    # --- Modal state (not serialised) -----------------------------------------
+    _vertices: list
+
+    def invoke(self, context, event):
+        self._vertices = []
+        context.window_manager.modal_handler_add(self)
+        self.report({"INFO"}, "Click to place vertices; Enter commits; Esc cancels")
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type == "LEFTMOUSE" and event.value == "PRESS":
+            region = context.region
+            rv3d = context.region_data
+            coord = (event.mouse_region_x, event.mouse_region_y)
+            from bpy_extras import view3d_utils
+
+            view_vector = view3d_utils.region_2d_to_vector_3d(region, rv3d, coord)
+            ray_origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)
+            if view_vector.z != 0:
+                t = -ray_origin.z / view_vector.z
+                hit = ray_origin + t * view_vector
+            else:
+                hit = ray_origin
+            self._vertices.append((float(hit.x), float(hit.y), float(hit.z)))
+            context.area.tag_redraw()
+            return {"RUNNING_MODAL"}
+
+        elif event.type in {"RET", "NUMPAD_ENTER"} and event.value == "PRESS":
+            if len(self._vertices) < 2:
+                self.report({"ERROR"}, "Need at least 2 vertices for a feature line")
+                return {"CANCELLED"}
+            self.vertices_json = json.dumps(self._vertices)
+            return self.execute(context)
+
+        elif event.type in {"ESC", "RIGHTMOUSE"} and event.value == "PRESS":
+            self.report({"INFO"}, "Feature line draw cancelled")
+            return {"CANCELLED"}
+
+        return {"PASS_THROUGH"}
+
+    def _execute(self, context):
+        if not self.vertices_json:
+            self.report({"ERROR"}, "vertices_json is required")
+            return {"CANCELLED"}
+
+        try:
+            raw_verts = json.loads(self.vertices_json)
+            vertices = [
+                (float(v[0]), float(v[1]), float(v[2])) for v in raw_verts
+            ]
+        except (ValueError, KeyError, TypeError) as exc:
+            self.report({"ERROR"}, f"Invalid vertices_json: {exc}")
+            return {"CANCELLED"}
+
+        if len(vertices) < 2:
+            self.report({"ERROR"}, "A feature line requires at least 2 vertices")
+            return {"CANCELLED"}
+
+        try:
+            feature_line = core_grading.create_feature_line(
+                tool.Ifc,
+                tool.Grading,
+                name=self.feature_line_name,
+                vertices=vertices,
+                closed=bool(self.closed),
+            )
+        except (ValueError, tool_grading.SaikeiGradingError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        try:
+            tool.Grading.create_blender_curve(tool.Ifc.get(), feature_line)
+        except tool_grading.SaikeiGradingError as exc:
+            self.report(
+                {"WARNING"},
+                f"Feature line authored to IFC but Blender curve creation "
+                f"failed: {exc}",
+            )
+
+        from .data import GradingData
+
+        GradingData.is_loaded = False
+        self.report(
+            {"INFO"},
+            f"Created feature line {feature_line.name!r} "
+            f"({len(feature_line.vertices)} vertices)",
+        )
+        return {"FINISHED"}
+
+
+class CIVIL_OT_feature_line_grab_elevation(Operator, tool.Ifc.Operator):
+    """Interactively drag a single feature-line vertex up or down.
+
+    Modal entry: drag mouse Y to adjust vertex Z; numeric typing overrides
+    drag; Enter commits; Esc cancels.
+
+    Headless / ``_from_data`` path: invoke with ``EXEC_DEFAULT`` and set
+    ``feature_line_guid``, ``vertex_index``, and ``delta_z``.
+
+    Headless usage::
+
+        bpy.ops.civil.feature_line_grab_elevation(
+            "EXEC_DEFAULT",
+            feature_line_guid="...",
+            vertex_index=0,
+            delta_z=5.0,
+        )
+
+    Per spec §6.2 footnote: this dispatches directly to
+    :meth:`tool.Grading.update_feature_line_vertices`, matching the
+    pattern at ``grading/operator.py`` for the existing headless
+    :class:`CIVIL_OT_feature_line_edit_elevations`. No core hop is
+    introduced because the mutation is a pure curve-vertex update.
+    """
+
+    bl_idname = "civil.feature_line_grab_elevation"
+    bl_label = "Quick Elevation Edit"
+    bl_description = (
+        "G-key style modal for raising or lowering a feature-line vertex "
+        "by a typed delta."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    feature_line_guid: StringProperty(
+        name="Feature Line GUID",
+        description="GlobalId of the feature line to edit.",
+    )
+    vertex_index: IntProperty(
+        name="Vertex Index",
+        description="Zero-based index of the vertex to move.",
+        default=0,
+        min=0,
+    )
+    delta_z: FloatProperty(
+        name="Delta Z",
+        description="Z offset applied to the selected vertex (positive = up).",
+        default=0.0,
+    )
+
+    # --- Modal state (not serialised) -----------------------------------------
+    _feature_line: object
+    _original_z: float
+    _start_mouse_y: int
+    _numeric_entry: str
+
+    def invoke(self, context, event):
+        if not self.feature_line_guid:
+            props = context.scene.CivilGradingProperties
+            self.feature_line_guid = props.active_feature_line_guid
+        if not self.feature_line_guid:
+            self.report({"ERROR"}, "feature_line_guid is required")
+            return {"CANCELLED"}
+
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None:
+            self.report({"ERROR"}, "No IFC file loaded")
+            return {"CANCELLED"}
+
+        try:
+            self._feature_line = tool.Grading.get_feature_line(
+                ifc_file, self.feature_line_guid
+            )
+        except tool_grading.SaikeiGradingError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        n = len(self._feature_line.vertices)
+        if not (0 <= self.vertex_index < n):
+            self.report(
+                {"ERROR"},
+                f"vertex_index {self.vertex_index} out of range [0, {n})",
+            )
+            return {"CANCELLED"}
+
+        self._original_z = self._feature_line.vertices[self.vertex_index][2]
+        self._start_mouse_y = event.mouse_y
+        self._numeric_entry = ""
+        context.window_manager.modal_handler_add(self)
+        self.report(
+            {"INFO"},
+            "Drag mouse to adjust elevation; Enter commits; Esc cancels",
+        )
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type in {"RET", "NUMPAD_ENTER"} and event.value == "PRESS":
+            if self._numeric_entry:
+                try:
+                    self.delta_z = float(self._numeric_entry)
+                except ValueError:
+                    self.report(
+                        {"ERROR"},
+                        f"Invalid numeric input: {self._numeric_entry!r}",
+                    )
+                    return {"CANCELLED"}
+            return self.execute(context)
+
+        elif event.type in {"ESC", "RIGHTMOUSE"} and event.value == "PRESS":
+            self.report({"INFO"}, "Elevation grab cancelled")
+            return {"CANCELLED"}
+
+        elif event.type in {
+            "ZERO", "ONE", "TWO", "THREE", "FOUR",
+            "FIVE", "SIX", "SEVEN", "EIGHT", "NINE",
+            "NUMPAD_0", "NUMPAD_1", "NUMPAD_2", "NUMPAD_3", "NUMPAD_4",
+            "NUMPAD_5", "NUMPAD_6", "NUMPAD_7", "NUMPAD_8", "NUMPAD_9",
+            "PERIOD", "NUMPAD_PERIOD", "MINUS",
+        } and event.value == "PRESS":
+            key_map = {
+                "ZERO": "0", "ONE": "1", "TWO": "2", "THREE": "3",
+                "FOUR": "4", "FIVE": "5", "SIX": "6", "SEVEN": "7",
+                "EIGHT": "8", "NINE": "9",
+                "NUMPAD_0": "0", "NUMPAD_1": "1", "NUMPAD_2": "2",
+                "NUMPAD_3": "3", "NUMPAD_4": "4", "NUMPAD_5": "5",
+                "NUMPAD_6": "6", "NUMPAD_7": "7", "NUMPAD_8": "8",
+                "NUMPAD_9": "9",
+                "PERIOD": ".", "NUMPAD_PERIOD": ".",
+                "MINUS": "-",
+            }
+            self._numeric_entry += key_map.get(event.type, "")
+            return {"RUNNING_MODAL"}
+
+        elif event.type == "BACK_SPACE" and event.value == "PRESS":
+            self._numeric_entry = self._numeric_entry[:-1]
+            return {"RUNNING_MODAL"}
+
+        elif event.type == "MOUSEMOVE":
+            # Drag: 1 pixel ≈ 0.01 m.
+            if not self._numeric_entry:
+                self.delta_z = (event.mouse_y - self._start_mouse_y) * 0.01
+            context.area.tag_redraw()
+            return {"RUNNING_MODAL"}
+
+        return {"PASS_THROUGH"}
+
+    def _execute(self, context):
+        if not self.feature_line_guid:
+            self.report({"ERROR"}, "feature_line_guid is required")
+            return {"CANCELLED"}
+
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None:
+            self.report({"ERROR"}, "No IFC file loaded")
+            return {"CANCELLED"}
+
+        try:
+            feature_line = tool.Grading.get_feature_line(
+                ifc_file, self.feature_line_guid
+            )
+        except tool_grading.SaikeiGradingError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        n = len(feature_line.vertices)
+        if not (0 <= self.vertex_index < n):
+            self.report(
+                {"ERROR"},
+                f"vertex_index {self.vertex_index} out of range [0, {n})",
+            )
+            return {"CANCELLED"}
+
+        new_verts = list(feature_line.vertices)
+        x, y, z = new_verts[self.vertex_index]
+        new_verts[self.vertex_index] = (x, y, z + self.delta_z)
+        feature_line.vertices = new_verts
+
+        try:
+            tool.Grading.update_feature_line_vertices(ifc_file, feature_line)
+        except tool_grading.SaikeiGradingError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        try:
+            tool.Grading.update_blender_curve(ifc_file, feature_line)
+        except Exception as exc:
+            self.report(
+                {"WARNING"},
+                f"Vertex updated in IFC but Blender curve refresh failed: {exc}",
+            )
+
+        from .data import GradingData
+
+        GradingData.is_loaded = False
+        self.report(
+            {"INFO"},
+            f"Vertex {self.vertex_index} of {feature_line.name!r} "
+            f"moved by dZ={self.delta_z:.3f}",
+        )
+        return {"FINISHED"}
+
+
+class CIVIL_OT_grading_stepped_offset_modal(Operator, tool.Ifc.Operator):
+    """Create a parallel stepped-offset copy of a feature line.
+
+    Modal entry: pick the source feature line by clicking its curve
+    object; type or drag for offset distance; type elevation step;
+    Enter commits; Esc cancels.
+
+    Headless / ``_from_data`` path: invoke with ``EXEC_DEFAULT`` and set
+    ``source_fl_id``, ``offset``, ``step_dz``, and ``new_name``.
+
+    Headless usage::
+
+        bpy.ops.civil.grading_stepped_offset_modal(
+            "EXEC_DEFAULT",
+            source_fl_id=5,
+            offset=3.0,
+            step_dz=0.1,
+            new_name="Offset FL",
+        )
+    """
+
+    bl_idname = "civil.grading_stepped_offset_modal"
+    bl_label = "Stepped Offset Feature Line"
+    bl_description = (
+        "Create a parallel stepped-offset copy of a feature line. "
+        "Each vertex is shifted perpendicular to the local direction "
+        "and incremented in elevation."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    source_fl_id: IntProperty(
+        name="Source Feature Line ID",
+        description="IFC step id of the source feature line alignment.",
+        default=0,
+    )
+    offset: FloatProperty(
+        name="Offset Distance",
+        description="Perpendicular offset in project units (positive = left).",
+        default=1.0,
+    )
+    step_dz: FloatProperty(
+        name="Elevation Step",
+        description="Z increment applied cumulatively along the polyline "
+        "(positive = uphill, negative = downhill).",
+        default=0.0,
+    )
+    new_name: StringProperty(
+        name="New Feature Line Name",
+        description="Name for the resulting offset feature line.",
+        default="Offset FL",
+    )
+
+    # --- Modal state (not serialised) -----------------------------------------
+    _start_mouse_x: int
+    _numeric_entry: str
+
+    def invoke(self, context, event):
+        """Enter modal or fast-execute when source is already set.
+
+        User must select the source feature line in the viewport BEFORE
+        activating the modal; the first left-click in the modal resolves
+        ``source_fl_id`` from the currently active object.
+
+        Future polish: in-modal raycast pick via
+        ``mathutils.geometry.intersect_line_plane`` against Z=0.
+        """
+        if self.source_fl_id > 0:
+            # If already set (e.g. panel button) skip the pick step.
+            return self.execute(context)
+        self._start_mouse_x = event.mouse_x
+        self._numeric_entry = ""
+        context.window_manager.modal_handler_add(self)
+        self.report(
+            {"INFO"},
+            "Select a feature-line curve object first; Enter commits offset",
+        )
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type in {"RET", "NUMPAD_ENTER"} and event.value == "PRESS":
+            if self._numeric_entry:
+                try:
+                    self.offset = float(self._numeric_entry)
+                except ValueError:
+                    self.report(
+                        {"ERROR"},
+                        f"Invalid numeric input: {self._numeric_entry!r}",
+                    )
+                    return {"CANCELLED"}
+            if self.source_fl_id <= 0:
+                self.report({"ERROR"}, "No source feature line selected")
+                return {"CANCELLED"}
+            return self.execute(context)
+
+        elif event.type in {"ESC", "RIGHTMOUSE"} and event.value == "PRESS":
+            self.report({"INFO"}, "Stepped offset cancelled")
+            return {"CANCELLED"}
+
+        elif event.type == "LEFTMOUSE" and event.value == "PRESS":
+            # Resolve the source feature line from the active object.
+            # Phase 7b scope: user selects the feature-line curve in the
+            # viewport before activating the modal.  The active object is
+            # the simplest reliable pick without a full raycast.
+            obj = context.active_object
+            if obj is not None:
+                entity = tool.Ifc.get_entity(obj)
+                if entity is not None and entity.is_a("IfcAlignment"):
+                    if tool.Grading.is_feature_line_alignment(entity):
+                        self.source_fl_id = entity.id()
+                        self.report(
+                            {"INFO"},
+                            f"Source FL: {entity.Name!r} — now type or "
+                            "drag offset; Enter commits",
+                        )
+                        self._start_mouse_x = event.mouse_x
+                        return {"RUNNING_MODAL"}
+            return {"RUNNING_MODAL"}
+
+        elif event.type in {
+            "ZERO", "ONE", "TWO", "THREE", "FOUR",
+            "FIVE", "SIX", "SEVEN", "EIGHT", "NINE",
+            "NUMPAD_0", "NUMPAD_1", "NUMPAD_2", "NUMPAD_3", "NUMPAD_4",
+            "NUMPAD_5", "NUMPAD_6", "NUMPAD_7", "NUMPAD_8", "NUMPAD_9",
+            "PERIOD", "NUMPAD_PERIOD", "MINUS",
+        } and event.value == "PRESS":
+            key_map = {
+                "ZERO": "0", "ONE": "1", "TWO": "2", "THREE": "3",
+                "FOUR": "4", "FIVE": "5", "SIX": "6", "SEVEN": "7",
+                "EIGHT": "8", "NINE": "9",
+                "NUMPAD_0": "0", "NUMPAD_1": "1", "NUMPAD_2": "2",
+                "NUMPAD_3": "3", "NUMPAD_4": "4", "NUMPAD_5": "5",
+                "NUMPAD_6": "6", "NUMPAD_7": "7", "NUMPAD_8": "8",
+                "NUMPAD_9": "9",
+                "PERIOD": ".", "NUMPAD_PERIOD": ".",
+                "MINUS": "-",
+            }
+            self._numeric_entry += key_map.get(event.type, "")
+            return {"RUNNING_MODAL"}
+
+        elif event.type == "BACK_SPACE" and event.value == "PRESS":
+            self._numeric_entry = self._numeric_entry[:-1]
+            return {"RUNNING_MODAL"}
+
+        elif event.type == "MOUSEMOVE":
+            if not self._numeric_entry and self.source_fl_id > 0:
+                self.offset = (event.mouse_x - self._start_mouse_x) * 0.02
+            context.area.tag_redraw()
+            return {"RUNNING_MODAL"}
+
+        return {"PASS_THROUGH"}
+
+    def _execute(self, context):
+        if self.source_fl_id <= 0:
+            self.report({"ERROR"}, "source_fl_id is required")
+            return {"CANCELLED"}
+
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None:
+            self.report({"ERROR"}, "No IFC file loaded")
+            return {"CANCELLED"}
+
+        try:
+            offset_verts = core_grading.compute_stepped_offset(
+                tool.Ifc,
+                tool.Grading,
+                fl_guid=ifc_file.by_id(self.source_fl_id).GlobalId,
+                offset=self.offset,
+                step_dz=self.step_dz,
+            )
+        except (ValueError, tool_grading.SaikeiGradingError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        try:
+            feature_line = core_grading.create_feature_line(
+                tool.Ifc,
+                tool.Grading,
+                name=self.new_name,
+                vertices=offset_verts,
+                closed=False,
+            )
+        except (ValueError, tool_grading.SaikeiGradingError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        try:
+            tool.Grading.create_blender_curve(ifc_file, feature_line)
+        except tool_grading.SaikeiGradingError as exc:
+            self.report(
+                {"WARNING"},
+                f"Offset FL authored to IFC but Blender curve failed: {exc}",
+            )
+
+        from .data import GradingData
+
+        GradingData.is_loaded = False
+        self.report(
+            {"INFO"},
+            f"Created offset feature line {feature_line.name!r} "
+            f"({len(feature_line.vertices)} vertices)",
+        )
+        return {"FINISHED"}
+
+
+class CIVIL_OT_grading_fillet_modal(Operator, tool.Ifc.Operator):
+    """Replace a sharp corner in a feature line with a circular arc.
+
+    Modal entry: click to pick a feature line, click a vertex to mark it,
+    drag outward for radius, Enter commits; Esc cancels.
+
+    Headless / ``_from_data`` path: invoke with ``EXEC_DEFAULT`` and set
+    ``fl_guid``, ``vertex_index``, and ``radius``.
+
+    Headless usage::
+
+        bpy.ops.civil.grading_fillet_modal(
+            "EXEC_DEFAULT",
+            fl_guid="...",
+            vertex_index=1,
+            radius=2.0,
+        )
+    """
+
+    bl_idname = "civil.grading_fillet_modal"
+    bl_label = "Fillet Feature Line Corner"
+    bl_description = (
+        "Replace a sharp corner in a feature line with a smooth circular "
+        "arc. Pick the feature line, click a vertex, drag for radius."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    fl_guid: StringProperty(
+        name="Feature Line GUID",
+        description="GlobalId of the feature line to fillet.",
+        default="",
+    )
+    vertex_index: IntProperty(
+        name="Vertex Index",
+        description="Zero-based index of the corner vertex to fillet.",
+        default=1,
+        min=1,
+    )
+    radius: FloatProperty(
+        name="Radius",
+        description="Fillet radius in project units. Must be smaller than "
+        "half the length of each adjacent segment.",
+        default=1.0,
+        min=1e-4,
+    )
+
+    # --- Modal state (not serialised) -----------------------------------------
+    _start_mouse_x: int
+    _numeric_entry: str
+
+    def invoke(self, context, event):
+        """Enter modal or fast-execute when fl_guid is already set.
+
+        User must select the source feature line in the viewport BEFORE
+        activating the modal; the first left-click in the modal resolves
+        ``fl_guid`` from the currently active object.  The ``vertex_index``
+        must be set numerically before drag-radius begins.
+
+        Future polish: in-modal raycast pick and click-to-pick vertex.
+        """
+        if self.fl_guid:
+            return self.execute(context)
+        self._start_mouse_x = event.mouse_x
+        self._numeric_entry = ""
+        context.window_manager.modal_handler_add(self)
+        self.report(
+            {"INFO"},
+            "Select a feature-line curve first; set vertex_index; drag for radius",
+        )
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type in {"RET", "NUMPAD_ENTER"} and event.value == "PRESS":
+            if self._numeric_entry:
+                try:
+                    self.radius = float(self._numeric_entry)
+                except ValueError:
+                    self.report(
+                        {"ERROR"},
+                        f"Invalid numeric input: {self._numeric_entry!r}",
+                    )
+                    return {"CANCELLED"}
+            if not self.fl_guid:
+                self.report({"ERROR"}, "No feature line selected")
+                return {"CANCELLED"}
+            return self.execute(context)
+
+        elif event.type in {"ESC", "RIGHTMOUSE"} and event.value == "PRESS":
+            self.report({"INFO"}, "Fillet cancelled")
+            return {"CANCELLED"}
+
+        elif event.type == "LEFTMOUSE" and event.value == "PRESS":
+            # Resolve the feature line from the active object.
+            # Phase 7b scope: user selects the feature-line curve in the
+            # viewport before activating the modal.
+            obj = context.active_object
+            if obj is not None:
+                entity = tool.Ifc.get_entity(obj)
+                if entity is not None and entity.is_a("IfcAlignment"):
+                    if tool.Grading.is_feature_line_alignment(entity):
+                        self.fl_guid = entity.GlobalId
+                        self.report(
+                            {"INFO"},
+                            f"Selected FL: {entity.Name!r} — "
+                            "now type or drag radius; Enter commits",
+                        )
+                        self._start_mouse_x = event.mouse_x
+                        return {"RUNNING_MODAL"}
+            return {"RUNNING_MODAL"}
+
+        elif event.type in {
+            "ZERO", "ONE", "TWO", "THREE", "FOUR",
+            "FIVE", "SIX", "SEVEN", "EIGHT", "NINE",
+            "NUMPAD_0", "NUMPAD_1", "NUMPAD_2", "NUMPAD_3", "NUMPAD_4",
+            "NUMPAD_5", "NUMPAD_6", "NUMPAD_7", "NUMPAD_8", "NUMPAD_9",
+            "PERIOD", "NUMPAD_PERIOD",
+        } and event.value == "PRESS":
+            key_map = {
+                "ZERO": "0", "ONE": "1", "TWO": "2", "THREE": "3",
+                "FOUR": "4", "FIVE": "5", "SIX": "6", "SEVEN": "7",
+                "EIGHT": "8", "NINE": "9",
+                "NUMPAD_0": "0", "NUMPAD_1": "1", "NUMPAD_2": "2",
+                "NUMPAD_3": "3", "NUMPAD_4": "4", "NUMPAD_5": "5",
+                "NUMPAD_6": "6", "NUMPAD_7": "7", "NUMPAD_8": "8",
+                "NUMPAD_9": "9",
+                "PERIOD": ".", "NUMPAD_PERIOD": ".",
+            }
+            self._numeric_entry += key_map.get(event.type, "")
+            return {"RUNNING_MODAL"}
+
+        elif event.type == "BACK_SPACE" and event.value == "PRESS":
+            self._numeric_entry = self._numeric_entry[:-1]
+            return {"RUNNING_MODAL"}
+
+        elif event.type == "MOUSEMOVE":
+            if not self._numeric_entry and self.fl_guid:
+                drag = (event.mouse_x - self._start_mouse_x) * 0.02
+                self.radius = max(1e-4, drag)
+            context.area.tag_redraw()
+            return {"RUNNING_MODAL"}
+
+        return {"PASS_THROUGH"}
+
+    def _execute(self, context):
+        if not self.fl_guid:
+            self.report({"ERROR"}, "fl_guid is required")
+            return {"CANCELLED"}
+
+        if self.radius <= 0.0:
+            self.report({"ERROR"}, f"radius must be positive; got {self.radius}")
+            return {"CANCELLED"}
+
+        try:
+            core_grading.insert_fillet(
+                tool.Ifc,
+                tool.Grading,
+                fl_guid=self.fl_guid,
+                vertex_index=self.vertex_index,
+                radius=self.radius,
+            )
+        except (ValueError, tool_grading.SaikeiGradingError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        from .data import GradingData
+
+        GradingData.is_loaded = False
+        self.report(
+            {"INFO"},
+            f"Inserted fillet at vertex {self.vertex_index} "
+            f"(radius={self.radius:.3f})",
+        )
         return {"FINISHED"}

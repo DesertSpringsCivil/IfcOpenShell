@@ -185,6 +185,7 @@ A runnable version lives at ``test/api/demo_earthwork.py``.
 This API is under development and subject to code-breaking changes.
 """
 
+from .add_volume_label_annotation import add_volume_label_annotation
 from .add_volume_solid_representation import add_volume_solid_representation
 from .apply_shrink_swell_pset import apply_shrink_swell_pset
 from .create_earthworks_cut import create_earthworks_cut
@@ -195,6 +196,7 @@ from .write_cut_quantities import write_cut_quantities
 from .write_fill_quantities import write_fill_quantities
 
 __all__ = [
+    "add_volume_label_annotation",
     "add_volume_solid_representation",
     "apply_shrink_swell_pset",
     "create_earthworks_cut",
