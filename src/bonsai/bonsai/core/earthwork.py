@@ -173,6 +173,35 @@ def compute_earthwork_volumes(
     return result
 
 
+def delete_earthwork_results(
+    ifc_tool: "type[tool.Ifc]",
+    earthwork_tool: "type[tool.Earthwork]",
+    cut_guid: str,
+    fill_guid: str,
+) -> None:
+    """Remove cut and fill volume-result entities from the IFC file.
+
+    Orchestration only — delegates to
+    :meth:`tool.Earthwork.delete_results` after verifying a file is
+    loaded.  Callers (operators) pass the GUIDs captured at the last
+    :func:`compute_earthwork_volumes` run; the operator is responsible
+    for clearing any cached report fields on the PropertyGroup after
+    this returns.
+
+    :param ifc_tool: the :class:`tool.Ifc` class.
+    :param earthwork_tool: the :class:`tool.Earthwork` class.
+    :param cut_guid: ``GlobalId`` of the cut entity to remove.
+    :param fill_guid: ``GlobalId`` of the fill entity to remove.
+    :raises ValueError: if no IFC file is loaded.
+    :raises tool.earthwork.SaikeiEarthworkError: if a GUID cannot be
+        resolved (propagated from :meth:`tool.Earthwork.delete_results`).
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+    earthwork_tool.delete_results(ifc_file, cut_guid=cut_guid, fill_guid=fill_guid)
+
+
 def _resolve_terrain_entity(
     ifc_file: Any, existing_surface: Any
 ) -> Optional[Any]:

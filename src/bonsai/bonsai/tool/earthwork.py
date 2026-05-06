@@ -887,3 +887,64 @@ class Earthwork:
             z_proposed_avg=float(np.mean(z_proposed_vals)),
             area_m2=float(tri.area),
         )
+
+    # ------------------------------------------------------------------
+    # Delete results — spec §5.3
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def delete_results(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        cut_guid: str,
+        fill_guid: str,
+    ) -> None:
+        """Remove the :class:`IfcEarthworksCut` and/or
+        :class:`IfcEarthworksFill` volume-result entities authored by a
+        prior :meth:`author_volume_result` call, together with any
+        ``Qto_Earthworks*BaseQuantities`` and
+        ``Pset_SaikeiGradingShrinkSwell`` property sets attached to them.
+
+        Per spec §5.3, only the two specific entities whose GUIDs are
+        provided are removed — this is not a global "delete all earthwork
+        results" sweep.  The :class:`IfcRelVoidsElement` and
+        :class:`IfcRelFillsElement` chains that reference the deleted
+        entities are garbage-collected automatically by
+        :func:`ifcopenshell.api.root.remove_product`, which handles
+        inverse-relationship cleanup.
+
+        :param ifc_file: the open :class:`ifcopenshell.file`.
+        :param cut_guid: ``GlobalId`` of the :class:`IfcEarthworksCut`
+            to remove.  Empty string is silently skipped.
+        :param fill_guid: ``GlobalId`` of the :class:`IfcEarthworksFill`
+            volume-result to remove.  Empty string is silently skipped.
+        :raises SaikeiEarthworkError: if a non-empty GUID resolves to no
+            entity in the file (entity was already deleted or the GUID is
+            wrong).
+        """
+        import ifcopenshell.api.root
+
+        # Search both cut and fill entity types.  Targeted by_type calls
+        # avoid iterating the entire file (which IfcOpenShell's SWIG
+        # wrapper does not support as a bare iteration).
+        _candidate_types = ("IfcEarthworksCut", "IfcEarthworksFill")
+
+        for guid in (cut_guid, fill_guid):
+            if not guid:
+                continue
+            entity = next(
+                (
+                    e
+                    for entity_type in _candidate_types
+                    for e in ifc_file.by_type(entity_type)
+                    if e.GlobalId == guid
+                ),
+                None,
+            )
+            if entity is None:
+                raise SaikeiEarthworkError(
+                    f"no IFC entity with GlobalId {guid!r} found — "
+                    "already deleted or GUID is incorrect"
+                )
+            ifcopenshell.api.root.remove_product(ifc_file, product=entity)
+            cls._registry.pop((id(ifc_file), guid), None)

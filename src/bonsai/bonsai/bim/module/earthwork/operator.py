@@ -179,6 +179,20 @@ class CIVIL_OT_compute_earthwork_volumes(Operator, tool.Ifc.Operator):
         props.last_run_existing_guid = existing_guid
         props.last_run_proposed_guid = proposed_guid
 
+        # Stamp IFC entity GUIDs so the delete-results operator can
+        # locate and remove the authored entities without a file scan.
+        ifc_file = tool.Ifc.get()
+        if result.ifc_cut_id is not None and ifc_file is not None:
+            cut_entity = ifc_file.by_id(result.ifc_cut_id)
+            props.last_run_cut_guid = cut_entity.GlobalId
+        else:
+            props.last_run_cut_guid = ""
+        if result.ifc_fill_id is not None and ifc_file is not None:
+            fill_entity = ifc_file.by_id(result.ifc_fill_id)
+            props.last_run_fill_guid = fill_entity.GlobalId
+        else:
+            props.last_run_fill_guid = ""
+
         self.report(
             {"INFO"},
             f"Earthwork: cut={result.undisturbed_cut_m3:.1f} m³ "
@@ -187,4 +201,108 @@ class CIVIL_OT_compute_earthwork_volumes(Operator, tool.Ifc.Operator):
             f"({result.fill_cubic_yards:.1f} cu yd) | "
             f"net={result.net_volume_m3:+.1f} m³",
         )
+        return {"FINISHED"}
+
+
+class CIVIL_OT_earthwork_clear_report(Operator):
+    """Reset the last-run report fields on CivilEarthworkProperties.
+
+    Clears the cached cut / fill / net / loose-cut volumes and the
+    last-run surface GUIDs so the panel shows no stale report.  Does
+    NOT modify the IFC file — this is a UI-state reset only.  Use
+    ``CIVIL_OT_earthwork_delete_results`` to remove the authored IFC
+    entities as well.
+
+    Headless usage::
+
+        bpy.ops.civil.earthwork_clear_report("EXEC_DEFAULT")
+    """
+
+    bl_idname = "civil.earthwork_clear_report"
+    bl_label = "Clear Results"
+    bl_description = (
+        "Clear the last computed earthwork report. Zeros the cached "
+        "cut, fill, and net volumes in the panel. No IFC change - use "
+        "Delete Results to remove authored volume entities."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        props = context.scene.CivilEarthworkProperties
+        props.last_cut_m3 = 0.0
+        props.last_fill_m3 = 0.0
+        props.last_net_m3 = 0.0
+        props.last_loose_cut_m3 = 0.0
+        props.last_run_existing_guid = ""
+        props.last_run_proposed_guid = ""
+        props.last_run_cut_guid = ""
+        props.last_run_fill_guid = ""
+        self.report({"INFO"}, "Earthwork report cleared.")
+        return {"FINISHED"}
+
+
+class CIVIL_OT_earthwork_delete_results(Operator, tool.Ifc.Operator):
+    """Delete the cut and fill volume entities from the last run.
+
+    Removes the :class:`IfcEarthworksCut` and
+    :class:`IfcEarthworksFill` entities authored by the most recent
+    ``Compute Volumes`` run (identified by
+    ``CivilEarthworkProperties.last_run_cut_guid`` /
+    ``last_run_fill_guid``), together with their voiding /
+    filling relationship chains and quantity sets.  Also clears the
+    last-run report fields.
+
+    This operator requires a prior ``Compute Volumes`` run in the
+    current session.  If no run GUID is cached the operator cancels
+    with an error.
+
+    Headless usage::
+
+        bpy.ops.civil.earthwork_delete_results("EXEC_DEFAULT")
+    """
+
+    bl_idname = "civil.earthwork_delete_results"
+    bl_label = "Delete Results"
+    bl_description = (
+        "Delete the cut and fill volume entities authored on the last "
+        "Compute Volumes run. Removes IFC entities, quantity sets, and "
+        "voiding relationships. Clears the report panel. Irreversible "
+        "without undo."
+    )
+    bl_options = {"REGISTER", "UNDO", "INTERNAL"}
+
+    def _execute(self, context):
+        props = context.scene.CivilEarthworkProperties
+        cut_guid = props.last_run_cut_guid
+        fill_guid = props.last_run_fill_guid
+
+        if not cut_guid and not fill_guid:
+            self.report(
+                {"WARNING"},
+                "No prior earthwork run found. Run 'Compute Volumes' first.",
+            )
+            return {"CANCELLED"}
+
+        try:
+            core_earthwork.delete_earthwork_results(
+                tool.Ifc,
+                tool.Earthwork,
+                cut_guid=cut_guid,
+                fill_guid=fill_guid,
+            )
+        except (ValueError, tool_earthwork.SaikeiEarthworkError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        # Clear cached report after successful deletion.
+        props.last_cut_m3 = 0.0
+        props.last_fill_m3 = 0.0
+        props.last_net_m3 = 0.0
+        props.last_loose_cut_m3 = 0.0
+        props.last_run_existing_guid = ""
+        props.last_run_proposed_guid = ""
+        props.last_run_cut_guid = ""
+        props.last_run_fill_guid = ""
+
+        self.report({"INFO"}, "Earthwork volume results deleted.")
         return {"FINISHED"}

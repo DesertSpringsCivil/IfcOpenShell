@@ -107,6 +107,17 @@ class CIVIL_PT_grading_feature_lines(Panel):
         )
         op_edit.feature_line_guid = props.active_feature_line_guid
 
+        layout.separator()
+
+        col_delete = layout.column(align=True)
+        col_delete.enabled = bool(props.active_feature_line_guid)
+        op_delete = col_delete.operator(
+            "civil.feature_line_delete",
+            icon="X",
+            text="Delete Feature Line",
+        )
+        op_delete.feature_line_guid = props.active_feature_line_guid
+
 
 class CIVIL_PT_grading_criteria(Panel):
     """Sub-panel: list and create reusable grading criteria."""
@@ -171,6 +182,17 @@ class CIVIL_PT_grading_criteria(Panel):
         op.fill_slope = props.new_criteria_fill_slope
         op.max_distance = props.new_criteria_max_distance
         op.retaining_wall_at_limit = props.new_criteria_retaining_wall
+
+        layout.separator()
+
+        col_delete = layout.column(align=True)
+        col_delete.enabled = bool(props.active_criteria_guid)
+        op_del = col_delete.operator(
+            "civil.grading_delete_criteria",
+            icon="X",
+            text="Delete Criteria",
+        )
+        op_del.criteria_guid = props.active_criteria_guid
 
 
 class CIVIL_PT_grading_groups(Panel):
@@ -282,6 +304,37 @@ class CIVIL_PT_grading_active_group(Panel):
             icon="ADD",
             text="Add Grading Object...",
         )
+
+        # Remove button: enabled only when a member row is active AND
+        # the active member has a slope_fill_id so we can resolve its GUID.
+        has_active_member = (
+            0 <= props.active_member_index < len(props.active_group_members)
+        )
+        active_member_ifc_id = (
+            props.active_group_members[props.active_member_index].slope_fill_id
+            if has_active_member
+            else 0
+        )
+        ifc_file = tool.Ifc.get()
+        active_member_guid = ""
+        if active_member_ifc_id and ifc_file:
+            try:
+                active_member_entity = ifc_file.by_id(active_member_ifc_id)
+                if active_member_entity is not None:
+                    active_member_guid = active_member_entity.GlobalId
+            except Exception:
+                pass
+
+        col_remove = layout.column(align=True)
+        col_remove.enabled = bool(active_member_guid and props.active_group_guid)
+        op_remove = col_remove.operator(
+            "civil.grading_remove_object",
+            icon="REMOVE",
+            text="Remove Grading Object",
+        )
+        op_remove.object_guid = active_member_guid
+        op_remove.group_guid = props.active_group_guid
+
         op = col.operator(
             "civil.grading_rebuild_group",
             icon="FILE_REFRESH",

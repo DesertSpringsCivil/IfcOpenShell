@@ -54,6 +54,7 @@ from bpy.types import Operator
 import bonsai.core.surface as core_surface
 import bonsai.tool as tool
 import bonsai.tool.surface as tool_surface
+from bonsai.bim.module.surface.data import SurfaceData
 
 
 class CIVIL_OT_surface_create_from_points(Operator, tool.Ifc.Operator):
@@ -82,8 +83,7 @@ class CIVIL_OT_surface_create_from_points(Operator, tool.Ifc.Operator):
     bl_label = "Create Surface from Points"
     bl_description = (
         "Build a TIN from a CSV or whitespace-separated XYZ file and persist "
-        "as IfcGeographicElement[TERRAIN] (existing) or "
-        "IfcEarthworksFill[SUBGRADE] (proposed)"
+        "as a terrain surface (existing) or proposed surface"
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -99,8 +99,16 @@ class CIVIL_OT_surface_create_from_points(Operator, tool.Ifc.Operator):
 
     def _execute(self, context):
         props = context.scene.CivilSurfaceProperties
+        # csv_column_map is 1-indexed (user-friendly); tool layer is 0-indexed.
+        columns: tuple[int, int, int] = tuple(  # type: ignore[assignment]
+            int(c) - 1 for c in props.csv_column_map
+        )
         try:
-            points = tool.Surface.load_points_from_csv(self.csv_filepath)
+            points = tool.Surface.load_points_from_csv(
+                self.csv_filepath,
+                columns=columns,
+                skip_header_rows=int(props.csv_skip_header_rows),
+            )
         except tool_surface.SaikeiSurfaceError as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
@@ -136,8 +144,6 @@ class CIVIL_OT_surface_create_from_points(Operator, tool.Ifc.Operator):
         # the refresh). We only set the active selection here so the
         # user sees the new surface highlighted — the row itself will
         # appear via the refresh.
-        from bonsai.bim.module.surface.data import SurfaceData
-
         SurfaceData.is_loaded = False
         SurfaceData.load()
         # SurfaceData.load preserves the previously-selected GUID if it's
@@ -243,7 +249,7 @@ class CIVIL_OT_surface_set_boundary(Operator, tool.Ifc.Operator):
     csv_filepath: StringProperty(
         name="Boundary CSV / XYZ",
         description="Path to a CSV / whitespace-separated XYZ file describing "
-        "the polygon ring (≥ 3 rows of x,y,z; Z is ignored)",
+        "the polygon ring (>= 3 rows of x,y,z; Z is ignored)",
         subtype="FILE_PATH",
     )
     filter_glob: StringProperty(
@@ -322,10 +328,10 @@ class CIVIL_OT_surface_add_breakline(Operator, tool.Ifc.Operator):
     bl_idname = "civil.surface_add_breakline"
     bl_label = "Add Breakline to Surface"
     bl_description = (
-        "Append a breakline polyline to the active surface, persist as "
-        "IfcAnnotation, and retriangulate the TIN to honor the new edge. "
+        "Append a breakline polyline to the active surface, persist as a "
+        "breakline annotation, and retriangulate the TIN to honor the new edge. "
         "Phase 4 limitation: the polyline must fully cross the outer "
-        "boundary — internal-only ridges (start and end inside the surface) "
+        "boundary - internal-only ridges (start and end inside the surface) "
         "are silently dropped by the constrained Delaunay backend"
     )
     bl_options = {"REGISTER", "UNDO"}
@@ -333,7 +339,7 @@ class CIVIL_OT_surface_add_breakline(Operator, tool.Ifc.Operator):
     csv_filepath: StringProperty(
         name="Polyline CSV / XYZ",
         description="Path to a CSV / whitespace-separated XYZ file describing "
-        "an ordered polyline (≥ 2 rows of x,y,z)",
+        "an ordered polyline (>= 2 rows of x,y,z)",
         subtype="FILE_PATH",
     )
     filter_glob: StringProperty(
@@ -342,7 +348,7 @@ class CIVIL_OT_surface_add_breakline(Operator, tool.Ifc.Operator):
     )
     kind: EnumProperty(
         name="Kind",
-        description="Breakline kind per spec §2.3",
+        description="Breakline kind (standard, wall, non_destructive, proximity)",
         items=[
             ("standard", "Standard", "Edges added to the TIN at each segment"),
             ("wall", "Wall", "Edges added; downstream may render a vertical face"),
@@ -361,7 +367,7 @@ class CIVIL_OT_surface_add_breakline(Operator, tool.Ifc.Operator):
     )
     breakline_name: StringProperty(
         name="Name",
-        description="Human-readable label for the IfcAnnotation",
+        description="Breakline name (used as the entity Name in the IFC file)",
         default="Breakline",
     )
     source: StringProperty(
@@ -431,3 +437,184 @@ class CIVIL_OT_surface_add_breakline(Operator, tool.Ifc.Operator):
             return self.execute(context)
         context.window_manager.fileselect_add(self)
         return {"RUNNING_MODAL"}
+
+
+class CIVIL_OT_surface_rename(Operator, tool.Ifc.Operator):
+    """Rename the active surface in the UIList.
+
+    Reads the target surface from :attr:`surface_guid` (defaults to
+    :attr:`CivilSurfaceProperties.active_surface_guid` when not supplied by
+    the caller) and writes ``new_name`` to the IFC entity's ``Name``
+    attribute.
+
+    Headless usage::
+
+        bpy.ops.civil.surface_rename(
+            "EXEC_DEFAULT", surface_guid="<guid>", new_name="Road Centerline DG"
+        )
+    """
+
+    bl_idname = "civil.surface_rename"
+    bl_label = "Rename Surface"
+    bl_description = "Rename the active surface."
+    bl_options = {"REGISTER", "UNDO"}
+
+    surface_guid: StringProperty(
+        name="Surface GUID",
+        description="GlobalId of the surface to rename. Defaults to the "
+        "active UIList selection when empty",
+        default="",
+    )
+    new_name: StringProperty(
+        name="New Name",
+        description="New human-readable name for the surface",
+        default="",
+    )
+
+    def _execute(self, context):
+        props = context.scene.CivilSurfaceProperties
+        target_guid = self.surface_guid or props.active_surface_guid
+        if not target_guid:
+            self.report(
+                {"ERROR"},
+                "No active surface — select one in the UIList or supply surface_guid",
+            )
+            return {"CANCELLED"}
+        if not self.new_name or not self.new_name.strip():
+            self.report({"ERROR"}, "new_name cannot be empty")
+            return {"CANCELLED"}
+
+        try:
+            tool.Surface.rename(target_guid, self.new_name.strip())
+        except tool_surface.SaikeiSurfaceError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        SurfaceData.is_loaded = False
+        self.report({"INFO"}, f"Renamed surface to {self.new_name.strip()!r}")
+        return {"FINISHED"}
+
+
+class CIVIL_OT_surface_delete(Operator, tool.Ifc.Operator):
+    """Delete the active surface.
+
+    Destroys the IFC host entity, its representation tree, all scoped
+    breakline :class:`IfcAnnotation` siblings, and the linked Blender mesh
+    object. Irreversible; Blender undo captures the pre-delete state.
+
+    Headless usage::
+
+        bpy.ops.civil.surface_delete("EXEC_DEFAULT", surface_guid="<guid>")
+    """
+
+    bl_idname = "civil.surface_delete"
+    bl_label = "Delete Surface"
+    bl_description = "Permanently delete the active surface and its breaklines."
+    bl_options = {"REGISTER", "UNDO"}
+
+    surface_guid: StringProperty(
+        name="Surface GUID",
+        description="GlobalId of the surface to delete. Defaults to the "
+        "active UIList selection when empty",
+        default="",
+    )
+
+    def _execute(self, context):
+        props = context.scene.CivilSurfaceProperties
+        target_guid = self.surface_guid or props.active_surface_guid
+        if not target_guid:
+            self.report(
+                {"ERROR"},
+                "No active surface — select one in the UIList or supply surface_guid",
+            )
+            return {"CANCELLED"}
+
+        try:
+            core_surface.delete_surface(tool.Ifc, tool.Surface, target_guid)
+        except (ValueError, tool_surface.SaikeiSurfaceError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        # Clear active selection if it pointed at the deleted surface.
+        if props.active_surface_guid == target_guid:
+            props.active_surface_guid = ""
+            props.active_surface_id = 0
+
+        SurfaceData.is_loaded = False
+        SurfaceData.load()
+        self.report({"INFO"}, f"Deleted surface {target_guid!r}")
+        return {"FINISHED"}
+
+
+class CIVIL_OT_surface_select(Operator):
+    """Select the Blender mesh object backing the active UIList row.
+
+    Pure UI operator — makes no IFC changes. Sets the viewport selection
+    to the linked Blender mesh object so the user can camera-frame
+    (:kbd:`Numpad .`) or inspect the surface in the 3D viewport.
+
+    Also syncs :attr:`CivilSurfaceProperties.active_surface_index` to the
+    UIList row that matches ``surface_guid``, so the panel list and the
+    viewport selection stay in agreement.
+
+    Headless usage::
+
+        bpy.ops.civil.surface_select("EXEC_DEFAULT", surface_guid="<guid>")
+    """
+
+    bl_idname = "civil.surface_select"
+    bl_label = "Select Surface"
+    bl_description = "Select the active surface in the viewport."
+    bl_options = {"REGISTER", "UNDO"}
+
+    surface_guid: StringProperty(
+        name="Surface GUID",
+        description="GlobalId of the surface to select. Defaults to the "
+        "active UIList selection when empty",
+        default="",
+    )
+
+    def execute(self, context):
+        props = context.scene.CivilSurfaceProperties
+        target_guid = self.surface_guid or props.active_surface_guid
+        if not target_guid:
+            self.report(
+                {"ERROR"},
+                "No active surface — select one in the UIList or supply surface_guid",
+            )
+            return {"CANCELLED"}
+
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None:
+            self.report({"ERROR"}, "No IFC file loaded")
+            return {"CANCELLED"}
+
+        host = tool.Surface.get_host_entity(ifc_file, target_guid)
+        if host is None:
+            self.report(
+                {"ERROR"},
+                f"No IFC entity with GlobalId {target_guid!r} in this file",
+            )
+            return {"CANCELLED"}
+
+        obj = tool.Ifc.get_object(host)
+        if obj is None:
+            self.report(
+                {"WARNING"},
+                "Surface has no linked Blender object — cannot select",
+            )
+            return {"CANCELLED"}
+
+        # Deselect all, then select the surface object.
+        for scene_obj in context.scene.objects:
+            scene_obj.select_set(False)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+
+        # Sync UIList index to the matching row.
+        for index, item in enumerate(props.surfaces):
+            if item.guid == target_guid:
+                props.active_surface_index = index
+                break
+
+        return {"FINISHED"}

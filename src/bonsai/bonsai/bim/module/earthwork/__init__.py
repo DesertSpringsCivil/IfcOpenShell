@@ -41,13 +41,36 @@ the parent-module wiring at ``bim/__init__.py``.
 """
 
 import bpy
+from bpy.app.handlers import persistent
 
-from . import operator, prop, ui
+from . import decorator, operator, prop, ui
+
+
+@persistent
+def _on_load_post(_dummy: bpy.types.Scene) -> None:
+    """File-load cleanup: uninstall the GPU draw handler captured against
+    the previous file's context, and reset the overlay-toggle BoolProperty
+    so the post-load state is deterministic.
+
+    Mirrors :func:`bonsai.bim.module.grading.__init__._on_load_post`.
+    Lazy-imports the decorator module to avoid triggering an import
+    chain at addon-register time.
+    """
+    from . import decorator as earthwork_decorator
+
+    earthwork_decorator.EarthworkDecorator.uninstall()
+
+    scene = bpy.context.scene if bpy.context else None
+    props = getattr(scene, "CivilEarthworkProperties", None) if scene else None
+    if props is not None:
+        props.show_cut_fill_overlay = False
 
 
 classes: tuple[type, ...] = (
     prop.CivilEarthworkProperties,
     operator.CIVIL_OT_compute_earthwork_volumes,
+    operator.CIVIL_OT_earthwork_clear_report,
+    operator.CIVIL_OT_earthwork_delete_results,
     ui.CIVIL_PT_earthwork_inputs,
     ui.CIVIL_PT_earthwork_compute,
 )
@@ -61,12 +84,25 @@ def register() -> None:
     ``bpy.types.Scene`` as a ``PointerProperty`` so the UI panel can
     read / write earthwork state via
     ``context.scene.CivilEarthworkProperties``.
+
+    Registers the :class:`~decorator.EarthworkDecorator` load_post
+    handler. The draw handler is installed lazily when the user first
+    enables the cut/fill overlay toggle (via the update callback on
+    :attr:`CivilEarthworkProperties.show_cut_fill_overlay`).
     """
     bpy.types.Scene.CivilEarthworkProperties = bpy.props.PointerProperty(
         type=prop.CivilEarthworkProperties
     )
+    # Register the persistent load_post handler so the decorator
+    # uninstalls itself on file load and the overlay toggle resets to
+    # False (prevents stale handlers from carrying across open-file calls).
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
 
 
 def unregister() -> None:
     """Module-level teardown hook (mirror of :func:`register`)."""
+    decorator.EarthworkDecorator.uninstall()
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
     del bpy.types.Scene.CivilEarthworkProperties

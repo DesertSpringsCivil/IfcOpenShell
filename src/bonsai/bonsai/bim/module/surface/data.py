@@ -165,6 +165,63 @@ class SurfaceData:
             "has_boundary": surface.outer_boundary is not None,
         }
 
+    @classmethod
+    def get_active_surface_statistics(
+        cls, ifc_file, surface_guid: str
+    ) -> dict:
+        """Return extended read-only statistics for the statistics sub-panel.
+
+        Computes Z-min, Z-max, vertex count, triangle count, breakline count,
+        and bounding-box footprint (XY width x depth) from the in-memory
+        :class:`CivilSurface` dataclass. Returns a dict with sentinel values
+        when the surface cannot be resolved (safe for the panel to read without
+        guarding).
+
+        The :class:`CIVIL_PT_surface_statistics` panel calls this during
+        ``draw()``; caching is handled by the dataclass registry so repeated
+        redraws do not re-read IFC.
+        """
+        _empty: dict = {
+            "name": "(missing)",
+            "vertex_count": 0,
+            "triangle_count": 0,
+            "breakline_count": 0,
+            "z_min": 0.0,
+            "z_max": 0.0,
+            "bb_width": 0.0,
+            "bb_depth": 0.0,
+        }
+        if not surface_guid:
+            return _empty
+        try:
+            import numpy as np
+
+            surface = tool.Surface.get(ifc_file, surface_guid)
+        except Exception:
+            return _empty
+
+        points = surface.points  # (N, 3) numpy array
+        if len(points) == 0:
+            return _empty
+
+        z_min = float(points[:, 2].min())
+        z_max = float(points[:, 2].max())
+        x_min = float(points[:, 0].min())
+        x_max = float(points[:, 0].max())
+        y_min = float(points[:, 1].min())
+        y_max = float(points[:, 1].max())
+
+        return {
+            "name": surface.name,
+            "vertex_count": int(len(points)),
+            "triangle_count": int(len(surface.triangles)),
+            "breakline_count": len(surface.breaklines),
+            "z_min": z_min,
+            "z_max": z_max,
+            "bb_width": x_max - x_min,
+            "bb_depth": y_max - y_min,
+        }
+
 
 def refresh() -> None:
     """Mark :class:`SurfaceData` as needing reload on next access.

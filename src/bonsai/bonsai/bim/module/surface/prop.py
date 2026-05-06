@@ -40,6 +40,7 @@ from bpy.props import (
     EnumProperty,
     FloatProperty,
     IntProperty,
+    IntVectorProperty,
     StringProperty,
 )
 from bpy.types import PropertyGroup, UIList
@@ -231,6 +232,33 @@ class CivilSurfaceProperties(PropertyGroup):
         "edit operators target the correct surface",
         default=0,
         update=_on_active_surface_index_change,
+    )
+
+    # ----------------------------------------------------------------------
+    # CSV column-remap inputs (consumed by CIVIL_OT_surface_create_from_points)
+    # ----------------------------------------------------------------------
+
+    csv_column_map: IntVectorProperty(
+        name="Column Map (X, Y, Z)",
+        description=(
+            "1-indexed column numbers for X, Y, and Z in the CSV file. "
+            "Default (1, 2, 3) reads the first three columns as X, Y, Z. "
+            "Change when your file has a different column order (e.g. Z first "
+            "would be (3, 2, 1) for Z, Y, X)"
+        ),
+        size=3,
+        default=(1, 2, 3),
+        min=1,
+        soft_max=20,
+    )
+
+    csv_skip_header_rows: IntProperty(
+        name="Skip Header Rows",
+        description="Number of leading rows to skip before reading point data "
+        "(e.g., 1 if your CSV has a header row with column labels)",
+        default=0,
+        min=0,
+        soft_max=10,
     )
 
     # ----------------------------------------------------------------------

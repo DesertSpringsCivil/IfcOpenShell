@@ -287,6 +287,41 @@ def set_outer_boundary(
     return surface
 
 
+def delete_surface(
+    ifc_tool: "type[tool.Ifc]",
+    surface_tool: "type[tool.Surface]",
+    surface_guid: str,
+) -> None:
+    """Destroy a surface and all its associated IFC and Blender data.
+
+    Business rules:
+
+    1. An IFC file must be loaded.
+    2. ``surface_guid`` must resolve to a supported surface host entity.
+
+    Sequencing:
+
+    1. :meth:`tool.Surface.delete` — removes the Blender object, the IFC
+       host entity, all scoped breakline annotations, and the representation
+       tree; evicts the registry entry.
+
+    Cache invalidation: the tool layer evicts the registry entry so callers
+    that hold a stale reference to the :class:`CivilSurface` dataclass get
+    an error on next :meth:`tool.Surface.get` rather than operating on ghost
+    data.
+
+    :param ifc_tool: the :class:`tool.Ifc` class.
+    :param surface_tool: the :class:`tool.Surface` class.
+    :param surface_guid: GlobalId of the surface to destroy.
+    :raises ValueError: if no IFC file is loaded.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    surface_tool.delete(surface_guid)
+
+
 def retriangulate_surface(
     ifc_tool: "type[tool.Ifc]",
     surface_tool: "type[tool.Surface]",

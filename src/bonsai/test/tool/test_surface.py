@@ -2966,3 +2966,874 @@ class TestSurfaceSetBoundaryAndRetriangulateOperators(NewIfc4X3):
         assert tin.Closed is False
         assert len(tin.CoordIndex) > 0
         assert len(tin.Flags) == len(tin.CoordIndex)
+
+
+# ---------------------------------------------------------------------------
+# Phase 7a additions
+# ---------------------------------------------------------------------------
+
+
+class TestSurfaceRenameOperator(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_surface_rename` (Phase 7a).
+
+    Verifies that the operator mutates the IFC entity ``Name`` attribute,
+    updates the in-memory registry, and invalidates the ``SurfaceData`` cache.
+    """
+
+    @pytest.mark.civil
+    def test_rename_updates_ifc_entity_name(self, tmp_path) -> None:
+        points_path = tmp_path / "p.csv"
+        points_path.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Original Name"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+        assert guid
+
+        result = bpy.ops.civil.surface_rename(
+            "EXEC_DEFAULT", surface_guid=guid, new_name="Renamed Surface"
+        )
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        terrains = ifc_file.by_type("IfcGeographicElement")
+        matching = [t for t in terrains if t.GlobalId == guid]
+        assert len(matching) == 1
+        assert matching[0].Name == "Renamed Surface"
+
+    @pytest.mark.civil
+    def test_rename_updates_registry_dataclass(self, tmp_path) -> None:
+        points_path = tmp_path / "p.csv"
+        points_path.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        bpy.ops.civil.surface_rename(
+            "EXEC_DEFAULT", surface_guid=guid, new_name="Cache Check"
+        )
+
+        # The registry should return the updated name without a cache miss.
+        surface = tool_surface.Surface.get(tool.Ifc.get(), guid)
+        assert surface.name == "Cache Check"
+
+    @pytest.mark.civil
+    def test_rename_empty_name_raises(self, tmp_path) -> None:
+        points_path = tmp_path / "p.csv"
+        points_path.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.surface_rename(
+                "EXEC_DEFAULT", surface_guid=guid, new_name="   "
+            )
+
+    @pytest.mark.civil
+    def test_rename_bogus_guid_raises(self) -> None:
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.surface_rename(
+                "EXEC_DEFAULT",
+                surface_guid="bogus-guid-that-does-not-exist",
+                new_name="X",
+            )
+        # Postcondition: no IFC entity was mutated (file still clean).
+        ifc_file = tool.Ifc.get()
+        assert not any(
+            e.GlobalId == "bogus-guid-that-does-not-exist"
+            for e in ifc_file.by_type("IfcGeographicElement")
+        )
+
+
+class TestSurfaceDeleteOperator(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_surface_delete` (Phase 7a)."""
+
+    @pytest.mark.civil
+    def test_delete_removes_ifc_entity(self, tmp_path) -> None:
+        points_path = tmp_path / "p.csv"
+        points_path.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+        ifc_file = tool.Ifc.get()
+        assert any(e.GlobalId == guid for e in ifc_file.by_type("IfcGeographicElement"))
+
+        result = bpy.ops.civil.surface_delete(
+            "EXEC_DEFAULT", surface_guid=guid
+        )
+        assert result == {"FINISHED"}
+
+        # Entity must be gone.
+        assert not any(
+            e.GlobalId == guid for e in ifc_file.by_type("IfcGeographicElement")
+        )
+
+    @pytest.mark.civil
+    def test_delete_clears_active_selection(self, tmp_path) -> None:
+        points_path = tmp_path / "p.csv"
+        points_path.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+        props = bpy.context.scene.CivilSurfaceProperties
+
+        bpy.ops.civil.surface_delete("EXEC_DEFAULT", surface_guid=guid)
+
+        # Active GUID must be cleared since the surface is gone.
+        assert props.active_surface_guid == ""
+        assert props.active_surface_id == 0
+
+    @pytest.mark.civil
+    def test_delete_bogus_guid_raises(self) -> None:
+        ifc_file = tool.Ifc.get()
+        surfaces_before = len(ifc_file.by_type("IfcGeographicElement")) + len(
+            ifc_file.by_type("IfcEarthworksFill")
+        )
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.surface_delete(
+                "EXEC_DEFAULT",
+                surface_guid="totally-bogus-guid",
+            )
+        # Postcondition: no surface was accidentally removed.
+        surfaces_after = len(ifc_file.by_type("IfcGeographicElement")) + len(
+            ifc_file.by_type("IfcEarthworksFill")
+        )
+        assert surfaces_after == surfaces_before
+
+    @pytest.mark.civil
+    def test_delete_removes_scoped_breaklines(self, tmp_path) -> None:
+        """Deleting a surface must also remove its scoped breakline annotations."""
+        points_path = tmp_path / "pts.csv"
+        points_path.write_text(
+            "0,0,0\n10,0,0\n10,10,0\n0,10,0\n5,5,1\n"
+        )
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        # Add two breaklines to the surface.
+        bl_path_1 = tmp_path / "bl1.csv"
+        bl_path_1.write_text("0,5,0\n10,5,1\n")
+        bpy.ops.civil.surface_add_breakline(
+            "EXEC_DEFAULT",
+            csv_filepath=str(bl_path_1),
+            breakline_name="ridge-a",
+        )
+
+        bl_path_2 = tmp_path / "bl2.csv"
+        bl_path_2.write_text("5,0,0\n5,10,1\n")
+        bpy.ops.civil.surface_add_breakline(
+            "EXEC_DEFAULT",
+            csv_filepath=str(bl_path_2),
+            breakline_name="ridge-b",
+        )
+
+        ifc_file = tool.Ifc.get()
+        # Confirm the breaklines exist before deletion.
+        breakline_annotations_before = [
+            a
+            for a in ifc_file.by_type("IfcAnnotation")
+            if getattr(a, "ObjectType", None) == "BREAKLINE"
+        ]
+        assert len(breakline_annotations_before) >= 2
+
+        bpy.ops.civil.surface_delete("EXEC_DEFAULT", surface_guid=guid)
+
+        # Both breakline annotations must be gone.
+        breakline_annotations_after = [
+            a
+            for a in ifc_file.by_type("IfcAnnotation")
+            if getattr(a, "ObjectType", None) == "BREAKLINE"
+        ]
+        assert len(breakline_annotations_after) == 0
+        # The host entity itself must also be gone.
+        assert not any(
+            e.GlobalId == guid for e in ifc_file.by_type("IfcGeographicElement")
+        )
+
+
+class TestSurfaceSelectOperator(NewIfc4X3):
+    """Tests for :class:`CIVIL_OT_surface_select` (Phase 7a).
+
+    Verifies that the operator sets the active Blender object and syncs
+    the UIList index.
+    """
+
+    @pytest.mark.civil
+    def test_select_sets_active_object_and_index(self, tmp_path) -> None:
+        # Create two surfaces so we can verify index selectivity.
+        path_a = tmp_path / "a.csv"
+        path_a.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Surf A"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path_a)
+        )
+        guid_a = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        path_b = tmp_path / "b.csv"
+        path_b.write_text("10,10,0\n11,10,0\n10,11,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Surf B"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path_b)
+        )
+
+        # Select surface A by guid.
+        result = bpy.ops.civil.surface_select(
+            "EXEC_DEFAULT", surface_guid=guid_a
+        )
+        assert result == {"FINISHED"}
+
+        props = bpy.context.scene.CivilSurfaceProperties
+        # active_surface_index should point to A's row.
+        assert props.surfaces[props.active_surface_index].guid == guid_a
+
+    @pytest.mark.civil
+    def test_select_bogus_guid_raises(self) -> None:
+        props = bpy.context.scene.CivilSurfaceProperties
+        guid_before = props.active_surface_guid
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.surface_select(
+                "EXEC_DEFAULT", surface_guid="bogus-guid-xyz"
+            )
+        # Postcondition: the active_surface_guid prop is unchanged.
+        assert props.active_surface_guid == guid_before
+
+    @pytest.mark.civil
+    def test_select_no_linked_blender_object_warns(self, tmp_path) -> None:
+        """Selecting a surface whose Blender object was unlinked returns CANCELLED."""
+        points_path = tmp_path / "p.csv"
+        points_path.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+        ifc_file = tool.Ifc.get()
+        host = tool.Surface.get_host_entity(ifc_file, guid)
+        obj = tool.Ifc.get_object(host)
+        assert obj is not None, "setup: surface must have a linked Blender object"
+
+        # Unlink the Blender object so the operator hits the obj-is-None branch.
+        tool.Ifc.unlink(obj=obj)
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+        # The operator should report a WARNING and return CANCELLED.
+        # tool.Ifc.Operator wraps _execute, but surface_select uses plain
+        # Operator so the CANCELLED propagates directly to the caller.
+        result = bpy.ops.civil.surface_select(
+            "EXEC_DEFAULT", surface_guid=guid
+        )
+        assert result == {"CANCELLED"}
+
+
+class TestSurfaceGetHostEntity(NewIfc4X3):
+    """Tests for :meth:`tool.Surface.get_host_entity` (FIX 5 helper)."""
+
+    @pytest.mark.civil
+    def test_get_host_entity_finds_terrain(self, tmp_path) -> None:
+        points_path = tmp_path / "p.csv"
+        points_path.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_kind = "existing"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+        ifc_file = tool.Ifc.get()
+
+        host = tool.Surface.get_host_entity(ifc_file, guid)
+
+        assert host is not None
+        assert host.GlobalId == guid
+        assert host.is_a("IfcGeographicElement")
+
+    @pytest.mark.civil
+    def test_get_host_entity_finds_proposed(self, tmp_path) -> None:
+        points_path = tmp_path / "p.csv"
+        points_path.write_text("0,0,0\n1,0,0\n0,1,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_kind = "proposed_site"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+        ifc_file = tool.Ifc.get()
+
+        host = tool.Surface.get_host_entity(ifc_file, guid)
+
+        assert host is not None
+        assert host.GlobalId == guid
+        assert host.is_a("IfcEarthworksFill")
+
+    @pytest.mark.civil
+    def test_get_host_entity_returns_none_for_unknown(self) -> None:
+        ifc_file = tool.Ifc.get()
+        result = tool.Surface.get_host_entity(ifc_file, "no-such-guid-anywhere")
+        assert result is None
+
+
+class TestSurfaceStatisticsPanel(NewIfc4X3):
+    """Tests for :class:`CIVIL_PT_surface_statistics` and
+    :meth:`SurfaceData.get_active_surface_statistics` (Phase 7a)."""
+
+    @pytest.mark.civil
+    def test_statistics_panel_registered(self) -> None:
+        assert hasattr(bpy.types, "CIVIL_PT_surface_statistics")
+
+    @pytest.mark.civil
+    def test_get_active_surface_statistics_returns_expected_keys(
+        self, tmp_path
+    ) -> None:
+        from bonsai.bim.module.surface.data import SurfaceData
+
+        points_path = tmp_path / "p.csv"
+        # 4-corner 10x10 unit square at z=5 — easy to assert on.
+        points_path.write_text("0,0,5\n10,0,5\n10,10,5\n0,10,5\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        stats = SurfaceData.get_active_surface_statistics(tool.Ifc.get(), guid)
+
+        assert stats["vertex_count"] == 4
+        assert stats["triangle_count"] == 2
+        assert stats["z_min"] == pytest.approx(5.0)
+        assert stats["z_max"] == pytest.approx(5.0)
+        assert stats["bb_width"] == pytest.approx(10.0)
+        assert stats["bb_depth"] == pytest.approx(10.0)
+
+    @pytest.mark.civil
+    def test_get_active_surface_statistics_empty_guid_returns_sentinel(
+        self,
+    ) -> None:
+        from bonsai.bim.module.surface.data import SurfaceData
+
+        stats = SurfaceData.get_active_surface_statistics(tool.Ifc.get(), "")
+        assert stats["name"] == "(missing)"
+        assert stats["vertex_count"] == 0
+
+    @pytest.mark.civil
+    def test_get_active_surface_statistics_unknown_guid_returns_sentinel(
+        self,
+    ) -> None:
+        from bonsai.bim.module.surface.data import SurfaceData
+
+        stats = SurfaceData.get_active_surface_statistics(
+            tool.Ifc.get(), "not-a-real-guid-at-all"
+        )
+        assert stats["name"] == "(missing)"
+
+    @pytest.mark.civil
+    def test_statistics_panel_draw_no_exception(self, tmp_path) -> None:
+        """The panel must not raise when drawn against a valid active surface."""
+        import types
+
+        from bonsai.bim.module.surface.ui import CIVIL_PT_surface_statistics
+
+        points_path = tmp_path / "p.csv"
+        points_path.write_text("0,0,0\n5,0,0\n5,5,0\n0,5,0\n")
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+
+        # Build a minimal fake context so the panel draw() can read props.
+        fake_context = types.SimpleNamespace(
+            scene=bpy.context.scene,
+        )
+
+        # Bonsai panels are bpy_struct subclasses and cannot be instantiated
+        # directly with Panel().  Call draw() as an unbound class method,
+        # passing a minimal fake layout sink as ``self`` so the layout calls
+        # do not raise.  This is the pattern used in test_feature.py.
+        class _FakeLayout:
+            def box(self):
+                return self
+
+            def column(self, **_kw):
+                return self
+
+            def label(self, **_kw):
+                pass
+
+            def separator(self, **_kw):
+                pass
+
+        fake_self = types.SimpleNamespace(layout=_FakeLayout())
+        # draw() must not raise.
+        CIVIL_PT_surface_statistics.draw(fake_self, fake_context)  # type: ignore[arg-type]
+
+
+class TestCsvColumnRemap:
+    """Tests for ``tool.Surface.load_points_from_csv`` column-remap kwargs.
+
+    These tests do not require Blender and run against raw CSV fixtures on
+    ``tmp_path``. They verify that ``columns`` and ``skip_header_rows``
+    work correctly and that defaults preserve the existing behavior.
+    """
+
+    @pytest.mark.civil
+    def test_default_columns_reads_first_three(self, tmp_path) -> None:
+        path = tmp_path / "default.csv"
+        path.write_text("1.0,2.0,3.0\n4.0,5.0,6.0\n")
+        data = tool_surface.Surface.load_points_from_csv(str(path))
+        assert data.shape == (2, 3)
+        assert data[0, 0] == pytest.approx(1.0)  # X
+        assert data[0, 1] == pytest.approx(2.0)  # Y
+        assert data[0, 2] == pytest.approx(3.0)  # Z
+
+    @pytest.mark.civil
+    def test_columns_remap_swaps_order(self, tmp_path) -> None:
+        """columns=(2, 1, 0) reads original col-2 as output col-0 (X), etc."""
+        path = tmp_path / "remap.csv"
+        # File column order: A, B, C — we request C, B, A → so output is (C, B, A)
+        path.write_text("10.0,20.0,30.0\n40.0,50.0,60.0\n")
+        data = tool_surface.Surface.load_points_from_csv(
+            str(path), columns=(2, 1, 0)
+        )
+        assert data.shape == (2, 3)
+        # Output col 0 = original col 2 = 30.0, 60.0
+        assert data[0, 0] == pytest.approx(30.0)
+        assert data[1, 0] == pytest.approx(60.0)
+        # Output col 2 = original col 0 = 10.0, 40.0
+        assert data[0, 2] == pytest.approx(10.0)
+        assert data[1, 2] == pytest.approx(40.0)
+
+    @pytest.mark.civil
+    def test_skip_header_rows_skips_leading_text(self, tmp_path) -> None:
+        path = tmp_path / "header.csv"
+        path.write_text("X,Y,Z\n0.0,1.0,2.0\n3.0,4.0,5.0\n")
+        data = tool_surface.Surface.load_points_from_csv(
+            str(path), skip_header_rows=1
+        )
+        assert data.shape == (2, 3)
+        assert data[0, 0] == pytest.approx(0.0)
+        assert data[1, 2] == pytest.approx(5.0)
+
+    @pytest.mark.civil
+    def test_skip_header_and_remap_combined(self, tmp_path) -> None:
+        """Combined: skip a header + remap columns."""
+        path = tmp_path / "combined.csv"
+        # Header row + two data rows: file cols are (A, B, C).
+        # We want output (C, B, A) — columns=(2, 1, 0).
+        path.write_text("col_a,col_b,col_c\n1.0,2.0,3.0\n4.0,5.0,6.0\n")
+        data = tool_surface.Surface.load_points_from_csv(
+            str(path), columns=(2, 1, 0), skip_header_rows=1
+        )
+        assert data.shape == (2, 3)
+        assert data[0, 0] == pytest.approx(3.0)  # C
+        assert data[0, 2] == pytest.approx(1.0)  # A
+
+    @pytest.mark.civil
+    def test_extra_columns_file_selects_subset(self, tmp_path) -> None:
+        """File has 5 columns; we only read columns 0, 2, 4."""
+        path = tmp_path / "wide.csv"
+        path.write_text("1.0,2.0,3.0,4.0,5.0\n6.0,7.0,8.0,9.0,10.0\n")
+        data = tool_surface.Surface.load_points_from_csv(
+            str(path), columns=(0, 2, 4)
+        )
+        assert data.shape == (2, 3)
+        assert data[0, 0] == pytest.approx(1.0)
+        assert data[0, 1] == pytest.approx(3.0)
+        assert data[0, 2] == pytest.approx(5.0)
+
+
+class TestCsvColumnRemapOperatorIntegration(NewIfc4X3):
+    """Integration tests verifying that ``CIVIL_OT_surface_create_from_points``
+    threads the ``csv_column_map`` and ``csv_skip_header_rows`` props into
+    ``tool.Surface.load_points_from_csv``.
+    """
+
+    @pytest.mark.civil
+    def test_operator_uses_column_map_from_props(self, tmp_path) -> None:
+        """The operator subtracts 1 from the 1-indexed props before calling
+        the tool method; so props=(3,2,1) → tool columns=(2,1,0).
+
+        File column order is (Z, Y, X) — we use props=(3,2,1) to remap so
+        that output col-0 (X) = file col-2, col-1 (Y) = file col-1, col-2
+        (Z) = file col-0.  The three XY footprint points must be non-collinear
+        so Qhull can triangulate: (0,0), (5,0), (0,5).
+        """
+        path = tmp_path / "remap_op.csv"
+        # file col order: Z,   Y,   X
+        #   row 0:        10,  0.0, 0.0   → X=0.0  Y=0.0  Z=10
+        #   row 1:        20,  0.0, 5.0   → X=5.0  Y=0.0  Z=20
+        #   row 2:        15,  5.0, 0.0   → X=0.0  Y=5.0  Z=15
+        path.write_text("10.0,0.0,0.0\n20.0,0.0,5.0\n15.0,5.0,0.0\n")
+
+        props = bpy.context.scene.CivilSurfaceProperties
+        props.new_surface_name = "Remap Test"
+        props.csv_column_map = (3, 2, 1)  # 1-indexed: X=col3, Y=col2, Z=col1
+        props.csv_skip_header_rows = 0
+
+        result = bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        assert result == {"FINISHED"}
+
+        # Surface should exist.
+        ifc_file = tool.Ifc.get()
+        surface_entities = list(ifc_file.by_type("IfcGeographicElement")) + list(
+            ifc_file.by_type("IfcEarthworksFill")
+        )
+        assert len(surface_entities) == 1
+        assert surface_entities[0].Name == "Remap Test"
+
+    @pytest.mark.civil
+    def test_operator_uses_skip_header_rows_from_props(self, tmp_path) -> None:
+        path = tmp_path / "skip_header_op.csv"
+        path.write_text("X,Y,Z\n0.0,0.0,0.0\n5.0,0.0,0.0\n0.0,5.0,0.0\n")
+
+        props = bpy.context.scene.CivilSurfaceProperties
+        props.new_surface_name = "SkipHeader Test"
+        props.csv_column_map = (1, 2, 3)  # default 1-indexed
+        props.csv_skip_header_rows = 1  # skip the "X,Y,Z" header
+
+        result = bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        terrains = ifc_file.by_type("IfcGeographicElement")
+        assert len(terrains) == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 7a — surface dropdown enum tests
+# ---------------------------------------------------------------------------
+
+
+class TestSurfaceDropdownEnumItems(NewIfc4X3):
+    """Tests for :meth:`tool.Surface.iter_surfaces` and
+    :meth:`tool.Surface.iter_proposed_surfaces`.
+
+    These methods are the items-source callbacks for the earthwork
+    inputs panel dropdowns (spec §5.3 / §11 Rule 7).
+    """
+
+    def _author_terrain(self, tmp_path, name: str = "Test Terrain") -> str:
+        """Author a minimal terrain and return its GUID."""
+        path = tmp_path / f"{name}.csv"
+        path.write_text(
+            "0.0,0.0,100.0\n10.0,0.0,105.0\n10.0,10.0,110.0\n"
+        )
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = name
+        bpy.context.scene.CivilSurfaceProperties.new_surface_kind = "existing"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        return bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+    def _author_proposed(self, tmp_path, name: str = "Test Proposed") -> str:
+        """Author a minimal proposed surface and return its GUID."""
+        path = tmp_path / f"{name}.csv"
+        path.write_text(
+            "0.0,0.0,95.0\n10.0,0.0,98.0\n10.0,10.0,100.0\n"
+        )
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = name
+        bpy.context.scene.CivilSurfaceProperties.new_surface_kind = "proposed_site"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(path)
+        )
+        return bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+    @pytest.mark.civil
+    def test_iter_surfaces_returns_triple_tuples(self, tmp_path) -> None:
+        """iter_surfaces must yield ``(guid, name, description)`` triples
+        for every terrain surface in the file."""
+        guid = self._author_terrain(tmp_path, "Triple Test")
+        ifc_file = tool.Ifc.get()
+
+        results = list(tool_surface.Surface.iter_surfaces(ifc_file))
+
+        assert len(results) == 1
+        identifier, name, description = results[0]
+        assert identifier == guid
+        assert name == "Triple Test"
+        # description must be a non-empty string
+        assert isinstance(description, str)
+        assert len(description) > 0
+
+    @pytest.mark.civil
+    def test_iter_surfaces_description_format(self, tmp_path) -> None:
+        """The description string must match the spec §11 Rule 7 format:
+        ``"{N} triangles, Z={z_min:.1f}-{z_max:.1f}m"``
+        (plain ASCII hyphen, not en-dash)."""
+        self._author_terrain(tmp_path, "Format Test")
+        ifc_file = tool.Ifc.get()
+
+        results = list(tool_surface.Surface.iter_surfaces(ifc_file))
+        assert len(results) == 1
+        _, _, description = results[0]
+
+        # Must contain "triangles" and "Z=" and a plain ASCII hyphen.
+        assert "triangles" in description
+        assert "Z=" in description
+        # Plain ASCII hyphen check — en-dash (–) must NOT appear.
+        assert "–" not in description, (
+            "description must use ASCII hyphen, not en-dash"
+        )
+        assert "-" in description, "description must contain a hyphen separator"
+        assert description.endswith("m"), "description must end with 'm'"
+
+    @pytest.mark.civil
+    def test_iter_proposed_surfaces_returns_proposed(self, tmp_path) -> None:
+        """iter_proposed_surfaces yields proposed surfaces, not terrain."""
+        guid = self._author_proposed(tmp_path, "Proposed Test")
+        ifc_file = tool.Ifc.get()
+
+        results = list(tool_surface.Surface.iter_proposed_surfaces(ifc_file))
+
+        guids = [r[0] for r in results]
+        assert guid in guids
+        # Terrain surfaces must NOT appear in proposed iterator.
+        terrain_guids = [
+            e.GlobalId
+            for e in ifc_file.by_type("IfcGeographicElement")
+            if getattr(e, "PredefinedType", None) == "TERRAIN"
+        ]
+        for tg in terrain_guids:
+            assert tg not in guids, (
+                "iter_proposed_surfaces must not yield terrain GUIDs"
+            )
+
+    @pytest.mark.civil
+    def test_iter_surfaces_empty_file(self) -> None:
+        """iter_surfaces on an empty file (no terrain) must return an
+        empty iterator without raising."""
+        ifc_file = tool.Ifc.get()
+        results = list(tool_surface.Surface.iter_surfaces(ifc_file))
+        assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 7a — Add Civil Element parallel menu (spec §4)
+# ---------------------------------------------------------------------------
+
+
+class TestCivilAddMenu(NewIfc4X3):
+    """Tests for :class:`CIVIL_MT_add_element` and the panel integration.
+
+    The menu is the Phase 7a "parallel Add Civil Element" entry point
+    (spec §4, strategy (c)).  It bypasses Bonsai's root Add Element dispatch
+    which cannot support Pset-based predicates, and instead lists each top-level
+    civil authoring operator directly.
+
+    Per spec §3.8: operator-layer tests for Phase 7a live in test/tool/ while
+    the test/bim/module/surface conftest issue is unresolved upstream.
+    """
+
+    @pytest.mark.civil
+    def test_menu_registered(self) -> None:
+        """CIVIL_MT_add_element must appear in bpy.types after module
+        registration."""
+        assert hasattr(bpy.types, "CIVIL_MT_add_element"), (
+            "CIVIL_MT_add_element not registered — check surface/__init__.py classes tuple"
+        )
+
+    @pytest.mark.civil
+    def test_menu_bl_idname(self) -> None:
+        """bl_idname must be 'CIVIL_MT_add_element' per CIVIL_MT_* naming rule."""
+        menu_cls = bpy.types.CIVIL_MT_add_element
+        assert menu_cls.bl_idname == "CIVIL_MT_add_element"
+
+    @pytest.mark.civil
+    def test_menu_draw_no_exception(self) -> None:
+        """draw() must not raise when called with a fake context + layout.
+
+        The menu references operators from three modules (surface, grading,
+        earthwork).  A draw-path exception here signals a broken operator
+        bl_idname reference.
+        """
+        import types
+
+        from bonsai.bim.module.surface.ui import CIVIL_MT_add_element
+
+        fake_context = types.SimpleNamespace(scene=bpy.context.scene)
+
+        class _FakeLayout:
+            """Absorbs all layout calls silently."""
+
+            def label(self, **_kw):
+                return self
+
+            def operator(self, bl_idname: str, **_kw):
+                return types.SimpleNamespace()
+
+            def separator(self, **_kw):
+                return self
+
+            def menu(self, bl_idname: str, **_kw):
+                return self
+
+        fake_self = types.SimpleNamespace(layout=_FakeLayout())
+        # draw() must complete without raising.
+        CIVIL_MT_add_element.draw(fake_self, fake_context)  # type: ignore[arg-type]
+
+    @pytest.mark.civil
+    def test_menu_button_in_surface_list_panel(self) -> None:
+        """CIVIL_PT_surface_list.draw() must call layout.menu('CIVIL_MT_add_element').
+
+        This confirms the panel wires up the Add Civil Element button so the
+        menu is discoverable from the main civil panel surface.
+        """
+        import types
+
+        from bonsai.bim.module.surface.ui import CIVIL_PT_surface_list
+
+        fake_context = types.SimpleNamespace(scene=bpy.context.scene)
+
+        menu_calls: list[str] = []
+
+        class _TrackingLayout:
+            def menu(self, bl_idname: str, **_kw):
+                menu_calls.append(bl_idname)
+                return self
+
+            def label(self, **_kw):
+                return self
+
+            def separator(self, **_kw):
+                return self
+
+            def template_list(self, *_a, **_kw):
+                return self
+
+            def column(self, **_kw):
+                return self
+
+            def row(self, **_kw):
+                return self
+
+        fake_self = types.SimpleNamespace(layout=_TrackingLayout())
+        CIVIL_PT_surface_list.draw(fake_self, fake_context)  # type: ignore[arg-type]
+
+        assert "CIVIL_MT_add_element" in menu_calls, (
+            "CIVIL_PT_surface_list.draw() must call layout.menu('CIVIL_MT_add_element')"
+        )
+
+    @pytest.mark.civil
+    def test_dispatch_terrain_create(self, tmp_path) -> None:
+        """Invoking civil.surface_create_from_points headless (the terrain
+        entry in the Add Civil Element menu) authors an IfcGeographicElement.
+
+        This is the spec §4 table row:
+        IfcGeographicElement[TERRAIN] → civil.surface_create_from_points
+        """
+        points_path = tmp_path / "menu_terrain.csv"
+        points_path.write_text("0,0,0\n10,0,0\n10,10,0\n0,10,0\n")
+        props = bpy.context.scene.CivilSurfaceProperties
+        props.new_surface_name = "Menu Terrain"
+        props.new_surface_kind = "existing"
+
+        result = bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        terrains = ifc_file.by_type("IfcGeographicElement")
+        assert any(t.Name == "Menu Terrain" for t in terrains), (
+            "Terrain surface not found after dispatching via surface_create_from_points"
+        )
+
+    @pytest.mark.civil
+    def test_dispatch_feature_line_create(self, tmp_path) -> None:
+        """Invoking civil.feature_line_create headless (the Feature Line
+        entry in the Add Civil Element menu) authors an IfcAlignment with
+        Pset_SaikeiFeatureLineCommon.
+
+        This is the spec §4 table row:
+        IfcAlignment (feature-line variant) → civil.feature_line_create
+        """
+        perimeter_path = tmp_path / "menu_fl.csv"
+        # Four-corner rectangle: must form a non-collinear polygon.
+        perimeter_path.write_text(
+            "0,0,100\n10,0,100\n10,10,100\n0,10,100\n"
+        )
+        props = bpy.context.scene.CivilGradingProperties
+        props.new_feature_line_name = "Menu Feature Line"
+
+        result = bpy.ops.civil.feature_line_create(
+            "EXEC_DEFAULT",
+            csv_filepath=str(perimeter_path),
+            closed=True,
+        )
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        alignments = ifc_file.by_type("IfcAlignment")
+        assert len(alignments) >= 1, "No IfcAlignment authored by feature_line_create"
+        names = [a.Name for a in alignments]
+        assert "Menu Feature Line" in names, (
+            f"Expected 'Menu Feature Line' in alignments, got {names}"
+        )
+
+    @pytest.mark.civil
+    def test_dispatch_grading_group_create(self, tmp_path) -> None:
+        """Invoking civil.grading_create_group headless (the Grading Group
+        entry in the Add Civil Element menu) authors an IfcGroup[GradingGroup].
+
+        This is the spec §4 table row:
+        IfcGroup[ObjectType='GradingGroup'] → civil.grading_create_group
+        """
+        # Author a terrain first so the group has a valid target surface.
+        points_path = tmp_path / "terrain_for_group.csv"
+        points_path.write_text("0,0,0\n20,0,0\n20,20,0\n0,20,0\n")
+        bpy.context.scene.CivilSurfaceProperties.new_surface_name = "Group Terrain"
+        bpy.context.scene.CivilSurfaceProperties.new_surface_kind = "existing"
+        bpy.ops.civil.surface_create_from_points(
+            "EXEC_DEFAULT", csv_filepath=str(points_path)
+        )
+        terrain_guid = bpy.context.scene.CivilSurfaceProperties.active_surface_guid
+
+        result = bpy.ops.civil.grading_create_group(
+            "EXEC_DEFAULT",
+            name="Menu Grading Group",
+            target_surface_guid=terrain_guid,
+            interior_fill="none",
+        )
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        groups = [
+            g for g in ifc_file.by_type("IfcGroup")
+            if getattr(g, "ObjectType", None) == "GradingGroup"
+        ]
+        assert any(g.Name == "Menu Grading Group" for g in groups), (
+            "Grading group not found after dispatching via grading_create_group"
+        )
+
+    @pytest.mark.civil
+    def test_dispatch_grading_criteria_create(self) -> None:
+        """Invoking civil.grading_create_criteria headless (the Grading
+        Criteria entry in the Add Civil Element menu) authors an
+        IfcPropertySetTemplate.
+
+        There is no spec §4 table row for criteria (it is an authoring
+        convenience, not an IFC element entry point), but the menu includes
+        it as a top-level action so users can pre-build criteria before
+        associating with groups.
+        """
+        result = bpy.ops.civil.grading_create_criteria(
+            "EXEC_DEFAULT",
+            name="Menu 2:1 Cut",
+            target_kind="surface",
+            target_ref="",
+            cut_slope=2.0,
+            fill_slope=3.0,
+        )
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        templates = ifc_file.by_type("IfcPropertySetTemplate")
+        names = [t.Name for t in templates]
+        # The criteria template is named by the grading API; check one exists.
+        assert len(templates) >= 1, (
+            f"No IfcPropertySetTemplate after grading_create_criteria; names={names}"
+        )

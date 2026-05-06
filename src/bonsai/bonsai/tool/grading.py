@@ -52,6 +52,9 @@ from typing import TYPE_CHECKING, Literal, Optional, Union
 
 import bpy
 import ifcopenshell.api.grading
+import ifcopenshell.api.group
+import ifcopenshell.api.pset_template
+import ifcopenshell.api.root
 import ifcopenshell.api.surface
 import ifcopenshell.guid
 import numpy as np
@@ -127,6 +130,17 @@ class SaikeiSlopeProjectionError(SaikeiGradingError):
       Phase 5 MVP doesn't auto-resolve, raises instead).
     - ``criteria.target_kind == "surface"`` but the target surface has
       no triangulation at the projection sample XY.
+    """
+
+
+class BlockedByDependentError(SaikeiGradingError):
+    """Raised when an operation is refused because another entity
+    depends on its target (e.g., deleting a criteria template that
+    is still referenced by a grading object, or deleting a feature
+    line that is still assigned to a grading group as its source FL).
+    The operator layer catches this, reports it via
+    ``self.report({"ERROR"}, ...)``, and returns ``{"CANCELLED"}``
+    per spec §3.3.
     """
 
 
@@ -1003,9 +1017,10 @@ class Grading:
         The Phase 2 API ``create_grading_criteria_template`` is a
         singleton-by-shape — calling it repeatedly returns the same
         template entity rather than creating duplicates, so the wrapper
-        is idempotent. The :class:`GradingCriteria` dataclass tracks the
-        template's step id but not its GlobalId (the singleton's
-        identity is structural, not GUID-based).
+        is idempotent. After obtaining the template, :attr:`GradingCriteria.guid`
+        is updated to match the template's ``GlobalId`` so that the dataclass
+        identifier and the IFC entity identifier are always consistent (the
+        same convention as :meth:`author_feature_line`).
         """
         try:
             template = ifcopenshell.api.grading.create_grading_criteria_template(
@@ -1016,6 +1031,7 @@ class Grading:
                 f"Phase 2 create_grading_criteria_template failed: {exc}"
             ) from exc
         criteria.ifc_template_id = template.id()
+        criteria.guid = template.GlobalId
         return template
 
     @classmethod
@@ -2026,3 +2042,265 @@ class Grading:
         merged_points = np.concatenate(merged_points_list, axis=0)
         merged_triangles = np.concatenate(merged_triangles_list, axis=0)
         return merged_points, merged_triangles
+
+    # ------------------------------------------------------------------
+    # Phase 7a delete / remove helpers (spec §5.2)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def is_feature_line_in_use(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        feature_line_guid: str,
+    ) -> tuple[bool, Optional[str]]:
+        """Return ``(in_use, owning_group_name)`` for ``feature_line_guid``.
+
+        A feature line is "in use" when it is a member of at least one
+        :class:`IfcGroup` with ``ObjectType="GradingGroup"`` via an
+        :class:`IfcRelAssignsToGroup` relationship.
+
+        This checks the canonical source of truth — group membership via
+        ``IfcRelAssignsToGroup`` — rather than the stale
+        ``Pset_SaikeiFeatureLineCommon.GradingGroupGuid`` field, which is
+        only written at feature-line create time and is never updated when
+        the feature line is added to a group by
+        :func:`ifcopenshell.api.grading.add_slope_fill_to_group`.
+
+        :param ifc_file: the active IFC file.
+        :param feature_line_guid: GlobalId of the feature line to check.
+        :returns: ``(True, group_name)`` if in use; ``(False, None)``
+            otherwise.
+        """
+        alignment = next(
+            (
+                e
+                for e in ifc_file.by_type("IfcAlignment")
+                if e.GlobalId == feature_line_guid
+            ),
+            None,
+        )
+        if alignment is None:
+            return False, None
+
+        for rel in getattr(alignment, "HasAssignments", None) or []:
+            if not rel.is_a("IfcRelAssignsToGroup"):
+                continue
+            relating_group = getattr(rel, "RelatingGroup", None)
+            if relating_group is None:
+                continue
+            if getattr(relating_group, "ObjectType", None) == "GradingGroup":
+                return True, relating_group.Name or "<unnamed>"
+
+        return False, None
+
+    @classmethod
+    def delete_feature_line(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        feature_line_guid: str,
+    ) -> None:
+        """Delete a feature line: removes the :class:`IfcAlignment` entity,
+        its ``Pset_SaikeiFeatureLineCommon``, unlinks the Blender curve,
+        and evicts the entry from the registry.
+
+        :raises BlockedByDependentError: when the feature line is currently
+            assigned to a grading group as its source FL — deleting it
+            would orphan the group's slope projection.
+        :raises SaikeiGradingError: when no :class:`IfcAlignment` with
+            ``feature_line_guid`` exists in the file.
+        """
+        in_use, group_name = cls.is_feature_line_in_use(ifc_file, feature_line_guid)
+        if in_use:
+            raise BlockedByDependentError(
+                f"Feature line in use by grading group {group_name!r}"
+            )
+
+        alignment = next(
+            (
+                e
+                for e in ifc_file.by_type("IfcAlignment")
+                if e.GlobalId == feature_line_guid
+            ),
+            None,
+        )
+        if alignment is None:
+            raise SaikeiGradingError(
+                f"no IfcAlignment with GlobalId {feature_line_guid!r} in this file"
+            )
+
+        # Unlink the Blender curve object before the IFC entity is removed.
+        # IfcStore.unlink_element accepts exactly one argument; passing the
+        # element lets it evict the id_map entry and purge IFC data from the
+        # linked Blender object automatically.
+        obj = tool.Ifc.get_object(alignment)
+        tool.Ifc.unlink(element=alignment)
+        if obj is not None:
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+        ifcopenshell.api.root.remove_product(ifc_file, product=alignment)
+
+        # Evict from in-memory registry.
+        cls.invalidate(ifc_file, feature_line_guid)
+
+    @classmethod
+    def criteria_dependents(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        criteria_guid: str,
+    ) -> list[str]:
+        """Return the names of grading groups that have this criteria bound.
+
+        A criteria is "in use" when at least one :class:`IfcGroup` with
+        ``ObjectType="GradingGroup"`` has a bound
+        :class:`IfcPropertySet` instance linked to the criteria template
+        via :class:`IfcRelDefinesByTemplate` — regardless of whether the
+        group currently has any slope-fill members.
+
+        The group-binding is the canonical "in use" state:
+        :func:`ifcopenshell.api.grading.assign_grading_criteria` authors
+        the ``IfcRelDefinesByTemplate`` link before any slope fills are
+        added, so checking for slope-fill members would miss a freshly
+        assigned but empty group and allow a delete that orphans the
+        group's bound :class:`IfcPropertySet`.
+
+        :param ifc_file: the active IFC file.
+        :param criteria_guid: GlobalId of the criteria
+            (:class:`IfcPropertySetTemplate`) to check.
+        :returns: list of unique group names that have this criteria bound
+            (may be empty if no groups are bound).
+        """
+        # Locate the IfcPropertySetTemplate for this criteria.
+        criteria_template = next(
+            (
+                t
+                for t in ifc_file.by_type("IfcPropertySetTemplate")
+                if t.GlobalId == criteria_guid
+            ),
+            None,
+        )
+        if criteria_template is None:
+            return []
+
+        dependent_group_names: list[str] = []
+        seen_group_ids: set[int] = set()
+
+        for rel_defines in ifc_file.by_type("IfcRelDefinesByTemplate"):
+            if rel_defines.RelatingTemplate.id() != criteria_template.id():
+                continue
+            for defined_pset in rel_defines.RelatedPropertySets or []:
+                # Walk forward from the pset instance to every owning
+                # IfcGroup[GradingGroup] via IfcRelDefinesByProperties.
+                for rel_by_props in ifc_file.by_type("IfcRelDefinesByProperties"):
+                    if rel_by_props.RelatingPropertyDefinition.id() != defined_pset.id():
+                        continue
+                    for product in rel_by_props.RelatedObjects or []:
+                        if (
+                            product.is_a("IfcGroup")
+                            and getattr(product, "ObjectType", None) == "GradingGroup"
+                            and product.id() not in seen_group_ids
+                        ):
+                            seen_group_ids.add(product.id())
+                            dependent_group_names.append(
+                                product.Name or "<unnamed>"
+                            )
+
+        return dependent_group_names
+
+    @classmethod
+    def delete_criteria(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        criteria_guid: str,
+    ) -> None:
+        """Delete a grading criteria template.
+
+        :raises BlockedByDependentError: when one or more grading groups have
+            this criteria bound via ``IfcRelDefinesByTemplate`` (a bound group
+            with no slope fills still counts as a dependent).
+        :raises SaikeiGradingError: when no criteria with ``criteria_guid``
+            exists.
+        """
+        dependents = cls.criteria_dependents(ifc_file, criteria_guid)
+        if dependents:
+            count = len(dependents)
+            raise BlockedByDependentError(
+                f"Criteria in use by {count} grading group(s); "
+                "unassign the criteria first."
+            )
+
+        criteria_template = next(
+            (
+                t
+                for t in ifc_file.by_type("IfcPropertySetTemplate")
+                if t.GlobalId == criteria_guid
+            ),
+            None,
+        )
+        if criteria_template is None:
+            raise SaikeiGradingError(
+                f"no criteria (IfcPropertySetTemplate) with GlobalId "
+                f"{criteria_guid!r} in this file"
+            )
+
+        ifcopenshell.api.pset_template.remove_pset_template(
+            ifc_file, pset_template=criteria_template
+        )
+        cls.invalidate(ifc_file, criteria_guid)
+
+    @classmethod
+    def remove_object_from_group(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        object_guid: str,
+        group_guid: str,
+    ) -> None:
+        """Break the :class:`IfcRelAssignsToGroup` membership for a grading
+        object (slope fill) without destroying the entity itself.
+
+        Per spec §11 vocabulary: **Remove** severs a relationship; **Delete**
+        destroys an entity. This method only removes the group membership.
+        The ``IfcEarthworksFill[SLOPEFILL]`` entity remains in the file.
+
+        :raises SaikeiGradingError: when the object or group cannot be found.
+        """
+        ifc_product = next(
+            (
+                e
+                for e in ifc_file.by_type("IfcEarthworksFill")
+                if e.GlobalId == object_guid
+            ),
+            None,
+        )
+        if ifc_product is None:
+            raise SaikeiGradingError(
+                f"no IfcEarthworksFill with GlobalId {object_guid!r} in this file"
+            )
+
+        ifc_group = next(
+            (
+                g
+                for g in ifc_file.by_type("IfcGroup")
+                if g.GlobalId == group_guid
+                and getattr(g, "ObjectType", None) == "GradingGroup"
+            ),
+            None,
+        )
+        if ifc_group is None:
+            raise SaikeiGradingError(
+                f"no IfcGroup[GradingGroup] with GlobalId {group_guid!r} in this file"
+            )
+
+        ifcopenshell.api.group.unassign_group(
+            ifc_file, products=[ifc_product], group=ifc_group
+        )
+
+        # Evict the grading object from the in-memory registry so the next
+        # rebuild doesn't include stale geometry for the removed member.
+        cls.invalidate(ifc_file, object_guid)
+
+        # Also refresh the in-memory GradingGroup dataclass if cached.
+        cached_group = cls._registry.get((id(ifc_file), group_guid))
+        if cached_group is not None and hasattr(cached_group, "members"):
+            cached_group.members = [
+                m for m in cached_group.members if m.guid != object_guid
+            ]

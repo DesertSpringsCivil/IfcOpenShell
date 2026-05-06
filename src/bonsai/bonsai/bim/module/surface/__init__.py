@@ -59,9 +59,14 @@ classes: tuple[type, ...] = (
     operator.CIVIL_OT_surface_retriangulate,
     operator.CIVIL_OT_surface_set_boundary,
     operator.CIVIL_OT_surface_add_breakline,
+    operator.CIVIL_OT_surface_rename,
+    operator.CIVIL_OT_surface_delete,
+    operator.CIVIL_OT_surface_select,
+    ui.CIVIL_MT_add_element,
     ui.CIVIL_PT_surface_creation,
     ui.CIVIL_PT_surface_list,
     ui.CIVIL_PT_surface_active,
+    ui.CIVIL_PT_surface_statistics,
     ui.CIVIL_PT_surface_display,
 )
 

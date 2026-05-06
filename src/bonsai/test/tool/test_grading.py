@@ -3178,3 +3178,453 @@ class TestGradingBSIIntegration(NewIfc4X3):
         assert "22-07 31 13" in codes
         # Composite subgrade + slope fill share Fill code 22-07 31 23.
         assert "22-07 31 23" in codes
+
+
+# ---------------------------------------------------------------------------
+# Phase 7a — feature-line delete, grading-object remove, criteria delete
+# ---------------------------------------------------------------------------
+
+
+def _author_minimal_grading_scenario(ifc_file):
+    """Build a minimal grading scenario (terrain, feature line, criteria,
+    group with one slope-fill grading object) for Phase 7a delete/remove
+    tests.
+
+    Returns ``(feature_line, criteria, group, grading_object)`` dataclasses.
+    """
+    import bonsai.core.grading as core_grading
+
+    target_points = np.array(
+        [
+            (-50.0, -50.0, 95.0),
+            (50.0, -50.0, 95.0),
+            (50.0, 50.0, 95.0),
+            (-50.0, 50.0, 95.0),
+        ]
+    )
+    target_surface = tool_surface.Surface.build_tin_from_points(
+        "target", target_points
+    )
+    tool_surface.Surface.author_ifc_host(ifc_file, target_surface)
+    tool_surface.Surface.register(ifc_file, target_surface)
+
+    feature_line = core_grading.create_feature_line(
+        tool.Ifc,
+        tool_grading.Grading,
+        name="test-fl",
+        vertices=[
+            (0.0, 0.0, 100.0),
+            (10.0, 0.0, 100.0),
+            (10.0, 10.0, 100.0),
+            (0.0, 10.0, 100.0),
+        ],
+        closed=True,
+    )
+    criteria = core_grading.create_grading_criteria(
+        tool.Ifc,
+        tool_grading.Grading,
+        name="test-criteria",
+        target_kind="surface",
+        target_ref=target_surface.guid,
+        cut_slope=2.0,
+        fill_slope=3.0,
+    )
+    group = core_grading.create_grading_group(
+        tool.Ifc,
+        tool_surface.Surface,
+        tool_grading.Grading,
+        name="test-group",
+        target_surface_guid=target_surface.guid,
+        interior_fill="none",
+    )
+    grading_object = core_grading.add_grading_object(
+        tool.Ifc,
+        tool_surface.Surface,
+        tool_grading.Grading,
+        group_guid=group.guid,
+        feature_line_guid=feature_line.guid,
+        criteria_guid=criteria.guid,
+    )
+    return feature_line, criteria, group, grading_object
+
+
+class TestFeatureLineDeleteOperator(NewIfc4X3):
+    """Phase 7a: CIVIL_OT_feature_line_delete operator tests."""
+
+    @pytest.mark.civil
+    def test_delete_removes_ifc_entity(self) -> None:
+        """Happy path: operator deletes the IfcAlignment entity."""
+        ifc_file = tool.Ifc.get()
+        feature_line = tool_grading.FeatureLine(
+            name="standalone-fl",
+            vertices=[(0.0, 0.0, 100.0), (5.0, 0.0, 100.0)],
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        tool_grading.Grading.register(ifc_file, feature_line)
+        alignment_id = feature_line.ifc_alignment_id
+
+        bpy.ops.civil.feature_line_delete(
+            "EXEC_DEFAULT",
+            feature_line_guid=feature_line.guid,
+        )
+
+        # by_id raises RuntimeError when the entity no longer exists; verify
+        # deletion by confirming the GUID is absent from all IfcAlignment entities.
+        remaining_guids = {e.GlobalId for e in ifc_file.by_type("IfcAlignment")}
+        assert feature_line.guid not in remaining_guids
+
+    @pytest.mark.civil
+    def test_delete_unlinks_blender_curve(self) -> None:
+        """Deleting a feature line removes the linked Blender curve object."""
+        ifc_file = tool.Ifc.get()
+        feature_line = tool_grading.FeatureLine(
+            name="curve-fl",
+            vertices=[(0.0, 0.0, 100.0), (5.0, 0.0, 100.0)],
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        tool_grading.Grading.register(ifc_file, feature_line)
+        tool_grading.Grading.create_blender_curve(ifc_file, feature_line)
+
+        alignment = ifc_file.by_id(feature_line.ifc_alignment_id)
+        obj = tool.Ifc.get_object(alignment)
+        assert obj is not None, "Blender curve should exist before delete"
+        # Capture the name before deletion — after bpy.data.objects.remove the
+        # Python reference becomes invalid (ReferenceError on attribute access).
+        obj_name = obj.name
+
+        bpy.ops.civil.feature_line_delete(
+            "EXEC_DEFAULT",
+            feature_line_guid=feature_line.guid,
+        )
+
+        # Object should have been removed from the scene.
+        assert obj_name not in bpy.data.objects
+
+    @pytest.mark.civil
+    def test_delete_evicts_from_registry(self) -> None:
+        """Deleting a feature line removes it from the in-memory registry."""
+        ifc_file = tool.Ifc.get()
+        feature_line = tool_grading.FeatureLine(
+            name="reg-fl",
+            vertices=[(0.0, 0.0, 100.0), (5.0, 0.0, 100.0)],
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        tool_grading.Grading.register(ifc_file, feature_line)
+        key = (id(ifc_file), feature_line.guid)
+        assert key in tool_grading.Grading._registry
+
+        bpy.ops.civil.feature_line_delete(
+            "EXEC_DEFAULT",
+            feature_line_guid=feature_line.guid,
+        )
+
+        assert key not in tool_grading.Grading._registry
+
+    @pytest.mark.civil
+    def test_delete_blocked_when_in_use_by_group(self) -> None:
+        """Delete is refused when the feature line is assigned to a group."""
+        ifc_file = tool.Ifc.get()
+        feature_line, criteria, group, _go = _author_minimal_grading_scenario(
+            ifc_file
+        )
+
+        # The feature line is now the source FL of the grading group.
+        # Deletion must be blocked.
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.feature_line_delete(
+                "EXEC_DEFAULT",
+                feature_line_guid=feature_line.guid,
+            )
+
+        # Postcondition: entity still present.
+        assert ifc_file.by_id(feature_line.ifc_alignment_id) is not None
+
+    @pytest.mark.civil
+    def test_delete_bogus_guid_raises(self) -> None:
+        """Attempting to delete a non-existent GUID raises RuntimeError."""
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.feature_line_delete(
+                "EXEC_DEFAULT",
+                feature_line_guid="BOGUS_GUID_THAT_DOES_NOT_EXIST",
+            )
+
+
+class TestGradingRemoveObjectOperator(NewIfc4X3):
+    """Phase 7a: CIVIL_OT_grading_remove_object operator tests."""
+
+    @pytest.mark.civil
+    @pytest.mark.civil
+    def test_remove_breaks_group_membership(self) -> None:
+        """Remove severs the IfcRelAssignsToGroup link for the slope fill."""
+        ifc_file = tool.Ifc.get()
+        _fl, _crit, group, grading_object = _author_minimal_grading_scenario(
+            ifc_file
+        )
+
+        # Locate the IfcEarthworksFill[SLOPEFILL] entity.
+        slope_fill_entity = next(
+            f
+            for f in ifc_file.by_type("IfcEarthworksFill")
+            if f.PredefinedType == "SLOPEFILL"
+        )
+        object_guid = slope_fill_entity.GlobalId
+
+        bpy.ops.civil.grading_remove_object(
+            "EXEC_DEFAULT",
+            object_guid=object_guid,
+            group_guid=group.guid,
+        )
+
+        ifc_group = ifc_file.by_id(group.ifc_group_id)
+        grouped_objects = []
+        for rel in getattr(ifc_group, "IsGroupedBy", None) or []:
+            grouped_objects.extend(rel.RelatedObjects or [])
+        # The slope fill must no longer be a member of the group.
+        member_guids = {o.GlobalId for o in grouped_objects}
+        assert object_guid not in member_guids
+
+    @pytest.mark.civil
+    def test_remove_does_not_destroy_entity(self) -> None:
+        """Remove breaks membership but the IfcEarthworksFill entity persists."""
+        ifc_file = tool.Ifc.get()
+        _fl, _crit, group, _go = _author_minimal_grading_scenario(ifc_file)
+
+        slope_fill_entity = next(
+            f
+            for f in ifc_file.by_type("IfcEarthworksFill")
+            if f.PredefinedType == "SLOPEFILL"
+        )
+        object_guid = slope_fill_entity.GlobalId
+        slope_fill_id = slope_fill_entity.id()
+
+        bpy.ops.civil.grading_remove_object(
+            "EXEC_DEFAULT",
+            object_guid=object_guid,
+            group_guid=group.guid,
+        )
+
+        # Entity still in the file.
+        assert ifc_file.by_id(slope_fill_id) is not None
+        assert ifc_file.by_id(slope_fill_id).GlobalId == object_guid
+
+    @pytest.mark.civil
+    def test_remove_triggers_rebuild(self) -> None:
+        """After remove, the core orchestration attempts a group rebuild.
+
+        This is verified indirectly: the GradingData cache is invalidated
+        (is_loaded set to False), which is the signal that downstream
+        consumers must re-query IFC.
+        """
+        from bonsai.bim.module.grading.data import GradingData
+
+        ifc_file = tool.Ifc.get()
+        _fl, _crit, group, _go = _author_minimal_grading_scenario(ifc_file)
+
+        slope_fill_entity = next(
+            f
+            for f in ifc_file.by_type("IfcEarthworksFill")
+            if f.PredefinedType == "SLOPEFILL"
+        )
+        GradingData.is_loaded = True  # pre-mark as loaded
+
+        bpy.ops.civil.grading_remove_object(
+            "EXEC_DEFAULT",
+            object_guid=slope_fill_entity.GlobalId,
+            group_guid=group.guid,
+        )
+
+        assert GradingData.is_loaded is False
+
+    @pytest.mark.civil
+    def test_remove_bogus_guid_raises(self) -> None:
+        """Attempting to remove a non-existent GUID raises RuntimeError."""
+        ifc_file = tool.Ifc.get()
+        _fl, _crit, group, _go = _author_minimal_grading_scenario(ifc_file)
+
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.grading_remove_object(
+                "EXEC_DEFAULT",
+                object_guid="BOGUS_GUID_NO_SUCH_OBJECT",
+                group_guid=group.guid,
+            )
+
+
+class TestGradingDeleteCriteriaOperator(NewIfc4X3):
+    """Phase 7a: CIVIL_OT_grading_delete_criteria operator tests."""
+
+    @pytest.mark.civil
+    @pytest.mark.civil
+    def test_delete_removes_criteria(self) -> None:
+        """Happy path: criteria template is removed from the IFC file."""
+        import bonsai.core.grading as core_grading
+
+        ifc_file = tool.Ifc.get()
+        criteria = core_grading.create_grading_criteria(
+            tool.Ifc,
+            tool_grading.Grading,
+            name="delete-me",
+            target_kind="distance",
+            target_ref=10.0,
+            cut_slope=2.0,
+            fill_slope=3.0,
+        )
+        # Confirm template exists.
+        template = next(
+            (
+                t
+                for t in ifc_file.by_type("IfcPropertySetTemplate")
+                if t.GlobalId == criteria.guid
+            ),
+            None,
+        )
+        assert template is not None
+
+        bpy.ops.civil.grading_delete_criteria(
+            "EXEC_DEFAULT",
+            criteria_guid=criteria.guid,
+        )
+
+        remaining = [
+            t
+            for t in ifc_file.by_type("IfcPropertySetTemplate")
+            if t.GlobalId == criteria.guid
+        ]
+        assert remaining == []
+
+    @pytest.mark.civil
+    def test_delete_blocked_when_in_use(self) -> None:
+        """Delete is refused when grading objects reference the criteria."""
+        ifc_file = tool.Ifc.get()
+        _fl, criteria, _group, _go = _author_minimal_grading_scenario(ifc_file)
+
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.grading_delete_criteria(
+                "EXEC_DEFAULT",
+                criteria_guid=criteria.guid,
+            )
+
+        # Postcondition: template still in file.
+        template = next(
+            (
+                t
+                for t in ifc_file.by_type("IfcPropertySetTemplate")
+                if t.GlobalId == criteria.guid
+            ),
+            None,
+        )
+        assert template is not None
+
+    @pytest.mark.civil
+    def test_delete_bogus_guid_raises(self) -> None:
+        """Attempting to delete a non-existent GUID raises RuntimeError."""
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.grading_delete_criteria(
+                "EXEC_DEFAULT",
+                criteria_guid="BOGUS_CRITERIA_GUID_XYZ",
+            )
+
+
+class TestGradingHelpers:
+    """Phase 7a: unit tests for tool-layer query helpers."""
+
+    @pytest.mark.civil
+    def test_is_feature_line_in_use_false_when_unassigned(self) -> None:
+        """A standalone feature line (not part of any group) is not in use."""
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            name="standalone",
+            vertices=[(0.0, 0.0, 100.0), (5.0, 0.0, 100.0)],
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        tool_grading.Grading.register(ifc_file, feature_line)
+
+        in_use, group_name = tool_grading.Grading.is_feature_line_in_use(
+            ifc_file, feature_line.guid
+        )
+        assert in_use is False
+        assert group_name is None
+
+    @pytest.mark.civil
+    def test_is_feature_line_in_use_true_when_assigned(self) -> None:
+        """A feature line that is a member of a GradingGroup via
+        IfcRelAssignsToGroup is correctly detected as in use.
+
+        The canonical source of truth is group membership, not the
+        Pset_SaikeiFeatureLineCommon.GradingGroupGuid field (which is only
+        written at create-time and is never updated by add_slope_fill_to_group).
+        """
+        import ifcopenshell.api.grading
+
+        ifc_file = _make_ifc_file_with_site()
+        feature_line = tool_grading.FeatureLine(
+            name="assigned-fl",
+            vertices=[(0.0, 0.0, 100.0), (5.0, 0.0, 100.0)],
+        )
+        tool_grading.Grading.author_feature_line(ifc_file, feature_line)
+        tool_grading.Grading.register(ifc_file, feature_line)
+
+        group = tool_grading.GradingGroup(name="owning-group")
+        tool_grading.Grading.author_group(ifc_file, group)
+        tool_grading.Grading.register(ifc_file, group)
+
+        # Establish the IfcRelAssignsToGroup membership — the same relationship
+        # that add_slope_fill_to_group writes (line 156 of that module) when
+        # feature_line is passed.  We do this at the API level directly to keep
+        # the test isolated from the full slope-projection chain.
+        alignment = ifc_file.by_id(feature_line.ifc_alignment_id)
+        ifc_group = ifc_file.by_id(group.ifc_group_id)
+        ifcopenshell.api.grading.add_member_to_group(ifc_file, ifc_group, alignment)
+
+        in_use, detected_group_name = tool_grading.Grading.is_feature_line_in_use(
+            ifc_file, feature_line.guid
+        )
+        assert in_use is True
+        assert detected_group_name == "owning-group"
+
+    @pytest.mark.civil
+    def test_criteria_dependents_empty_when_no_groups_bound(self) -> None:
+        """criteria_dependents() returns [] when no group has been bound."""
+        ifc_file = _make_ifc_file_with_site()
+        criteria = tool_grading.GradingCriteria(
+            name="dep-criteria",
+            target_kind="distance",
+            target_ref=5.0,
+        )
+        tool_grading.Grading.author_criteria_template(ifc_file, criteria)
+        tool_grading.Grading.register(ifc_file, criteria)
+
+        dependents = tool_grading.Grading.criteria_dependents(
+            ifc_file, criteria.guid
+        )
+        assert dependents == []
+
+    @pytest.mark.civil
+    def test_criteria_dependents_returns_group_names_when_bound(self) -> None:
+        """criteria_dependents() returns group names even when the bound group
+        has no slope-fill members yet.
+
+        assign_grading_criteria writes the IfcRelDefinesByTemplate binding
+        before any slope fills are added, so a freshly-bound but empty group
+        is still a dependent — deleting the criteria would orphan the group's
+        bound IfcPropertySet.
+        """
+        ifc_file = _make_ifc_file_with_site()
+        criteria = tool_grading.GradingCriteria(
+            name="dep-criteria",
+            target_kind="distance",
+            target_ref=5.0,
+        )
+        tool_grading.Grading.author_criteria_template(ifc_file, criteria)
+        tool_grading.Grading.register(ifc_file, criteria)
+
+        group = tool_grading.GradingGroup(name="test-group")
+        tool_grading.Grading.author_group(ifc_file, group)
+        tool_grading.Grading.register(ifc_file, group)
+
+        # Bind the criteria to the group — no slope fills exist yet.
+        tool_grading.Grading.assign_criteria(ifc_file, group, criteria)
+
+        dependents = tool_grading.Grading.criteria_dependents(
+            ifc_file, criteria.guid
+        )
+        assert dependents == ["test-group"]

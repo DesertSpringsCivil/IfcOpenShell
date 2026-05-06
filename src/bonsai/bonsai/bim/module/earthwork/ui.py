@@ -55,8 +55,18 @@ class CIVIL_PT_earthwork_inputs(Panel):
 
         box = layout.box()
         box.label(text="Surfaces:", icon="SURFACE_DATA")
-        box.prop(props, "existing_surface_guid")
-        box.prop(props, "proposed_surface_guid")
+        # Dropdown widgets populate the canonical StringProperty via an
+        # update callback (see prop.py).  The StringProperty remains the
+        # operator's read path per spec §3.4 — do not swap the operator
+        # to read from the EnumProperty.
+        box.prop(props, "existing_surface_enum")
+        box.prop(props, "proposed_surface_enum")
+        # Expose the raw GUID fields collapsed so advanced users and
+        # headless scripts can still paste GUIDs directly.
+        advanced = box.column(align=True)
+        advanced.scale_y = 0.8
+        advanced.prop(props, "existing_surface_guid", text="GUID (existing)")
+        advanced.prop(props, "proposed_surface_guid", text="GUID (proposed)")
 
         box = layout.box()
         box.label(text="Shrink/Swell:", icon="MOD_SOLIDIFY")
@@ -120,7 +130,21 @@ class CIVIL_PT_earthwork_compute(Panel):
         box = layout.box()
         box.label(text="Last Run:", icon="INFO")
         col = box.column(align=True)
-        col.label(text=f"Cut: {props.last_cut_m3:.1f} m³")
-        col.label(text=f"Fill: {props.last_fill_m3:.1f} m³")
-        col.label(text=f"Net: {props.last_net_m3:+.1f} m³")
-        col.label(text=f"Loose Cut: {props.last_loose_cut_m3:.1f} m³")
+        col.label(text=f"Cut: {props.last_cut_m3:.1f} m3")
+        col.label(text=f"Fill: {props.last_fill_m3:.1f} m3")
+        col.label(text=f"Net: {props.last_net_m3:+.1f} m3")
+        col.label(text=f"Loose Cut: {props.last_loose_cut_m3:.1f} m3")
+
+        row = box.row(align=True)
+        row.operator(
+            "civil.earthwork_clear_report",
+            icon="X",
+            text="Clear Report",
+        )
+        row.operator(
+            "civil.earthwork_delete_results",
+            icon="TRASH",
+            text="Delete Results",
+        )
+
+        layout.prop(props, "show_cut_fill_overlay", icon="SHADING_RENDERED")

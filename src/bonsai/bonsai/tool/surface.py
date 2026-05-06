@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Optional, Protocol
+from typing import TYPE_CHECKING, Iterator, Literal, Optional, Protocol
 
 import bpy
 import ifcopenshell.api.surface
@@ -673,35 +673,90 @@ class Surface:
         return polygon
 
     @staticmethod
-    def load_points_from_csv(filepath: str) -> np.ndarray:
+    def load_points_from_csv(
+        filepath: str,
+        columns: tuple[int, int, int] = (0, 1, 2),
+        skip_header_rows: int = 0,
+    ) -> np.ndarray:
         """Load an ``(N, 3)`` XYZ point cloud from a CSV file.
 
-        Accepts comma- or whitespace-separated rows of three floats. Skips
-        blank lines and lines beginning with ``#``. Per Phase 4 MVP, the
-        tool layer owns CSV parsing because :func:`numpy.loadtxt` is
+        Accepts comma- or whitespace-separated rows of floats. Skips blank
+        lines and lines beginning with ``#``. Per Phase 4 MVP, the tool
+        layer owns CSV parsing because :func:`numpy.loadtxt` is
         math-adjacent — the UI operator delegates here rather than parsing
         inline.
 
         :param filepath: absolute path to a ``.csv`` (or ``.txt``,
             ``.xyz``) file.
-        :returns: ``(N, 3)`` float numpy array of XYZ coordinates.
-        :raises SaikeiSurfaceError: if the file cannot be parsed as
-            ``(N, 3)`` floats.
+        :param columns: zero-indexed column positions for (X, Y, Z). Defaults
+            to ``(0, 1, 2)`` which preserves existing behavior. Pass e.g.
+            ``(2, 1, 0)`` to swap X and Z from a file with reversed column
+            order.
+        :param skip_header_rows: number of leading rows to skip before
+            parsing data. Defaults to 0. Stacks with comment-line skipping.
+        :returns: ``(N, 3)`` float numpy array of XYZ coordinates in the
+            order (X, Y, Z) regardless of source column order.
+        :raises SaikeiSurfaceError: if the file cannot be parsed or the
+            selected columns do not resolve to 3 float columns.
         """
+        # --- Pre-validate column count before numpy ----------------------------
+        # When the file exists and its first numeric data row has fewer columns
+        # than required, raise a clear "must have exactly 3 columns" message
+        # rather than the opaque numpy usecols/conversion error.  Non-numeric
+        # rows and missing files are intentionally left to the numpy path so
+        # that "could not parse" errors are generated there.
+        required_column_count = max(columns) + 1
         try:
-            data = np.loadtxt(
-                filepath,
-                comments="#",
-                delimiter=None,  # any whitespace
-                ndmin=2,
-            )
+            with open(filepath, "r") as _probe_fh:
+                _skipped = 0
+                _probe_line: str = ""
+                for _raw_line in _probe_fh:
+                    _stripped = _raw_line.strip()
+                    if not _stripped or _stripped.startswith("#"):
+                        continue
+                    if _skipped < skip_header_rows:
+                        _skipped += 1
+                        continue
+                    _probe_line = _stripped
+                    break
+            if _probe_line:
+                # Try whitespace split first, then comma.
+                _parts = _probe_line.split()
+                if len(_parts) == 1:
+                    _parts = _probe_line.split(",")
+                # Only raise the column-count error when every part looks
+                # numeric — non-numeric data (header text, garbage lines)
+                # should fall through to the numpy "could not parse" path.
+                _all_numeric = all(
+                    _p.lstrip("+-").replace(".", "", 1).replace("e", "", 1).replace("E", "", 1).isdigit()
+                    for _p in _parts
+                )
+                if _all_numeric and len(_parts) < required_column_count:
+                    raise SaikeiSurfaceError(
+                        f"point file {filepath!r} must have exactly 3 columns "
+                        f"(or enough columns for the requested column indices); "
+                        f"found {len(_parts)} column(s)"
+                    )
+        except SaikeiSurfaceError:
+            raise
+        except Exception:
+            # File not found, permissions error, etc. — let numpy handle it
+            # with the "could not parse" message.
+            pass
+
+        load_kwargs: dict = {
+            "comments": "#",
+            "skiprows": skip_header_rows,
+            "usecols": columns,
+            "ndmin": 2,
+        }
+        try:
+            data = np.loadtxt(filepath, delimiter=None, **load_kwargs)
         except Exception:
             # Retry with comma delimiter for CSV exports that aren't
             # whitespace-separable.
             try:
-                data = np.loadtxt(
-                    filepath, comments="#", delimiter=",", ndmin=2
-                )
+                data = np.loadtxt(filepath, delimiter=",", **load_kwargs)
             except Exception as exc:
                 raise SaikeiSurfaceError(
                     f"could not parse {filepath!r} as a CSV/whitespace point "
@@ -710,10 +765,162 @@ class Surface:
 
         if data.ndim != 2 or data.shape[1] != 3:
             raise SaikeiSurfaceError(
-                f"point file {filepath!r} must have exactly 3 columns "
-                f"(x, y, z); got shape {data.shape}"
+                f"point file {filepath!r}: column selection {columns} "
+                f"did not yield 3 columns; got shape {data.shape}"
             )
         return data.astype(float, copy=False)
+
+    @classmethod
+    def rename(cls, surface_guid: str, new_name: str) -> None:
+        """Set the ``Name`` attribute on the IFC host entity identified by
+        ``surface_guid``.
+
+        Also updates the in-memory :class:`CivilSurface` dataclass if the
+        registry contains an entry for this surface, so subsequent panel
+        draws reflect the new name without a full rehydration.
+
+        :param surface_guid: GlobalId of the surface host entity.
+        :param new_name: new human-readable name (must be non-empty).
+        :raises SaikeiSurfaceError: if the GUID doesn't resolve to a
+            supported surface host entity in the current IFC file.
+        """
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None:
+            raise SaikeiSurfaceError("No IFC file loaded")
+
+        host = next(
+            (
+                e
+                for e in (
+                    *ifc_file.by_type("IfcGeographicElement"),
+                    *ifc_file.by_type("IfcEarthworksFill"),
+                )
+                if e.GlobalId == surface_guid
+            ),
+            None,
+        )
+        if host is None:
+            raise SaikeiSurfaceError(
+                f"no IFC entity with GlobalId {surface_guid!r} in this file"
+            )
+        host.Name = new_name
+
+        # Update the Blender object name to match, if one is linked.
+        obj = tool.Ifc.get_object(host)
+        if obj is not None:
+            display_name = f"{host.is_a()}/{new_name}"
+            obj.name = display_name
+            if obj.data is not None:
+                obj.data.name = display_name
+
+        # Patch the cached dataclass so the next get() call returns the
+        # updated name without a cache miss / rehydration.
+        key = (id(ifc_file), surface_guid)
+        if key in cls._registry:
+            cls._registry[key].name = new_name
+
+    @classmethod
+    def get_host_entity(
+        cls, ifc_file: "ifcopenshell.file", guid: str
+    ) -> "ifcopenshell.entity_instance | None":
+        """Return the IFC surface host entity for ``guid``, or ``None``.
+
+        Searches ``IfcGeographicElement`` and ``IfcEarthworksFill`` instances
+        (the only two entity types that Saikei authors as surface hosts).
+        Returns the first match, or ``None`` when no entity has that
+        ``GlobalId``.
+
+        Used by :meth:`delete` and :class:`CIVIL_OT_surface_select` so both
+        paths share one entity-lookup implementation.
+
+        :param ifc_file: Open IFC file to search.
+        :param guid: ``GlobalId`` string to match.
+        :return: Matched entity instance, or ``None``.
+        """
+        return next(
+            (
+                e
+                for e in (
+                    *ifc_file.by_type("IfcGeographicElement"),
+                    *ifc_file.by_type("IfcEarthworksFill"),
+                )
+                if e.GlobalId == guid
+            ),
+            None,
+        )
+
+    @classmethod
+    def delete(cls, surface_guid: str) -> None:
+        """Remove the IFC surface host entity and all associated data.
+
+        Deletes:
+
+        - The IFC host entity (``IfcGeographicElement`` or
+          ``IfcEarthworksFill``) and its full representation tree.
+        - All ``IfcAnnotation[BREAKLINE]`` entities that are scoped to this
+          surface via ``IfcRelAssignsToProduct``.
+        - The linked Blender mesh object, if one is registered.
+        - The registry entry so stale dataclass references are not used.
+
+        Uses :func:`ifcopenshell.api.root.remove_product` for the host and
+        each scoped breakline annotation — the standard Bonsai removal path
+        that handles ``IfcRelDefinesByType``, ``IfcRelNests``,
+        ``IfcRelDecomposes``, ``IfcRelAssignsToGroup``, etc.
+
+        :param surface_guid: GlobalId of the surface to destroy.
+        :raises SaikeiSurfaceError: if the GUID doesn't resolve to a
+            supported surface host entity.
+        """
+        import ifcopenshell.api.root
+
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None:
+            raise SaikeiSurfaceError("No IFC file loaded")
+
+        host = cls.get_host_entity(ifc_file, surface_guid)
+        if host is None:
+            raise SaikeiSurfaceError(
+                f"no IFC entity with GlobalId {surface_guid!r} in this file"
+            )
+
+        # Unlink + remove the Blender object first while the IFC entity is
+        # still in the file (tool.Ifc.get_object needs the entity intact).
+        obj = tool.Ifc.get_object(host)
+        if obj is not None:
+            tool.Ifc.unlink(obj=obj)
+            mesh_data = obj.data if isinstance(obj.data, bpy.types.Mesh) else None
+            bpy.data.objects.remove(obj, do_unlink=True)
+            if mesh_data is not None and mesh_data.users == 0:
+                bpy.data.meshes.remove(mesh_data)
+
+        # Collect breakline annotations scoped to this surface before
+        # removing the host (the IfcRelAssignsToProduct inverse is needed).
+        annotations_to_remove = []
+        for annotation in ifc_file.by_type("IfcAnnotation"):
+            if getattr(annotation, "ObjectType", None) != "BREAKLINE":
+                continue
+            for rel in getattr(annotation, "HasAssignments", None) or []:
+                if not rel.is_a("IfcRelAssignsToProduct"):
+                    continue
+                if (
+                    rel.RelatingProduct is not None
+                    and rel.RelatingProduct.GlobalId == surface_guid
+                ):
+                    annotations_to_remove.append(annotation)
+                    break
+
+        # Remove each scoped breakline via the standard Bonsai API so their
+        # IfcRelAssignsToProduct relationships are cleaned up automatically.
+        for annotation in annotations_to_remove:
+            ifcopenshell.api.root.remove_product(ifc_file, product=annotation)
+
+        # Remove the host entity via the standard Bonsai API — handles
+        # IfcRelDefinesByProperties, IfcRelContainedInSpatialStructure,
+        # IfcRelAssignsToGroup, IfcRelNests, representation tree, etc.
+        ifcopenshell.api.root.remove_product(ifc_file, product=host)
+
+        # Evict from the registry so stale references are not used.
+        cls._registry.pop((id(ifc_file), surface_guid), None)
 
     _registry: dict[tuple[int, str], "CivilSurface"] = {}
     """Per spec §4.6: lazy-rehydrating cache keyed by ``(id(ifc_file), guid)``.
@@ -1437,6 +1644,87 @@ class Surface:
                 "no IfcSite present in project; pass site= explicitly or add an IfcSite first"
             )
         return sites[0]
+
+    @classmethod
+    def iter_surfaces(
+        cls, ifc_file: "ifcopenshell.file"
+    ) -> "Iterator[tuple[str, str, str]]":
+        """Yield ``(guid, name, description)`` triples for every
+        existing-ground :class:`CivilSurface` in the file.
+
+        "Existing" surfaces are hosted as
+        ``IfcGeographicElement[PredefinedType=TERRAIN]``.  Used as the
+        ``EnumProperty`` items source for the earthwork-inputs panel
+        dropdown.
+
+        :param ifc_file: the open :class:`ifcopenshell.file`.
+        :returns: generator of ``(guid, name, description)`` where
+            *description* is formatted as
+            ``"{N} triangles, Z={z_min:.1f}-{z_max:.1f}m"`` per
+            spec §11 Rule 7 (plain ASCII hyphen — not en-dash).
+        """
+        for entity in ifc_file.by_type("IfcGeographicElement"):
+            if getattr(entity, "PredefinedType", None) != "TERRAIN":
+                continue
+            guid = entity.GlobalId
+            name = entity.Name or guid
+            description = cls._surface_enum_description(ifc_file, guid)
+            yield (guid, name, description)
+
+    @classmethod
+    def iter_proposed_surfaces(
+        cls, ifc_file: "ifcopenshell.file"
+    ) -> "Iterator[tuple[str, str, str]]":
+        """Yield ``(guid, name, description)`` triples for every
+        proposed-ground :class:`CivilSurface` in the file.
+
+        "Proposed" surfaces are hosted as
+        ``IfcEarthworksFill[PredefinedType=SUBGRADE]``.  Includes both
+        site-level proposed surfaces and grading-group composites.
+        Used as the ``EnumProperty`` items source for the
+        earthwork-inputs panel dropdown.
+
+        :param ifc_file: the open :class:`ifcopenshell.file`.
+        :returns: generator of ``(guid, name, description)`` where
+            *description* is formatted as
+            ``"{N} triangles, Z={z_min:.1f}-{z_max:.1f}m"`` per
+            spec §11 Rule 7.
+        """
+        for entity in ifc_file.by_type("IfcEarthworksFill"):
+            if getattr(entity, "PredefinedType", None) != "SUBGRADE":
+                continue
+            guid = entity.GlobalId
+            name = entity.Name or guid
+            description = cls._surface_enum_description(ifc_file, guid)
+            yield (guid, name, description)
+
+    @classmethod
+    def _surface_enum_description(
+        cls, ifc_file: "ifcopenshell.file", guid: str
+    ) -> str:
+        """Build the description string for the surface enum dropdown.
+
+        Reads the TIN from the IFC entity to extract triangle count and
+        Z-range without requiring the surface to be cached.  Falls back
+        to a minimal string when no TIN representation is found.
+
+        :param ifc_file: the open :class:`ifcopenshell.file`.
+        :param guid: the ``GlobalId`` of the surface host entity.
+        :returns: ``"{N} triangles, Z={z_min:.1f}-{z_max:.1f}m"``
+            (plain ASCII hyphen per spec §11 Rule 7) or ``"no TIN"``
+            when the entity has no Body TIN representation.
+        """
+        try:
+            surface = cls.get(ifc_file, guid)
+        except SaikeiSurfaceError:
+            return "no TIN"
+        triangle_count = len(surface.triangles)
+        if len(surface.points) == 0:
+            return f"{triangle_count} triangles, Z=n/a"
+        z_values = surface.points[:, 2]
+        z_min = float(z_values.min())
+        z_max = float(z_values.max())
+        return f"{triangle_count} triangles, Z={z_min:.1f}-{z_max:.1f}m"
 
     @staticmethod
     def _find_tin_id(host: "ifcopenshell.entity_instance") -> Optional[int]:

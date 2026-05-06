@@ -80,9 +80,9 @@ class CIVIL_OT_feature_line_create(Operator, tool.Ifc.Operator):
     bl_idname = "civil.feature_line_create"
     bl_label = "Create Feature Line from CSV"
     bl_description = (
-        "Author an IfcAlignment feature line from a CSV / whitespace-"
-        "separated XYZ vertex file. Used as the footprint for grading "
-        "objects within a grading group."
+        "Create a feature line from a CSV / whitespace-separated XYZ "
+        "vertex file. Used as the footprint for grading objects within "
+        "a grading group."
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -389,9 +389,9 @@ class CIVIL_OT_grading_create_criteria(Operator, tool.Ifc.Operator):
     bl_idname = "civil.grading_create_criteria"
     bl_label = "Create Grading Criteria"
     bl_description = (
-        "Author a reusable grading-slope criteria as an "
-        "IfcPropertySetTemplate. Civil 3D's Grading Criteria analog: "
-        "binds to grading groups via assign_criteria when used."
+        "Author a reusable grading-slope criteria as a slope-rule "
+        "template. Civil 3D's Grading Criteria analog: binds to "
+        "grading groups via assign_criteria when used."
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -482,9 +482,9 @@ class CIVIL_OT_grading_create_group(Operator, tool.Ifc.Operator):
     bl_idname = "civil.grading_create_group"
     bl_label = "Create Grading Group"
     bl_description = (
-        "Author an empty grading group as IfcGroup[GradingGroup] with a "
-        "per-group composite IfcEarthworksFill[SUBGRADE]. Add grading "
-        "objects via the Add Object operator."
+        "Author an empty grading group with a per-group composite "
+        "proposed surface. Add grading objects via the Add Object "
+        "operator."
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -589,10 +589,9 @@ class CIVIL_OT_grading_add_object(Operator, tool.Ifc.Operator):
     bl_label = "Add Grading Object"
     bl_description = (
         "Apply a criteria to a feature line within a grading group. "
-        "Authors the slope-fill ribbon as IfcEarthworksFill[SLOPEFILL] "
-        "aggregated under the group's composite. Run "
-        "Rebuild Group after adding objects to refresh the composite "
-        "proposed surface."
+        "Authors the slope-fill grading object aggregated under the "
+        "group's composite. Run Rebuild Group after adding objects to "
+        "refresh the composite proposed surface."
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -657,7 +656,7 @@ class CIVIL_OT_grading_rebuild_group(Operator, tool.Ifc.Operator):
     bl_description = (
         "Force a rebuild of the group's composite proposed surface. "
         "Reassembles slope-fill members + interior fill + writes the "
-        "result to the composite IfcEarthworksFill's TIN representation."
+        "result to the group's composite proposed surface TIN."
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -702,4 +701,188 @@ class CIVIL_OT_grading_rebuild_group(Operator, tool.Ifc.Operator):
             f"Rebuilt {composite_surface.name!r} → "
             f"{len(composite_surface.triangles)} triangles",
         )
+        return {"FINISHED"}
+
+
+class CIVIL_OT_feature_line_delete(Operator, tool.Ifc.Operator):
+    """Delete the active feature line.
+
+    Removes the IFC entity, its property set, and any linked Blender
+    curve object. Blocked if the feature line is currently assigned to
+    a grading group as its source FL -- remove all grading objects from
+    that group first.
+
+    Headless usage::
+
+        bpy.ops.civil.feature_line_delete(
+            "EXEC_DEFAULT",
+            feature_line_guid="...",
+        )
+    """
+
+    bl_idname = "civil.feature_line_delete"
+    bl_label = "Delete Feature Line"
+    bl_description = (
+        "A 3D polyline that defines a grading edge or design boundary. "
+        "Deletes the selected feature line from the IFC file and removes "
+        "its Blender curve. Blocked if assigned to a grading group."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    feature_line_guid: StringProperty(
+        name="Feature Line GUID",
+        description="GlobalId of the feature line to delete",
+        default="",
+    )
+
+    def _execute(self, context):
+        guid = self.feature_line_guid
+        if not guid:
+            props = context.scene.CivilGradingProperties
+            guid = props.active_feature_line_guid
+        if not guid:
+            self.report({"ERROR"}, "feature_line_guid is required")
+            return {"CANCELLED"}
+
+        try:
+            core_grading.delete_feature_line(
+                tool.Ifc,
+                tool.Grading,
+                feature_line_guid=guid,
+            )
+        except (
+            tool_grading.BlockedByDependentError,
+            tool_grading.SaikeiGradingError,
+            ValueError,
+        ) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        from .data import GradingData
+
+        GradingData.is_loaded = False
+        self.report({"INFO"}, "Feature line deleted")
+        return {"FINISHED"}
+
+
+class CIVIL_OT_grading_remove_object(Operator, tool.Ifc.Operator):
+    """Remove the active grading object from its parent grading group.
+
+    Per vocabulary: Remove breaks the group membership without
+    destroying the entity. The grading object (slope-projected surface)
+    remains in the IFC file. The group composite surface is rebuilt
+    automatically after the removal.
+
+    Headless usage::
+
+        bpy.ops.civil.grading_remove_object(
+            "EXEC_DEFAULT",
+            object_guid="...",
+            group_guid="...",
+        )
+    """
+
+    bl_idname = "civil.grading_remove_object"
+    bl_label = "Remove Grading Object"
+    bl_description = (
+        "A slope-projected surface from a feature line to a target "
+        "(elevation, distance, or surface). Removes the selected grading "
+        "object from its group without deleting the entity."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    object_guid: StringProperty(
+        name="Grading Object GUID",
+        description="GlobalId of the grading object to remove",
+        default="",
+    )
+    group_guid: StringProperty(
+        name="Group GUID",
+        description="GlobalId of the parent grading group",
+        default="",
+    )
+
+    def _execute(self, context):
+        if not self.object_guid or not self.group_guid:
+            self.report(
+                {"ERROR"}, "object_guid and group_guid are both required"
+            )
+            return {"CANCELLED"}
+
+        try:
+            core_grading.remove_grading_object_from_group(
+                tool.Ifc,
+                tool.Grading,
+                tool.Surface,
+                object_guid=self.object_guid,
+                group_guid=self.group_guid,
+            )
+        except (tool_grading.SaikeiGradingError, ValueError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        from .data import GradingData
+
+        GradingData.is_loaded = False
+        self.report({"INFO"}, "Grading object removed from group")
+        return {"FINISHED"}
+
+
+class CIVIL_OT_grading_delete_criteria(Operator, tool.Ifc.Operator):
+    """Delete a grading criteria template.
+
+    Blocked if any grading object currently references this criteria --
+    remove those grading objects from their groups first, then delete
+    the criteria.
+
+    Headless usage::
+
+        bpy.ops.civil.grading_delete_criteria(
+            "EXEC_DEFAULT",
+            criteria_guid="...",
+        )
+    """
+
+    bl_idname = "civil.grading_delete_criteria"
+    bl_label = "Delete Criteria"
+    bl_description = (
+        "A reusable slope rule (e.g., 3:1 cut, 4:1 fill) applied to one "
+        "or more grading objects. Deletes the selected criteria template. "
+        "Blocked if any grading object still references it."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    criteria_guid: StringProperty(
+        name="Criteria GUID",
+        description="GlobalId of the criteria template to delete",
+        default="",
+    )
+
+    def _execute(self, context):
+        guid = self.criteria_guid
+        if not guid:
+            props = context.scene.CivilGradingProperties
+            guid = props.active_criteria_guid
+        if not guid:
+            self.report({"ERROR"}, "criteria_guid is required")
+            return {"CANCELLED"}
+
+        try:
+            core_grading.delete_criteria(
+                tool.Ifc,
+                tool.Grading,
+                criteria_guid=guid,
+            )
+        except (
+            tool_grading.BlockedByDependentError,
+            tool_grading.SaikeiGradingError,
+            ValueError,
+        ) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        from .data import GradingData
+
+        GradingData.is_loaded = False
+        self.report({"INFO"}, "Criteria deleted")
         return {"FINISHED"}

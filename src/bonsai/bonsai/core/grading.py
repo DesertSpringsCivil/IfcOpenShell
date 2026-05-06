@@ -491,3 +491,122 @@ def drape_feature_line(
     # still has the old polyline.
     grading_tool.update_feature_line_vertices(ifc_file, feature_line)
     return feature_line
+
+
+def delete_feature_line(
+    ifc_tool: "type[tool.Ifc]",
+    grading_tool: "type[tool.Grading]",
+    feature_line_guid: str,
+) -> None:
+    """Delete a feature line from the IFC file and unlink its Blender object.
+
+    Business rules:
+
+    1. An IFC file must be loaded.
+    2. The feature line must not be assigned to a grading group as its
+       source FL — if it is, the tool layer raises
+       :class:`BlockedByDependentError` (caught by the operator layer).
+
+    :raises ValueError: if no IFC file is loaded or GUID is empty.
+    :raises BlockedByDependentError: propagated from the tool layer when
+        the feature line is in use by a grading group.
+    :raises SaikeiGradingError: propagated from the tool layer when the
+        entity cannot be found.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+    if not feature_line_guid:
+        raise ValueError("feature_line_guid is required")
+
+    grading_tool.delete_feature_line(ifc_file, feature_line_guid)
+
+
+def remove_grading_object_from_group(
+    ifc_tool: "type[tool.Ifc]",
+    grading_tool: "type[tool.Grading]",
+    surface_tool: "type[tool.Surface]",
+    object_guid: str,
+    group_guid: str,
+) -> Any:
+    """Remove a grading object from its parent group and rebuild the group surface.
+
+    Per spec §11 vocabulary: **Remove** breaks the relationship without
+    destroying the entity. This function:
+
+    1. Validates inputs.
+    2. Calls :meth:`tool.Grading.remove_object_from_group` to sever
+       the :class:`IfcRelAssignsToGroup` link.
+    3. Rebuilds the group composite surface via :func:`rebuild_group`
+       so the group's proposed surface reflects the removal.
+
+    :raises ValueError: if no IFC file is loaded or GUIDs are empty.
+    :raises SaikeiGradingError: propagated from the tool layer.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+    if not object_guid or not group_guid:
+        raise ValueError("object_guid and group_guid are both required")
+
+    grading_tool.remove_object_from_group(ifc_file, object_guid, group_guid)
+
+    # Rebuild the group composite surface only when the group still has
+    # slope-fill members.  An empty group has nothing to compose, and
+    # rebuild_group (called below) would raise on an empty member list.
+    # We check IFC-side membership explicitly rather than catching the
+    # exception, so any real rebuild failure propagates as intended.
+    ifc_group = next(
+        (
+            g
+            for g in ifc_file.by_type("IfcGroup")
+            if g.GlobalId == group_guid
+            and getattr(g, "ObjectType", None) == "GradingGroup"
+        ),
+        None,
+    )
+    has_slope_fill_members = False
+    if ifc_group is not None:
+        for rel in getattr(ifc_group, "IsGroupedBy", None) or []:
+            for member in rel.RelatedObjects or []:
+                if (
+                    member.is_a("IfcEarthworksFill")
+                    and getattr(member, "PredefinedType", None) == "SLOPEFILL"
+                ):
+                    has_slope_fill_members = True
+                    break
+            if has_slope_fill_members:
+                break
+
+    if has_slope_fill_members:
+        rebuild_group(ifc_tool, surface_tool, grading_tool, group_guid=group_guid)
+
+    return None
+
+
+def delete_criteria(
+    ifc_tool: "type[tool.Ifc]",
+    grading_tool: "type[tool.Grading]",
+    criteria_guid: str,
+) -> None:
+    """Delete a grading criteria template.
+
+    Business rules:
+
+    1. An IFC file must be loaded.
+    2. No grading groups may have this criteria bound — if any do, the
+       tool layer raises :class:`BlockedByDependentError` (caught by the
+       operator layer). A bound group with no slope fills still blocks
+       deletion.
+
+    :raises ValueError: if no IFC file is loaded or GUID is empty.
+    :raises BlockedByDependentError: propagated from the tool layer.
+    :raises SaikeiGradingError: propagated from the tool layer.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+    if not criteria_guid:
+        raise ValueError("criteria_guid is required")
+
+    grading_tool.delete_criteria(ifc_file, criteria_guid)
