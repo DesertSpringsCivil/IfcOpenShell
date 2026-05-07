@@ -34,6 +34,8 @@ the alignment tool's exact call (the typo in the method name is
 canonical; do not correct it).
 """
 
+import os
+
 import bpy
 from bpy.types import WorkSpaceTool
 
@@ -48,7 +50,7 @@ class GradingCivilTool(WorkSpaceTool):
     bl_description = (
         "Draw feature lines and apply slope criteria to design grading."
     )
-    bl_icon = "OUTLINER_OB_CURVE"
+    bl_icon = os.path.join(os.path.dirname(__file__), "ops.authoring.grading")
     bl_widget = None
     bl_keymap = tool.Blender.get_default_selection_keypmap()
 

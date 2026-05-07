@@ -34,6 +34,8 @@ the alignment tool's exact call (the typo in the method name is canonical;
 do not correct it).
 """
 
+import os
+
 import bpy
 from bpy.types import WorkSpaceTool
 
@@ -46,7 +48,7 @@ class EarthworkCivilTool(WorkSpaceTool):
     bl_idname = "bim.earthwork_tool"
     bl_label = "Earthwork"
     bl_description = "Probe cut and fill volumes interactively at any point."
-    bl_icon = "MOD_VOLUME_DISPLACE"
+    bl_icon = os.path.join(os.path.dirname(__file__), "ops.authoring.earthwork")
     bl_widget = None
     bl_keymap = tool.Blender.get_default_selection_keypmap()
 

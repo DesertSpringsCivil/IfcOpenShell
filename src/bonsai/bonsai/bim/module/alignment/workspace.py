@@ -16,6 +16,8 @@
 # You should have received a copy of the GNU General Public License
 # along with Bonsai.  If not, see <http://www.gnu.org/licenses/>.
 
+import os
+
 import bpy
 from bpy.types import WorkSpaceTool
 
@@ -31,7 +33,7 @@ class AlignmentTool(WorkSpaceTool):
         "Civil alignment tools — create and edit horizontal/vertical "
         "alignments using PI/PVI method"
     )
-    bl_icon = "CURVE_DATA"
+    bl_icon = os.path.join(os.path.dirname(__file__), "ops.authoring.alignment")
     bl_widget = None
     bl_keymap = tool.Blender.get_default_selection_keypmap()
 

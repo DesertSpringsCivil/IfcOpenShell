@@ -3660,7 +3660,10 @@ class TestGradingCivilToolWorkspace:
     def test_workspace_tool_icon(self) -> None:
         from bonsai.bim.module.grading.workspace import GradingCivilTool
 
-        assert GradingCivilTool.bl_icon == "OUTLINER_OB_CURVE"
+        # bl_icon is a filesystem path to the .dat icon file (Bonsai
+        # convention; matches cad/, drawing/, model/ workspace tools).
+        # WorkSpaceTool does not accept Blender enum-string icons.
+        assert GradingCivilTool.bl_icon.endswith("ops.authoring.grading")
 
     @pytest.mark.civil
     def test_workspace_tool_no_gizmo(self) -> None:

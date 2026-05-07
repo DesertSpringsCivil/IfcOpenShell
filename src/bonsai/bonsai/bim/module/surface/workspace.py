@@ -31,6 +31,8 @@ alignment tool's exact call (typo in the method name is canonical; do not
 correct it).
 """
 
+import os
+
 import bpy
 from bpy.types import WorkSpaceTool
 
@@ -45,7 +47,7 @@ class SurfaceCivilTool(WorkSpaceTool):
     bl_description = (
         "Place breaklines, set boundaries, and raise or lower surfaces."
     )
-    bl_icon = "MESH_GRID"
+    bl_icon = os.path.join(os.path.dirname(__file__), "ops.authoring.surface")
     bl_widget = None
     bl_keymap = tool.Blender.get_default_selection_keypmap()
 
