@@ -1,0 +1,3 @@
+# Generated at runtime from a base IFC4x3 .exp + the TM27 delta (see _schema.py)
+IFC4X4_TM27.exp
+*.exp.cache.dat
