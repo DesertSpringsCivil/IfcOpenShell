@@ -1233,5 +1233,55 @@ class Voider:
 
 
 @interface
+class Voxel:
+    # Saikei voxel tool — Phase 5. RLE codec + occupancy ordering (Phase 1).
+    def rle_encode(cls, seq): pass
+    def rle_decode(cls, runs): pass
+    def rle_flatten(cls, runs): pass
+    def rle_unflatten(cls, flat): pass
+    def encode_runs(cls, values): pass
+    def decode_runs(cls, flat): pass
+    def compression_ratio(cls, seq): pass
+    def mask_to_voxels(cls, mask): pass
+    def voxels_to_mask(cls, voxels, nx, ny, nz): pass
+    def encode_occupancy(cls, mask): pass
+    def decode_occupancy(cls, voxels_rle, nx, ny, nz): pass
+    # Voxelization (Phase 2).
+    def make_grid(cls, origin, size, counts): pass
+    def grid_from_bounds(cls, min_xyz, max_xyz, cell_size): pass
+    def grid_from_surface(cls, surface, cell_size, z_min=None, z_max=None): pass
+    def xyz_bounds(cls, points): pass
+    def assert_shared_lattice(cls, a, b, tol=1e-9): pass
+    def cell_centers(cls, grid): pass
+    def height_fn_from_z_at(cls, z_at, surface): pass
+    def voxelize_below_surface(cls, grid, height_fn, supersample=1): pass
+    def voxelize_surface(cls, grid, surface, supersample=1): pass
+    def occupancy_volume(cls, grid, mask): pass
+    # Cut/fill (Phase 4).
+    def shared_grid(cls, surfaces, cell_size, z_min=None, z_max=None): pass
+    def cut_fill_masks(cls, existing_mask, design_mask): pass
+    def cut_fill(cls, existing_mask, design_mask, grid): pass
+    def bulk(cls, volume, factor): pass
+    # Sidecar authoring (Phase 4b).
+    def new_sidecar(cls): pass
+    def author_earthwork(cls, sidecar_file, grid, mask, host_class, predefined_type, name, bank_volume, source_surface_guid=None, swell_factor=1.0): pass
+    # Blender preview (Phase 6).
+    def create_preview_mesh(cls, grid, masks): pass
+    def clear_preview(cls): pass
+    # Stratum / geomodel (Phase 5).
+    def order_surfaces_by_elevation(cls, surfaces): pass
+    def strata_legend(cls, ordered_surfaces): pass
+    def classify_strata(cls, grid, height_fields): pass
+    def voxelize_strata(cls, grid, surfaces, supersample=1): pass
+    def gather_occupied(cls, values, mask): pass
+    def stratum_volume(cls, grid, code_layer, target_code): pass
+    def stratum_volumes(cls, grid, code_layer): pass
+    def author_geomodel(cls, sidecar_file, grid, code_layer, legend, name, source_surface_guids=None): pass
+    def create_strata_preview(cls, grid, code_layer, legend=None): pass
+    def cut_fill_by_stratum(cls, cut_mask, code_layer, grid): pass
+    def intersect_codes(cls, code_layer, mask): pass
+
+
+@interface
 class Web:
     pass

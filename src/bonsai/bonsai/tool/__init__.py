@@ -76,4 +76,5 @@ from bonsai.tool.system import System
 from bonsai.tool.tester import Tester
 from bonsai.tool.type import Type
 from bonsai.tool.unit import Unit
+from bonsai.tool.voxel import Voxel
 from bonsai.tool.web import Web

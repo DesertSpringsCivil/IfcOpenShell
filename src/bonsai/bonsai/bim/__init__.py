@@ -91,6 +91,7 @@ modules = {
     "surface": None,
     "grading": None,
     "earthwork": None,
+    "voxel": None,
     # Uncomment this line to enable loading of the demo module. Happy hacking!
     # The name "demo" must correlate to a folder name in `bim/module/`.
     # "demo": None,
@@ -192,6 +193,7 @@ classes = [
     ui.BIM_PT_tab_surface_modeler,
     ui.BIM_PT_tab_grading,
     ui.BIM_PT_tab_earthwork,
+    ui.BIM_PT_tab_voxel_earthwork,
     # Drawings and documents
     ui.BIM_PT_tab_sheets,
     ui.BIM_PT_tab_drawings,

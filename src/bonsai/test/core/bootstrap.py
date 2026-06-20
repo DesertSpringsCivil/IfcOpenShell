@@ -284,6 +284,13 @@ def voider():
     prophet.verify()
 
 
+@pytest.fixture
+def voxel():
+    prophet = Prophecy(bonsai.core.tool.Voxel)
+    yield prophet
+    prophet.verify()
+
+
 def flatten(iterable):
     for item in iterable:
         if isinstance(item, (list, tuple)):
