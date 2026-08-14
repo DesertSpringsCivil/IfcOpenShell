@@ -1,0 +1,10 @@
+scenario,dims,cells,occ_runs,occ_ratio,dense_proj_mb,rle_file_kb,file_vs_dense,t_encode_ms,t_decode_ms,t_write_ms,lossless
+terrain-bounded,100x100x20,200000,2920,34.2,0.60,15.08,40,0.6,1.1,9.8,True
+terrain-bounded,200x200x40,1600000,11634,68.8,4.80,58.56,82,4.7,7.9,17.9,True
+terrain-bounded,500x500x50,12500000,36002,173.6,37.50,193.36,194,82.7,59.8,62.9,True
+terrain-bounded,1000x1000x80,80000000,115130,347.4,240.00,668.17,359,885.3,409.9,183.2,True
+geomodel-stratum,100x100x50,500000,1,250000.0,6.50,1.96,3318,2.2,3.5,2.8,True
+geomodel-stratum,200x200x100,4000000,1,2000000.0,52.00,2.10,24821,13.9,18.4,2.7,True
+geomodel-stratum,400x400x100,16000000,1,8000000.0,208.00,2.16,96207,124.1,67.9,12.2,True
+noisy-contamination,100x100x50,500000,1,250000.0,3.50,14.38,243,1.2,2.1,6.7,True
+noisy-contamination,200x200x100,4000000,1,2000000.0,28.00,58.76,477,14.9,19.2,28.6,True
