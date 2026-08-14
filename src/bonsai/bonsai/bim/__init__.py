@@ -90,6 +90,10 @@ modules = {
     "web": None,
     "light": None,
     "alignment": None,
+    "surface": None,
+    "grading": None,
+    "earthwork": None,
+    "voxel": None,
     "clip_box": None,
     # Uncomment this line to enable loading of the demo module. Happy hacking!
     # The name "demo" must correlate to a folder name in `bim/module/`.
@@ -184,6 +188,12 @@ classes = [
     ui.BIM_PT_tab_materials,
     ui.BIM_PT_tab_styles,
     ui.BIM_PT_tab_profiles,
+    # Civil infrastructure
+    ui.BIM_PT_tab_horizontal_alignment,
+    ui.BIM_PT_tab_surface_modeler,
+    ui.BIM_PT_tab_grading,
+    ui.BIM_PT_tab_earthwork,
+    ui.BIM_PT_tab_voxel_earthwork,
     # Drawings and documents
     ui.BIM_PT_tab_sheets,
     ui.BIM_PT_tab_drawings,
