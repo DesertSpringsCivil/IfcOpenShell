@@ -270,6 +270,44 @@ def voider():
     prophet.verify()
 
 
+# Saikei Civil modules.
+
+
+@pytest.fixture
+def alignment():
+    prophet = Prophecy(bonsai.core.tool.Alignment)
+    yield prophet
+    prophet.verify()
+
+
+@pytest.fixture
+def surface():
+    prophet = Prophecy(bonsai.core.tool.Surface)
+    yield prophet
+    prophet.verify()
+
+
+@pytest.fixture
+def grading():
+    prophet = Prophecy(bonsai.core.tool.Grading)
+    yield prophet
+    prophet.verify()
+
+
+@pytest.fixture
+def earthwork():
+    prophet = Prophecy(bonsai.core.tool.Earthwork)
+    yield prophet
+    prophet.verify()
+
+
+@pytest.fixture
+def voxel():
+    prophet = Prophecy(bonsai.core.tool.Voxel)
+    yield prophet
+    prophet.verify()
+
+
 def flatten(iterable):
     for item in iterable:
         if isinstance(item, (list, tuple)):
