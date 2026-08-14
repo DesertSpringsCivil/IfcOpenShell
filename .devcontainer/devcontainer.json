@@ -1,0 +1,47 @@
+{
+  "name": "Saikei Civil (Bonsai / IfcOpenShell)",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11-bookworm",
+
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+
+  // 4 cores / 8 GB keeps Blender-headless tests and shapely/numpy comfortable.
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "8gb",
+    "storage": "32gb"
+  },
+
+  "containerEnv": {
+    // bonsai is imported from the repo source (editable); ifcopenshell comes
+    // from pip (Linux build with compiled wrapper). Do NOT add the in-repo
+    // src/ifcopenshell-python to PYTHONPATH — its only checked-in wrapper is
+    // the Windows .pyd, which would shadow the working Linux build.
+    "PYTHONPATH": "/workspaces/IfcOpenShell/src/bonsai",
+    // Flip to "1" (or set the codespace secret SAIKEI_INSTALL_BLENDER=1) to
+    // provision Blender headless on rebuild for tool/operator tests.
+    "SAIKEI_INSTALL_BLENDER": "0",
+    "BLENDER_VERSION": "5.0.0"
+  },
+
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.black-formatter",
+        "charliermarsh.ruff"
+      ],
+      "settings": {
+        "python.testing.pytestEnabled": true,
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "[python]": {
+          "editor.defaultFormatter": "ms-python.black-formatter",
+          "editor.formatOnSave": true
+        }
+      }
+    }
+  }
+}
