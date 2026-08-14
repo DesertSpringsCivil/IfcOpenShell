@@ -378,3 +378,66 @@ class TestExitPviEditMode:
         alignment.create_objects_for_layout_segments("v_layout", "layout_obj").should_be_called()
         result = subject.exit_pvi_edit_mode(ifc, alignment, alignment_id=1, apply=True)
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# evaluate_alignment_at_station  (D3 keystone)
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateAlignmentAtStation:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.evaluate_alignment_at_station(ifc, alignment, alignment_id=1, station=100.0)
+
+    def test_raises_when_alignment_not_found(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        with pytest.raises(ValueError, match="not found"):
+            subject.evaluate_alignment_at_station(ifc, alignment, alignment_id=1, station=100.0)
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.evaluate_alignment_at_station(ifc, alignment, alignment_id=1, station=100.0)
+
+    def test_delegates_to_tool_and_returns_result(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.evaluate_alignment_at_station(entity, 100.0).should_be_called().will_return("point")
+        result = subject.evaluate_alignment_at_station(ifc, alignment, alignment_id=1, station=100.0)
+        assert result == "point"
+
+
+# ---------------------------------------------------------------------------
+# visualize_3d_alignment  (D3 — draped 3D centerline)
+# ---------------------------------------------------------------------------
+
+
+class TestVisualize3dAlignment:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.visualize_3d_alignment(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.visualize_3d_alignment(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_no_horizontal_layout(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_horizontal_layout(entity).should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="no horizontal layout"):
+            subject.visualize_3d_alignment(ifc, alignment, alignment_id=1)
+
+    def test_delegates_to_tool(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_horizontal_layout(entity).should_be_called().will_return("h_layout")
+        alignment.create_3d_alignment_object(entity, 5.0).should_be_called().will_return("obj")
+        result = subject.visualize_3d_alignment(ifc, alignment, alignment_id=1)
+        assert result == "obj"

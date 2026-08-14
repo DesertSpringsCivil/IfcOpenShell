@@ -230,6 +230,89 @@ class CIVIL_OT_feature_line_drape(Operator, tool.Ifc.Operator):
         return {"FINISHED"}
 
 
+class CIVIL_OT_feature_line_from_daylight(Operator, tool.Ifc.Operator):
+    """Promote a grading object's daylight line to a feature line.
+
+    Headless-only ([H] per spec §8.2 — the source is picked from the
+    group's member UIList, not the viewport).
+
+    :meth:`tool.Grading.compute_grading_object` already solves the
+    tie-out points where each slope ray meets the target surface, but
+    that polyline was previously reachable only as GPU-decorator draw
+    data. This operator persists it as a real
+    :class:`IfcAlignment`-backed feature line so it can be draped,
+    offset, filleted, re-graded from (benched/terraced slopes), or used
+    as a boundary for surface clipping and terrain masking.
+
+    Headless usage::
+
+        bpy.ops.civil.feature_line_from_daylight(
+            "EXEC_DEFAULT",
+            grading_object_guid="...",
+            name="pad tie-in",          # optional
+        )
+
+    UI flow: the panel pre-populates ``grading_object_guid`` from the
+    active grading object; the user clicks "Feature Line from Daylight".
+    """
+
+    bl_idname = "civil.feature_line_from_daylight"
+    bl_label = "Feature Line from Daylight"
+    bl_description = (
+        "Create a feature line from a grading object's computed "
+        "daylight (tie-in) line, so it can be draped, offset, "
+        "re-graded from, or used as a clipping boundary"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    grading_object_guid: StringProperty(
+        name="Grading Object GUID",
+        description="GlobalId of the grading object whose daylight line to promote",
+    )
+    name: StringProperty(
+        name="Name",
+        description=(
+            "Label for the new feature line. Defaults to "
+            "'<grading-object-name> daylight'"
+        ),
+        default="",
+    )
+
+    def _execute(self, context):
+        if not self.grading_object_guid:
+            self.report({"ERROR"}, "grading_object_guid is required")
+            return {"CANCELLED"}
+
+        try:
+            feature_line = core_grading.create_feature_line_from_daylight(
+                tool.Ifc,
+                tool.Grading,
+                grading_object_guid=self.grading_object_guid,
+                name=self.name,
+            )
+        except (ValueError, tool_grading.SaikeiGradingError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        # Mirror to Blender so the new tie-in is visible immediately.
+        try:
+            tool.Grading.create_blender_curve(tool.Ifc.get(), feature_line)
+        except Exception as exc:
+            self.report(
+                {"WARNING"},
+                f"feature line authored to IFC but Blender curve "
+                f"creation failed: {exc}",
+            )
+
+        self.report(
+            {"INFO"},
+            f"Created feature line {feature_line.name!r} from daylight "
+            f"({len(feature_line.vertices)} vertices, "
+            f"{'closed' if feature_line.closed else 'open'})",
+        )
+        return {"FINISHED"}
+
+
 class CIVIL_OT_feature_line_edit_elevations(Operator, tool.Ifc.Operator):
     """Apply per-vertex Z edits to a feature line.
 

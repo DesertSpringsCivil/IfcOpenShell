@@ -64,9 +64,25 @@ class SurfaceData:
         fills = [f for f in fills if f.PredefinedType == "SUBGRADE"]
         cls.data["surface_count"] = len(terrains) + len(fills)
 
-        cls._sync_uilist_from_ifc(terrains, fills)
-
+        # NOTE: the UIList sync (which writes CivilSurfaceProperties) is NOT
+        # done here. load() runs during panel draw(), where Blender forbids
+        # writing scene properties. The list is synced in sync_uilists(),
+        # invoked from refresh() — on IFC mutations / file load, outside draw.
         cls.is_loaded = True
+
+    @classmethod
+    def sync_uilists(cls) -> None:
+        """Reconcile ``CivilSurfaceProperties.surfaces`` with the current IFC.
+
+        Writes scene properties, so it MUST run outside panel ``draw()``.
+        Called from :func:`refresh`, never from :meth:`load`.
+        """
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None:
+            return
+        terrains = [t for t in ifc_file.by_type("IfcGeographicElement") if t.PredefinedType == "TERRAIN"]
+        fills = [f for f in ifc_file.by_type("IfcEarthworksFill") if f.PredefinedType == "SUBGRADE"]
+        cls._sync_uilist_from_ifc(terrains, fills)
 
     @staticmethod
     def _sync_uilist_from_ifc(
@@ -225,7 +241,12 @@ class SurfaceData:
 
 def refresh() -> None:
     """Mark :class:`SurfaceData` as needing reload on next access.
-
     Called by Bonsai's UI refresh hook after IFC mutations.
+
+    NOTE: the UIList sync (:meth:`SurfaceData.sync_uilists`) is NOT done here —
+    it writes scene properties and would clobber the operators' own in-session
+    list management on every mutation. The list is populated by the surface
+    operators during a session and re-synced from IFC once on file load via
+    the module's load_post handler.
     """
     SurfaceData.is_loaded = False

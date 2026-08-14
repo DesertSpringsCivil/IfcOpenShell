@@ -389,3 +389,87 @@ def exit_pi_edit_mode(
         # Cancel - just remove empties without regenerating
         alignment_tool.remove_pi_edit_empties(alignment_id)
         return True
+
+
+# =============================================================================
+# Alignment Evaluation & 3D Combination (D3)
+# =============================================================================
+
+
+def _resolve_alignment(ifc_tool, alignment_id):
+    """Validate and return the IfcAlignment for ``alignment_id``.
+
+    Raises:
+        ValueError: If no IFC file is loaded, the id is unknown, or the
+            entity is not an IfcAlignment.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+    try:
+        alignment = ifc_file.by_id(alignment_id)
+    except RuntimeError:
+        raise ValueError(f"Alignment with ID {alignment_id} not found")
+    if not alignment.is_a("IfcAlignment"):
+        raise ValueError(f"Entity {alignment_id} is not an IfcAlignment")
+    return alignment
+
+
+def evaluate_alignment_at_station(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+    station: float,
+):
+    """Evaluate the combined 3D alignment at a station.
+
+    The keystone query for the road-design pipeline: returns 3D position,
+    tangent, and an orientation frame on the combined (horizontal + vertical)
+    alignment. Geometry is delegated to the tool layer / geometry engine.
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment
+        station: Station value to evaluate
+
+    Returns:
+        An AlignmentPoint, or None if the station is outside the alignment
+        domain or the alignment has no evaluatable representation.
+
+    Raises:
+        ValueError: If the alignment doesn't exist or is the wrong type.
+    """
+    alignment = _resolve_alignment(ifc_tool, alignment_id)
+    return alignment_tool.evaluate_alignment_at_station(alignment, station)
+
+
+def visualize_3d_alignment(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+    distance_interval: float = 5.0,
+):
+    """Create/refresh the draped 3D centerline visualization for an alignment.
+
+    Business rules:
+    1. The alignment must exist and be an IfcAlignment.
+    2. It must have a horizontal layout (otherwise there is nothing to draw).
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment
+        distance_interval: Spacing between sampled vertices (model units)
+
+    Returns:
+        The created Blender object, or None if there is no geometry to draw.
+
+    Raises:
+        ValueError: If the alignment doesn't exist, is the wrong type, or has
+            no horizontal layout.
+    """
+    alignment = _resolve_alignment(ifc_tool, alignment_id)
+    if alignment_tool.get_horizontal_layout(alignment) is None:
+        raise ValueError(f"Alignment '{alignment.Name}' has no horizontal layout")
+    return alignment_tool.create_3d_alignment_object(alignment, distance_interval)

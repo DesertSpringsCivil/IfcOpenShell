@@ -2657,7 +2657,7 @@ class TestGradingDataLoad(NewIfc4X3):
         tool_grading.Grading.register(ifc_file, group)
 
         grading_data = self._data_module()
-        grading_data.GradingData.load()
+        grading_data.GradingData.sync_uilists()
 
         props = bpy.context.scene.CivilGradingProperties
         assert len(props.groups) == 1
@@ -2680,7 +2680,7 @@ class TestGradingDataLoad(NewIfc4X3):
         tool_grading.Grading.author_feature_line(ifc_file, feature_line)
 
         grading_data = self._data_module()
-        grading_data.GradingData.load()
+        grading_data.GradingData.sync_uilists()
 
         props = bpy.context.scene.CivilGradingProperties
         assert len(props.feature_lines) == 1
@@ -2701,7 +2701,7 @@ class TestGradingDataLoad(NewIfc4X3):
         tool_grading.Grading.register(ifc_file, criteria)
 
         grading_data = self._data_module()
-        grading_data.GradingData.load()
+        grading_data.GradingData.sync_uilists()
 
         props = bpy.context.scene.CivilGradingProperties
         assert len(props.criteria) == 1
@@ -2720,7 +2720,7 @@ class TestGradingDataLoad(NewIfc4X3):
         tool_grading.Grading.register(ifc_file, group_b)
 
         grading_data = self._data_module()
-        grading_data.GradingData.load()
+        grading_data.GradingData.sync_uilists()
         props = bpy.context.scene.CivilGradingProperties
 
         # Pretend the user clicked group B.
@@ -2731,8 +2731,7 @@ class TestGradingDataLoad(NewIfc4X3):
                 break
 
         # Simulate an IFC mutation triggering refresh.
-        grading_data.GradingData.is_loaded = False
-        grading_data.GradingData.load()
+        grading_data.refresh()
 
         assert props.active_group_guid == group_b.guid
 

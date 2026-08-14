@@ -317,6 +317,12 @@ class CIVIL_PT_vertical_creation(Panel):
             box.operator("civil.add_vertical_to_alignment", icon="CURVE_PATH")
             layout.separator()
 
+            # 3D combined-alignment centerline (D3)
+            box = layout.box()
+            box.label(text="3D Combination:", icon="MOD_CURVE")
+            box.operator("civil.visualize_3d_alignment", icon="OUTLINER_OB_CURVE")
+            layout.separator()
+
 
 class CIVIL_PT_pvi_editor(Panel):
     """Sub-panel for PVI point table editor (Civil 3D style grid view)"""
@@ -387,6 +393,51 @@ class CIVIL_PT_pvi_editor(Panel):
         row = layout.row(align=True)
         row.operator("civil.recalculate_pvis", icon="FILE_REFRESH", text="Recalculate")
         row.operator("civil.clear_pvis", icon="TRASH", text="Clear All")
+
+
+class CIVIL_PT_profile_view(Panel):
+    """Sub-panel for the 2D profile view (station vs elevation) — D2"""
+
+    bl_label = "Profile View"
+    bl_idname = "CIVIL_PT_profile_view"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "scene"
+    bl_parent_id = "BIM_PT_tab_horizontal_alignment"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        return tool.Blender.should_show_panel(context, "CIVIL", cls.bl_idname) and is_ifc4x3()
+
+    def draw(self, context):
+        from . import decorator as alignment_decorator
+
+        layout = self.layout
+        props = context.scene.CivilAlignmentProperties
+
+        if props.active_alignment_id == 0:
+            layout.label(text="Select an alignment", icon="INFO")
+            return
+
+        col = layout.column()
+        col.prop(props, "profile_terrain", text="Terrain")
+        col.prop(props, "profile_view_interval", text="Interval")
+        col.prop(props, "profile_view_height", text="Height (px)")
+
+        layout.separator()
+
+        is_shown = alignment_decorator.ProfileViewDecorator.is_installed
+        row = layout.row(align=True)
+        row.operator(
+            "civil.toggle_profile_view",
+            icon="HIDE_ON" if is_shown else "HIDE_OFF",
+            text="Hide Profile View" if is_shown else "Show Profile View",
+            depress=is_shown,
+        )
+        if is_shown:
+            row.operator("civil.refresh_profile_view", icon="FILE_REFRESH", text="")
+            layout.operator("civil.edit_pvi_in_profile", icon="PIVOT_CURSOR", text="Edit PVIs (drag in view)")
 
 
 class CIVIL_PT_alignment_stationing(Panel):
