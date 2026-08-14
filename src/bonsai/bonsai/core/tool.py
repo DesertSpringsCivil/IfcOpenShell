@@ -1310,6 +1310,12 @@ class Alignment:
     def get_vertical_layout(cls, alignment): pass
     def layout_vertical_by_pvi_method(cls, layout, vpoints, lengths): pass
     def remove_pvi_edit_empties(cls, alignment_id): pass
+    # Alignment evaluation & 3D combination (D3)
+    def create_3d_alignment_object(cls, alignment, distance_interval=5.0): pass
+    def evaluate_alignment_at_station(cls, alignment, station): pass
+    def get_alignment_curve(cls, alignment): pass
+    def get_alignment_length(cls, alignment): pass
+    def remove_3d_alignment_object(cls, alignment): pass
 
 
 @interface
@@ -1353,6 +1359,7 @@ class Grading:
     def register(cls, ifc_file, entity): pass
     def get_feature_line(cls, ifc_file, guid): pass
     def get_group(cls, ifc_file, guid): pass
+    def get_grading_object(cls, ifc_file, guid): pass
     def invalidate(cls, ifc_file, guid): pass
     def clear(cls): pass
     def create_blender_curve(cls, ifc_file, feature_line): pass

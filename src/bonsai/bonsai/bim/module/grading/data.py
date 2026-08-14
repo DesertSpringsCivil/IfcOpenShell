@@ -88,12 +88,33 @@ class GradingData:
         ]
         cls.data["criteria_count"] = len(criteria_templates)
 
+        # NOTE: the UIList sync (which writes CivilGradingProperties) is
+        # deliberately NOT done here. load() runs during panel draw(), and
+        # Blender forbids writing ID data (scene properties) from draw. The
+        # lists are synced in sync_uilists(), invoked from refresh() — which
+        # runs on IFC mutations / file load, outside draw.
+        cls.is_loaded = True
+
+    @classmethod
+    def sync_uilists(cls) -> None:
+        """Reconcile the grading UILists with the current IFC + registry.
+
+        Writes ``CivilGradingProperties``, so it MUST run outside panel
+        ``draw()``. Called from :func:`refresh` (Bonsai's post-mutation /
+        file-load UI hook), never from :meth:`load`.
+        """
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None:
+            return
+        groups = [
+            g for g in ifc_file.by_type("IfcGroup") if getattr(g, "ObjectType", None) == "GradingGroup"
+        ]
+        feature_line_alignments = [
+            a for a in ifc_file.by_type("IfcAlignment") if tool.Grading.is_feature_line_alignment(a)
+        ]
         cls._sync_groups_uilist_from_ifc(groups)
         cls._sync_feature_lines_uilist_from_ifc(feature_line_alignments)
         cls._sync_criteria_uilist_from_registry(ifc_file)
-
-        cls.is_loaded = True
-
 
     @staticmethod
     def _sync_groups_uilist_from_ifc(groups: list) -> None:
@@ -227,5 +248,12 @@ class GradingData:
 
 def refresh() -> None:
     """Mark :class:`GradingData` as needing reload on next access.
-    Called by Bonsai's UI refresh hook after IFC mutations."""
+    Called by Bonsai's UI refresh hook after IFC mutations.
+
+    NOTE: the UIList sync (:meth:`GradingData.sync_uilists`) is NOT done here.
+    It writes scene properties and would clobber the operators' own in-session
+    list management on every mutation. The lists are populated by the grading
+    operators during a session and re-synced from IFC once on file load via
+    the module's load_post handler.
+    """
     GradingData.is_loaded = False

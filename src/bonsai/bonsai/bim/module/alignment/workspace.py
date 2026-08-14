@@ -66,6 +66,7 @@ def _draw_sidebar(layout):
     col.operator("civil.import_alignment_csv", icon="IMPORT")
     col.separator()
     col.operator("civil.pick_pi_from_viewport", icon="EYEDROPPER")
+    col.operator("civil.enter_pi_edit_mode", text="Edit PIs", icon="EDITMODE_HLT")
     row = col.row(align=True)
     row.operator("civil.recalculate_pis", text="Visualize", icon="FILE_REFRESH")
     row.operator("civil.clear_pis", text="Clear", icon="TRASH")

@@ -25,6 +25,8 @@ import bonsai.core.alignment as core
 import bonsai.tool as tool
 import ifcopenshell.api.alignment
 import ifcopenshell.api.spatial
+import ifcopenshell.util.geolocation
+import ifcopenshell.util.unit
 from bpy_extras.io_utils import ImportHelper
 from bpy.types import Operator
 from bpy.props import StringProperty, FloatProperty
@@ -116,6 +118,28 @@ def poll_ifc4x3(cls, context):
     return True
 
 
+def _resolve_active_alignment(context):
+    """Return the IfcAlignment for ``props.active_alignment_id``, or None.
+
+    Operators that act on an existing alignment store it as
+    ``active_alignment_id`` (set on create/visualize) and their ``_execute``
+    uses that id — so their ``poll`` must resolve the alignment the same way,
+    NOT via the active viewport object (which is typically a segment curve
+    after PI/curve editing).
+    """
+    props = context.scene.CivilAlignmentProperties
+    if props.active_alignment_id == 0:
+        return None
+    ifc_file = tool.Ifc.get()
+    if ifc_file is None:
+        return None
+    try:
+        alignment = ifc_file.by_id(props.active_alignment_id)
+    except RuntimeError:
+        return None
+    return alignment if alignment.is_a("IfcAlignment") else None
+
+
 def sync_pis_from_ifc(props):
     """Sync PI Editor data from IFC alignment.
 
@@ -167,12 +191,15 @@ def sync_pis_from_ifc(props):
 
     # Update props.pis with extracted data
     props.pis.clear()
+    # pi.radius is a Blender LENGTH property (metres); the extracted radius is in
+    # project units, so scale it so the table displays the correct value.
+    unit_scale = ifcopenshell.util.unit.calculate_unit_scale(tool.Ifc.get())
     for pi_data in extracted_pis:
         pi = props.pis.add()
         pi.e = str(pi_data["e"])
         pi.n = str(pi_data["n"])
         pi.pi_type = pi_data["pi_type"]
-        pi.radius = pi_data.get("radius", 0.0)
+        pi.radius = pi_data.get("radius", 0.0) * unit_scale
 
     props.active_pi_index = 0
 
@@ -580,6 +607,11 @@ class CIVIL_OT_pick_pi_from_viewport(bpy.types.Operator, PolylineOperator, tool.
             context.workspace.status_text_set(text=None)
             PolylineDecorator.uninstall()
             tool.Polyline.clear_polyline()
+            # Auto-visualize: build the IFC segments as soon as picking finishes,
+            # so the user no longer needs a separate "Visualize" click.
+            ok, message = _build_alignment_from_active_pis(context)
+            if not ok:
+                self.report({"WARNING"}, message)
             tool.Blender.update_viewport()
             return {"FINISHED"}
 
@@ -646,10 +678,16 @@ class CIVIL_OT_pick_pi_from_viewport(bpy.types.Operator, PolylineOperator, tool.
         if not polyline_points:
             return
 
+        # Blender world space is metres (1 BU = 1 m); the georeference helpers
+        # work in IFC project length units. Convert before storing so the
+        # alignment is recreated at the correct scale (e.g. feet projects).
+        unit_scale = ifcopenshell.util.unit.calculate_unit_scale(tool.Ifc.get())
+
         num_points = len(polyline_points)
         for i, point in enumerate(polyline_points):
-            # Convert Blender space -> global easting/northing (props.pis stores global E/N coords)
-            ifc_coord = tool.Georeference.xyz2enh((point.x, point.y, 0.0))
+            # Blender metres -> IFC project units -> global easting/northing (stored on props.pis).
+            local = (point.x / unit_scale, point.y / unit_scale, 0.0)
+            ifc_coord = tool.Georeference.xyz2enh(local)
 
             pi = props.pis.add()
             pi.e = str(ifc_coord[0])
@@ -664,6 +702,66 @@ class CIVIL_OT_pick_pi_from_viewport(bpy.types.Operator, PolylineOperator, tool.
         props.active_pi_index = len(props.pis) - 1
         recalculate_pi_geometry(props)
         rebuild_display_rows(props)
+
+
+def _build_alignment_from_active_pis(context):
+    """Build/refresh the IFC horizontal segments from props.pis on the active
+    alignment and visualize them.
+
+    Shared by the Recalculate/Visualize operator and the PI picker (so picking
+    auto-visualizes on completion). Returns (ok: bool, message: str).
+    """
+    import ifcopenshell.api.alignment as align_api
+
+    ifc = tool.Ifc.get()
+    props = context.scene.CivilAlignmentProperties
+    recalculate_pi_geometry(props)
+
+    alignment = tool.Alignment.get_active_alignment()
+    if not alignment:
+        total_length = sum(pi.length_to_next for pi in props.pis)
+        return (
+            False,
+            f"Select an IfcAlignment in the outliner first. "
+            f"(Recalculated {len(props.pis)} PIs, total length: {total_length:.2f})",
+        )
+    if len(props.pis) < 2:
+        return False, "Need at least 2 PIs to build the alignment"
+
+    props.active_alignment_id = alignment.id()
+
+    # Bootstrap horizontal layout if the alignment is bare (e.g. from Add Element)
+    h_layout = align_api.get_horizontal_layout(alignment)
+    if h_layout is None:
+        h_layout = tool.Alignment.add_horizontal_layout_to_alignment(alignment)
+
+    # Ensure Blender objects exist for the alignment hierarchy
+    alignment_obj = tool.Ifc.get_object(alignment)
+    if not alignment_obj:
+        alignment_obj = tool.Alignment.create_hierarchy_for_alignment(alignment)
+
+    # Stored PI E/N (IFC project units) -> local IFC coords for the API.
+    hpoints = [
+        [float(o) for o in ifcopenshell.util.geolocation.auto_enh2xyz(ifc, float(pi.e), float(pi.n), 0.0)[:2]]
+        for pi in props.pis
+    ]
+    # pi.radius is a Blender LENGTH property (stored in metres); the API expects
+    # project units, so convert back via unit_scale — same as the coordinates.
+    unit_scale = ifcopenshell.util.unit.calculate_unit_scale(ifc)
+    radii = [pi.radius / unit_scale for pi in props.pis[1:-1]]
+
+    tool.Alignment.remove_layout_segment_objects(h_layout)
+    tool.Alignment.clear_layout_segments(h_layout)
+    align_api.layout_horizontal_alignment_by_pi_method(ifc, h_layout, hpoints, radii)
+
+    layout_obj = tool.Ifc.get_object(h_layout)
+    if not layout_obj:
+        layout_obj = tool.Alignment.create_object_for_layout(h_layout, alignment_obj)
+    if layout_obj:
+        tool.Alignment.create_objects_for_layout_segments(h_layout, layout_obj)
+
+    tool.Blender.update_viewport()
+    return True, f"Updated alignment '{alignment.Name}' with {len(hpoints)} PIs"
 
 
 class CIVIL_OT_recalculate_pis(Operator, tool.Ifc.Operator):
@@ -685,59 +783,8 @@ class CIVIL_OT_recalculate_pis(Operator, tool.Ifc.Operator):
         return True
 
     def _execute(self, context):
-        import ifcopenshell.api.alignment as align_api
-
-        ifc = tool.Ifc.get()
-        props = context.scene.CivilAlignmentProperties
-
-        # Recalculate geometry in UI properties
-        recalculate_pi_geometry(props)
-
-        # Get the selected IfcAlignment from the outliner
-        alignment = tool.Alignment.get_active_alignment()
-        if not alignment:
-            total_length = sum(pi.length_to_next for pi in props.pis)
-            self.report({"WARNING"}, f"Select an IfcAlignment in the outliner first. (Recalculated {len(props.pis)} PIs, total length: {total_length:.2f})")
-            return
-
-        props.active_alignment_id = alignment.id()
-
-        # Bootstrap horizontal layout if the alignment is bare (e.g. from Add Element)
-        h_layout = align_api.get_horizontal_layout(alignment)
-        if h_layout is None:
-            h_layout = tool.Alignment.add_horizontal_layout_to_alignment(alignment)
-
-        # Ensure Blender objects exist for the alignment hierarchy
-        alignment_obj = tool.Ifc.get_object(alignment)
-        if not alignment_obj:
-            alignment_obj = tool.Alignment.create_hierarchy_for_alignment(alignment)
-
-        # Convert global E/N coords -> local IFC coords
-        hpoints = [[float(o) for o in tool.Georeference.enh2xyz((float(pi.e), float(pi.n), 0.), to_blender=False)[:2]] for pi in props.pis]
-        radii = [pi.radius for pi in props.pis[1:-1]]
-
-        # Remove existing Blender segment objects
-        tool.Alignment.remove_layout_segment_objects(h_layout)
-
-        # Clear existing IFC segments (preserves layout and zero-length terminator)
-        align_api.clear_layout_segments(ifc, h_layout)
-
-        # Add new segments with updated PI positions
-        align_api.layout_horizontal_alignment_by_pi_method(
-            ifc, h_layout, hpoints, radii
-        )
-
-        # Create Blender objects for the new segments
-        layout_obj = tool.Ifc.get_object(h_layout)
-        if not layout_obj:
-            layout_obj = tool.Alignment.create_object_for_layout(h_layout, alignment_obj)
-
-        if layout_obj:
-            tool.Alignment.create_objects_for_layout_segments(h_layout, layout_obj)
-
-        tool.Blender.update_viewport()
-
-        self.report({"INFO"}, f"Updated alignment '{alignment.Name}' with {len(hpoints)} PIs")
+        ok, message = _build_alignment_from_active_pis(context)
+        self.report({"INFO"} if ok else {"WARNING"}, message)
 
 
 class CIVIL_OT_clear_pis(Operator, tool.Ifc.Operator):
@@ -866,7 +913,13 @@ class CIVIL_OT_create_alignment_by_pi(Operator, tool.Ifc.Operator):
         props = context.scene.CivilAlignmentProperties
 
         # Convert global E/N coords (stored in props.pis) -> local IFC coords for the IfcOpenShell API
-        hpoints = [[float(o) for o in tool.Georeference.enh2xyz((float(pi.e), float(pi.n), 0.), to_blender=False)[:2]] for pi in props.pis]
+        hpoints = [
+            [
+                float(o)
+                for o in ifcopenshell.util.geolocation.auto_enh2xyz(tool.Ifc.get(), float(pi.e), float(pi.n), 0.0)[:2]
+            ]
+            for pi in props.pis
+        ]
         radii = [pi.radius for pi in props.pis[1:-1]]
 
         existing_alignment = tool.Alignment.get_active_alignment()
@@ -982,7 +1035,7 @@ class CIVIL_OT_add_stationing_referent(Operator, tool.Ifc.Operator):
         ifc = tool.Ifc.get()
         props = context.scene.CivilAlignmentProperties
 
-        alignment = tool.Alignment.get_active_alignment()
+        alignment = _resolve_active_alignment(context)
         if alignment is None:
             self.report({"ERROR"}, "Alignment no longer exists. Reference cleared.")
             return {"CANCELLED"}
@@ -1044,7 +1097,7 @@ class CIVIL_OT_name_segments(Operator, tool.Ifc.Operator):
         ifc = tool.Ifc.get()
         props = context.scene.CivilAlignmentProperties
 
-        alignment = tool.Alignment.get_active_alignment()
+        alignment = _resolve_active_alignment(context)
         if alignment is None:
             self.report({"ERROR"}, "Alignment no longer exists. Reference cleared.")
             return {"CANCELLED"}
@@ -1085,7 +1138,7 @@ class CIVIL_OT_enter_pi_edit_mode(Operator, tool.Ifc.Operator):
             cls.poll_message_set("No alignment selected")
             return False
         # Verify alignment still exists
-        alignment = tool.Alignment.get_active_alignment()
+        alignment = _resolve_active_alignment(context)
         if alignment is None:
             cls.poll_message_set("Selected alignment no longer exists")
             return False
@@ -1124,6 +1177,14 @@ class CIVIL_OT_enter_pi_edit_mode(Operator, tool.Ifc.Operator):
 
         # Install visual feedback decorator
         alignment_decorator.PIEditDecorator.install(context, empties)
+
+        # Make the segment curves non-selectable so viewport clicks land on the
+        # PI empties, and deselect everything so the user starts clean.
+        alignment = tool.Ifc.get().by_id(self._alignment_id)
+        h_layout = tool.Alignment.get_horizontal_layout(alignment)
+        tool.Alignment.set_layout_segments_selectable(h_layout, False)
+        for obj in list(context.selected_objects):
+            obj.select_set(False)
 
         # Update UI state
         props.is_pi_edit_mode = True
@@ -1200,6 +1261,15 @@ class CIVIL_OT_enter_pi_edit_mode(Operator, tool.Ifc.Operator):
         # Cleanup decorator
         alignment_decorator.PIEditDecorator.uninstall()
 
+        # Restore segment selectability (on apply the segments are rebuilt and
+        # already selectable; on cancel this re-enables the originals).
+        try:
+            alignment = tool.Ifc.get().by_id(self._alignment_id)
+            h_layout = tool.Alignment.get_horizontal_layout(alignment)
+            tool.Alignment.set_layout_segments_selectable(h_layout, True)
+        except (RuntimeError, AttributeError):
+            pass
+
         # Reset UI state
         props.is_pi_edit_mode = False
         props.pi_edit_alignment_id = 0
@@ -1237,7 +1307,7 @@ class CIVIL_OT_add_vertical_to_alignment(Operator, tool.Ifc.Operator):
         if props.active_alignment_id == 0:
             cls.poll_message_set("No alignment selected")
             return False
-        alignment = tool.Alignment.get_active_alignment()
+        alignment = _resolve_active_alignment(context)
         if alignment is None:
             cls.poll_message_set("Selected alignment no longer exists")
             return False
@@ -1249,11 +1319,286 @@ class CIVIL_OT_add_vertical_to_alignment(Operator, tool.Ifc.Operator):
     def _execute(self, context):
         props = context.scene.CivilAlignmentProperties
         try:
-            core.add_vertical_to_alignment(tool.Ifc, tool.Alignment, props.active_alignment_id)
+            v_layout = core.add_vertical_to_alignment(tool.Ifc, tool.Alignment, props.active_alignment_id)
         except ValueError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
-        self.report({"INFO"}, "Vertical layout added")
+
+        # Give the new layout an outliner node (parallel to IfcAlignmentHorizontal)
+        # so it's visible. An empty vertical has no segment geometry yet — the
+        # PVI Editor populates it.
+        alignment = tool.Ifc.get().by_id(props.active_alignment_id)
+        alignment_obj = tool.Ifc.get_object(alignment)
+        if alignment_obj is None:
+            alignment_obj = tool.Alignment.create_hierarchy_for_alignment(alignment)
+        if v_layout and alignment_obj:
+            tool.Alignment.create_object_for_layout(v_layout, alignment_obj)
+        tool.Blender.update_viewport()
+        self.report({"INFO"}, "Vertical layout added — open the PVI Editor to add PVIs")
+
+
+class CIVIL_OT_visualize_3d_alignment(Operator, tool.Ifc.Operator):
+    """Create or refresh the draped 3D centerline for the active alignment"""
+
+    bl_idname = "civil.visualize_3d_alignment"
+    bl_label = "Show 3D Centerline"
+    bl_description = (
+        "Create or refresh the draped 3D centerline (combined horizontal + vertical "
+        "alignment) for the active alignment"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    distance_interval: FloatProperty(
+        name="Sample Interval",
+        description="Spacing between sampled points along the alignment",
+        default=5.0,
+        min=0.1,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("No alignment selected")
+            return False
+        alignment = _resolve_active_alignment(context)
+        if alignment is None:
+            cls.poll_message_set("Selected alignment no longer exists")
+            return False
+        return True
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        try:
+            obj = core.visualize_3d_alignment(
+                tool.Ifc, tool.Alignment, props.active_alignment_id, self.distance_interval
+            )
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+        if obj is None:
+            self.report({"WARNING"}, "Alignment has no geometry to visualize")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "3D centerline updated")
+
+
+def _load_pvis_into_props(props, pvis):
+    """Replace props.vertical_pvis with the given back-calculated PVI dicts.
+
+    The PVI dicts are in IFC project units. elevation and curve_length are
+    Blender LENGTH properties (stored in metres), so scale them so the table
+    displays the correct values; station has no unit and is stored raw.
+    """
+    props.vertical_pvis.clear()
+    unit_scale = ifcopenshell.util.unit.calculate_unit_scale(tool.Ifc.get())
+    count = len(pvis)
+    for i, pvi in enumerate(pvis):
+        item = props.vertical_pvis.add()
+        item.station = float(pvi["station"])
+        item.elevation = float(pvi["elevation"]) * unit_scale
+        item.curve_length = float(pvi.get("curve_length", 0.0)) * unit_scale
+        item.pvi_type = "ENDPOINT" if (i == 0 or i == count - 1) else "INTERIOR"
+    props.active_pvi_index = 0
+    rebuild_vertical_display_rows(props)
+
+
+class CIVIL_OT_toggle_profile_view(Operator):
+    """Show or hide the 2D profile view (station vs elevation) overlay"""
+
+    bl_idname = "civil.toggle_profile_view"
+    bl_label = "Toggle Profile View"
+    bl_description = "Show/hide the 2D station-vs-elevation profile overlay for the active alignment"
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("No alignment selected")
+            return False
+        return True
+
+    def execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        decorator = alignment_decorator.ProfileViewDecorator
+        if decorator.is_installed:
+            decorator.uninstall()
+            props.show_profile_view = False
+        else:
+            decorator.install(
+                context,
+                props.active_alignment_id,
+                props.profile_terrain,
+                props.profile_view_interval,
+                props.profile_view_height,
+            )
+            props.show_profile_view = True
+        tool.Blender.update_viewport()
+        return {"FINISHED"}
+
+
+class CIVIL_OT_refresh_profile_view(Operator):
+    """Re-sample the design and terrain profiles shown in the profile view"""
+
+    bl_idname = "civil.refresh_profile_view"
+    bl_label = "Refresh Profile View"
+    bl_description = "Re-sample the design profile and terrain after edits or settings changes"
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        if not alignment_decorator.ProfileViewDecorator.is_installed:
+            cls.poll_message_set("Profile view is not shown")
+            return False
+        return True
+
+    def execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        decorator = alignment_decorator.ProfileViewDecorator
+        decorator.alignment_id = props.active_alignment_id
+        decorator.terrain_name = props.profile_terrain.name if props.profile_terrain else ""
+        decorator.interval = props.profile_view_interval
+        decorator.panel_height = props.profile_view_height
+        decorator.refresh()
+        tool.Blender.update_viewport()
+        return {"FINISHED"}
+
+
+class CIVIL_OT_edit_pvi_in_profile(Operator):
+    """Interactively drag PVI markers in the profile view
+
+    Click a PVI marker and drag to change its elevation (and station, for
+    interior PVIs). ENTER commits to the IFC vertical alignment (undo-safe via
+    civil.recalculate_pvis); ESC discards.
+    """
+
+    bl_idname = "civil.edit_pvi_in_profile"
+    bl_label = "Edit PVIs in Profile"
+    bl_description = "Drag PVI markers in the profile view to edit elevations and stations"
+    bl_options = {"REGISTER", "UNDO"}
+
+    PICK_RADIUS_PX = 16.0
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        if not alignment_decorator.ProfileViewDecorator.is_installed:
+            cls.poll_message_set("Show the profile view first")
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("No alignment selected")
+            return False
+        alignment = _resolve_active_alignment(context)
+        if alignment is None or tool.Alignment.get_vertical_layout(alignment) is None:
+            cls.poll_message_set("Active alignment has no vertical layout")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        props = context.scene.CivilAlignmentProperties
+        self.alignment_id = props.active_alignment_id
+        alignment = tool.Ifc.get().by_id(self.alignment_id)
+        pvis = tool.Alignment.back_calculate_pvis_from_vertical(alignment)
+        if len(pvis) < 2:
+            self.report({"ERROR"}, "Need at least 2 PVIs to edit")
+            return {"CANCELLED"}
+        _load_pvis_into_props(props, pvis)
+        self.dragging = -1
+        self._sync_decorator(props)
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def _sync_decorator(self, props):
+        decorator = alignment_decorator.ProfileViewDecorator
+        points = [(p.station, p.elevation) for p in props.vertical_pvis]
+        decorator.pvi_points = points
+        decorator.preview_points = list(points)
+        tool.Blender.update_viewport()
+
+    def _nearest_pvi(self, props, mouse_x, mouse_y):
+        transform = alignment_decorator.ProfileViewDecorator.current_transform
+        if transform is None:
+            return -1
+        best_index, best_distance = -1, self.PICK_RADIUS_PX
+        for i, pvi in enumerate(props.vertical_pvis):
+            px, py = transform.data_to_screen(pvi.station, pvi.elevation)
+            distance = math.hypot(px - mouse_x, py - mouse_y)
+            if distance <= best_distance:
+                best_index, best_distance = i, distance
+        return best_index
+
+    def modal(self, context, event):
+        props = context.scene.CivilAlignmentProperties
+        transform = alignment_decorator.ProfileViewDecorator.current_transform
+
+        if event.type == "MOUSEMOVE" and self.dragging >= 0 and transform is not None:
+            station, elevation = transform.screen_to_data(event.mouse_region_x, event.mouse_region_y)
+            pvi = props.vertical_pvis[self.dragging]
+            pvi.elevation = elevation
+            # Interior PVIs may also move in station, clamped between neighbours.
+            if 0 < self.dragging < len(props.vertical_pvis) - 1:
+                low = props.vertical_pvis[self.dragging - 1].station + 1e-3
+                high = props.vertical_pvis[self.dragging + 1].station - 1e-3
+                pvi.station = max(low, min(high, station))
+            self._sync_decorator(props)
+            return {"RUNNING_MODAL"}
+
+        if event.type == "LEFTMOUSE":
+            if event.value == "PRESS":
+                self.dragging = self._nearest_pvi(props, event.mouse_region_x, event.mouse_region_y)
+                return {"RUNNING_MODAL"}
+            if event.value == "RELEASE":
+                self.dragging = -1
+                return {"RUNNING_MODAL"}
+
+        if event.type in {"RET", "NUMPAD_ENTER"} and event.value == "PRESS":
+            return self._commit(context)
+
+        if event.type == "ESC" and event.value == "PRESS":
+            return self._cancel(context)
+
+        # Let the user navigate the viewport while editing.
+        if event.type in {"MIDDLEMOUSE", "WHEELUPMOUSE", "WHEELDOWNMOUSE"}:
+            return {"PASS_THROUGH"}
+
+        return {"RUNNING_MODAL"}
+
+    def _commit(self, context):
+        decorator = alignment_decorator.ProfileViewDecorator
+        decorator.preview_points = None
+        try:
+            bpy.ops.civil.recalculate_pvis()
+        except RuntimeError as e:
+            self.report({"ERROR"}, str(e))
+            decorator.refresh()
+            tool.Blender.update_viewport()
+            return {"CANCELLED"}
+        decorator.refresh()
+        tool.Blender.update_viewport()
+        self.report({"INFO"}, "Profile updated")
+        return {"FINISHED"}
+
+    def _cancel(self, context):
+        props = context.scene.CivilAlignmentProperties
+        decorator = alignment_decorator.ProfileViewDecorator
+        decorator.preview_points = None
+        # Reload the table from IFC so the discarded drag does not linger.
+        alignment = tool.Ifc.get().by_id(self.alignment_id)
+        try:
+            _load_pvis_into_props(props, tool.Alignment.back_calculate_pvis_from_vertical(alignment))
+        except ValueError:
+            pass
+        decorator.refresh()
+        tool.Blender.update_viewport()
+        return {"CANCELLED"}
 
 
 class CIVIL_OT_add_pvi(Operator):
@@ -1372,7 +1717,7 @@ class CIVIL_OT_recalculate_pvis(Operator, tool.Ifc.Operator):
         props = context.scene.CivilAlignmentProperties
         recalculate_pvi_geometry(props)
 
-        alignment = tool.Alignment.get_active_alignment()
+        alignment = _resolve_active_alignment(context)
         if not alignment:
             total_len = 0.0
             if len(props.vertical_pvis) >= 2:
@@ -1385,17 +1730,30 @@ class CIVIL_OT_recalculate_pvis(Operator, tool.Ifc.Operator):
             self.report({"ERROR"}, "Alignment has no vertical layout — add vertical first")
             return
 
-        vpoints = [(pvi.station, pvi.elevation) for pvi in props.vertical_pvis]
-        curve_lengths = [props.vertical_pvis[i].curve_length for i in range(1, len(props.vertical_pvis) - 1)]
+        # station has no unit (raw project units); elevation and curve_length are
+        # Blender LENGTH properties (stored in metres) — convert to project units
+        # for the API, same as the horizontal radius.
+        unit_scale = ifcopenshell.util.unit.calculate_unit_scale(tool.Ifc.get())
+        vpoints = [(pvi.station, pvi.elevation / unit_scale) for pvi in props.vertical_pvis]
+        curve_lengths = [
+            props.vertical_pvis[i].curve_length / unit_scale for i in range(1, len(props.vertical_pvis) - 1)
+        ]
 
         tool.Alignment.remove_layout_segment_objects(v_layout)
         tool.Alignment.clear_layout_segments(v_layout)
         tool.Alignment.layout_vertical_by_pvi_method(v_layout, vpoints, curve_lengths)
 
+        # Ensure the vertical layout has an outliner node so its segments display
+        # (it won't if the layout was created before the node-creation fix).
         layout_obj = tool.Ifc.get_object(v_layout)
+        if not layout_obj:
+            alignment_obj = tool.Ifc.get_object(alignment)
+            if alignment_obj:
+                layout_obj = tool.Alignment.create_object_for_layout(v_layout, alignment_obj)
         if layout_obj:
             tool.Alignment.create_objects_for_layout_segments(v_layout, layout_obj)
 
+        tool.Blender.update_viewport()
         self.report({"INFO"}, f"Updated vertical alignment '{alignment.Name}' with {len(vpoints)} PVIs")
 
 
@@ -1456,7 +1814,7 @@ class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
         if props.active_alignment_id == 0:
             cls.poll_message_set("No alignment selected")
             return False
-        alignment = tool.Alignment.get_active_alignment()
+        alignment = _resolve_active_alignment(context)
         if alignment is None:
             cls.poll_message_set("Selected alignment no longer exists")
             return False

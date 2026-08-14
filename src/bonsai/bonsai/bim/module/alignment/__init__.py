@@ -55,11 +55,18 @@ classes = (
     operator.CIVIL_OT_clear_pvis,
     # Operators - PVI Edit Mode
     operator.CIVIL_OT_enter_pvi_edit_mode,
+    # Operators - 3D Combination (D3)
+    operator.CIVIL_OT_visualize_3d_alignment,
+    # Operators - Profile View (D2)
+    operator.CIVIL_OT_toggle_profile_view,
+    operator.CIVIL_OT_refresh_profile_view,
+    operator.CIVIL_OT_edit_pvi_in_profile,
     # UI Panels (appear in Properties sidebar under CIVIL tab)
     ui.CIVIL_PT_alignment_creation,
     ui.CIVIL_PT_pi_editor,
     ui.CIVIL_PT_vertical_creation,
     ui.CIVIL_PT_pvi_editor,
+    ui.CIVIL_PT_profile_view,
     ui.CIVIL_PT_alignment_stationing,
 )
 

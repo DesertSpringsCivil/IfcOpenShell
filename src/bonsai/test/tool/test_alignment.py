@@ -22,7 +22,7 @@ import bpy
 import ifcopenshell
 import ifcopenshell.api.alignment as align_api
 import bonsai.tool as tool
-from bonsai.tool.alignment import Alignment as subject, PVIGeometryResult
+from bonsai.tool.alignment import Alignment as subject, PVIGeometryResult, AlignmentPoint, ProfileViewTransform
 from test.bim.bootstrap import NewFile, NewIfc4X3
 
 
@@ -1326,3 +1326,533 @@ class TestIfcSaveReloadRoundtrip(NewIfc4X3):
             assert "CIRCULARARC" in predefined_types
         finally:
             os.unlink(tmp.name)
+
+
+# ---------------------------------------------------------------------------
+# evaluate_alignment_at_station  (D3 keystone — 3D combination)
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateAlignmentAtStation(NewFile):
+    """Tests for Alignment.evaluate_alignment_at_station().
+
+    Built on a straight-east horizontal so XY positions are predictable
+    (station -> x, y == 0), with a symmetric crest vertical curve. The model
+    units are millimetres (default assign_unit), so these also exercise the
+    SI<->model unit conversion in the evaluation path.
+    """
+
+    def _build(self, vpoints, lengths, hpoints=None):
+        import ifcopenshell.api.root
+        import ifcopenshell.api.unit
+
+        ifc = ifcopenshell.file(schema="IFC4X3_ADD2")
+        tool.Ifc.set(ifc)
+        ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
+        ifcopenshell.api.unit.assign_unit(ifc)
+        alignment = align_api.create(ifc, name="Eval", include_vertical=False)
+        h_layout = align_api.get_horizontal_layout(alignment)
+        if hpoints is None:
+            # Straight east tangent spanning the full station range.
+            hpoints = [(0.0, 0.0), (vpoints[-1][0], 0.0)]
+        align_api.layout_horizontal_alignment_by_pi_method(ifc, h_layout, hpoints=hpoints, radii=[])
+        if vpoints is not None:
+            v_layout = align_api.add_vertical_layout(ifc, alignment)
+            align_api.layout_vertical_alignment_by_pi_method(ifc, v_layout, vpoints, lengths)
+        return alignment
+
+    # Crest curve: +2% in, -2% out, 100-unit parabola at the middle PVI.
+    CREST = ([(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)], [100.0])
+
+    def test_returns_alignment_point(self):
+        alignment = self._build(*self.CREST)
+        result = subject.evaluate_alignment_at_station(alignment, 250.0)
+        assert isinstance(result, AlignmentPoint)
+        assert_close(result.station, 250.0)
+
+    def test_position_on_entry_grade_tangent(self):
+        """Before the curve (BVC at 450): straight +2% grade from elev 100."""
+        alignment = self._build(*self.CREST)
+        result = subject.evaluate_alignment_at_station(alignment, 250.0)
+        assert_close(result.position[0], 250.0, tol=0.1)  # x == station (straight east)
+        assert_close(result.position[1], 0.0, tol=0.1)  # y == 0
+        assert_close(result.position[2], 105.0, tol=0.1)  # 100 + 0.02*250
+        assert_close(result.grade, 0.02, tol=1e-3)
+
+    def test_position_at_start(self):
+        alignment = self._build(*self.CREST)
+        result = subject.evaluate_alignment_at_station(alignment, 0.0)
+        assert_close(result.position[0], 0.0, tol=0.1)
+        assert_close(result.position[2], 100.0, tol=0.1)  # start elevation
+        assert_close(result.grade, 0.02, tol=1e-3)
+
+    def test_position_at_crest_apex(self):
+        """At the PVI station the symmetric crest apex sits L/8 below the PVI:
+        elev = 109.5 (BVC 109 at sta 450, +0.02*50 - 0.5)."""
+        alignment = self._build(*self.CREST)
+        result = subject.evaluate_alignment_at_station(alignment, 500.0)
+        assert_close(result.position[2], 109.5, tol=0.1)
+        assert_close(result.grade, 0.0, tol=1e-3)  # grade is zero at the apex
+
+    def test_position_at_end_on_exit_grade(self):
+        alignment = self._build(*self.CREST)
+        result = subject.evaluate_alignment_at_station(alignment, 1000.0)
+        assert_close(result.position[0], 1000.0, tol=0.1)
+        assert_close(result.position[2], 100.0, tol=0.1)
+        assert_close(result.grade, -0.02, tol=1e-3)
+
+    def test_frame_is_orthonormal(self):
+        alignment = self._build(*self.CREST)
+        result = subject.evaluate_alignment_at_station(alignment, 250.0)
+
+        def dot(a, b):
+            return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+        for vec in (result.tangent, result.normal, result.up):
+            assert_close(math.sqrt(dot(vec, vec)), 1.0, tol=1e-6)  # unit length
+        assert_close(dot(result.tangent, result.normal), 0.0, tol=1e-6)
+        assert_close(dot(result.tangent, result.up), 0.0, tol=1e-6)
+        assert_close(dot(result.normal, result.up), 0.0, tol=1e-6)
+        # Travel is mostly +x (straight east), up is mostly +z.
+        assert result.tangent[0] > 0.99
+        assert result.up[2] > 0.9
+
+    def test_returns_none_beyond_end(self):
+        """The engine extrapolates past the end; we must reject it."""
+        alignment = self._build(*self.CREST)
+        assert subject.evaluate_alignment_at_station(alignment, 1500.0) is None
+
+    def test_returns_none_before_start(self):
+        alignment = self._build(*self.CREST)
+        assert subject.evaluate_alignment_at_station(alignment, -10.0) is None
+
+    def test_horizontal_only_alignment_has_zero_elevation(self):
+        """With no vertical layout the curve is a composite curve; Z == 0."""
+        alignment = self._build(vpoints=None, lengths=None, hpoints=[(0.0, 0.0), (500.0, 0.0)])
+        result = subject.evaluate_alignment_at_station(alignment, 250.0)
+        assert result is not None
+        assert_close(result.position[0], 250.0, tol=0.1)
+        assert_close(result.position[2], 0.0, tol=0.1)
+        assert_close(result.grade, 0.0, tol=1e-3)
+
+
+class TestGetAlignmentLength(NewFile):
+    """Tests for Alignment.get_alignment_length()."""
+
+    def test_sums_horizontal_segment_lengths(self):
+        import ifcopenshell.api.root
+        import ifcopenshell.api.unit
+
+        ifc = ifcopenshell.file(schema="IFC4X3_ADD2")
+        tool.Ifc.set(ifc)
+        ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
+        ifcopenshell.api.unit.assign_unit(ifc)
+        alignment = align_api.create(ifc, name="Len", include_vertical=False)
+        h_layout = align_api.get_horizontal_layout(alignment)
+        align_api.layout_horizontal_alignment_by_pi_method(
+            ifc, h_layout, hpoints=[(0.0, 0.0), (1000.0, 0.0)], radii=[]
+        )
+        assert_close(subject.get_alignment_length(alignment), 1000.0, tol=1e-6)
+
+    def test_returns_none_without_horizontal_layout(self):
+        import ifcopenshell.api.root
+
+        ifc = ifcopenshell.file(schema="IFC4X3_ADD2")
+        tool.Ifc.set(ifc)
+        ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
+        bare = ifc.createIfcAlignment()
+        assert subject.get_alignment_length(bare) is None
+
+
+# ---------------------------------------------------------------------------
+# create_3d_alignment_object  (D3 — draped 3D centerline visualization)
+# ---------------------------------------------------------------------------
+
+
+class TestCreate3DAlignmentObject(NewIfc4X3):
+    """Tests for Alignment.create_3d_alignment_object()."""
+
+    def _build_with_vertical(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="C3D", include_vertical=False)
+        h = align_api.get_horizontal_layout(alignment)
+        align_api.layout_horizontal_alignment_by_pi_method(
+            ifc_file, h, hpoints=[(0.0, 0.0), (1000.0, 0.0)], radii=[]
+        )
+        v = align_api.add_vertical_layout(ifc_file, alignment)
+        align_api.layout_vertical_alignment_by_pi_method(
+            ifc_file, v, [(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)], [100.0]
+        )
+        subject.create_hierarchy_for_alignment(alignment)
+        return alignment
+
+    def test_creates_mesh_object_with_draped_elevation(self):
+        alignment = self._build_with_vertical()
+        obj = subject.create_3d_alignment_object(alignment, distance_interval=50.0)
+        assert obj is not None
+        assert obj.type == "MESH"
+        assert len(obj.data.vertices) >= 2
+        zs = [v.co.z for v in obj.data.vertices]
+        # The vertical curve drapes the centerline: Z must vary, not be flat.
+        assert (max(zs) - min(zs)) > 1.0
+
+    def test_is_idempotent(self):
+        alignment = self._build_with_vertical()
+        subject.create_3d_alignment_object(alignment, distance_interval=50.0)
+        obj2 = subject.create_3d_alignment_object(alignment, distance_interval=50.0)
+        assert obj2 is not None
+        centerlines = [o for o in bpy.data.objects if o.get(subject.CENTERLINE_3D_TAG) == alignment.id()]
+        assert len(centerlines) == 1  # rebuilt, not duplicated
+        assert centerlines[0] == obj2  # the survivor is the freshly-built object
+
+    def test_remove_3d_alignment_object(self):
+        alignment = self._build_with_vertical()
+        subject.create_3d_alignment_object(alignment, distance_interval=50.0)
+        removed = subject.remove_3d_alignment_object(alignment)
+        assert removed == 1
+        centerlines = [o for o in bpy.data.objects if o.get(subject.CENTERLINE_3D_TAG) == alignment.id()]
+        assert centerlines == []
+
+
+# ---------------------------------------------------------------------------
+# buildingSMART validation  (D1 verification criterion for vertical output)
+# ---------------------------------------------------------------------------
+
+
+class TestAlignmentVerticalBSIIntegration(NewIfc4X3):
+    """Round-trips a horizontal+vertical alignment through
+    ``ifcopenshell.validate`` to assert the IfcAlignmentVertical /
+    IfcGradientCurve output is schema-clean — the D1 deliverable's
+    "passes buildingSMART validation" criterion.
+    """
+
+    @staticmethod
+    def _validate_clean(ifc_path):
+        import logging
+        import ifcopenshell.validate
+
+        reopened = ifcopenshell.open(str(ifc_path))
+        records: list = []
+
+        class _CollectingHandler(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        logger = logging.Logger("vertical-bsi-validate")
+        logger.addHandler(_CollectingHandler(level=logging.DEBUG))
+        ifcopenshell.validate.validate(reopened, logger)
+
+        errors = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+        assert errors == [], f"ifcopenshell.validate() reported: {errors}"
+        return reopened
+
+    def test_vertical_alignment_passes_validation_with_expected_entities(self, tmp_path):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="BSIVert", include_vertical=False)
+        h = align_api.get_horizontal_layout(alignment)
+        align_api.layout_horizontal_alignment_by_pi_method(
+            ifc_file, h, hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0]
+        )
+        v = align_api.add_vertical_layout(ifc_file, alignment)
+        align_api.layout_vertical_alignment_by_pi_method(
+            ifc_file, v, [(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)], [100.0]
+        )
+
+        # Combining horizontal + vertical yields an IfcGradientCurve.
+        assert align_api.get_curve(alignment).is_a() == "IfcGradientCurve"
+
+        ifc_path = tmp_path / "vertical_bsi.ifc"
+        ifc_file.write(str(ifc_path))
+        reopened = self._validate_clean(ifc_path)
+
+        # D1: IfcAlignmentVertical with CONSTANTGRADIENT + PARABOLICARC segments.
+        assert len(reopened.by_type("IfcAlignmentVertical")) >= 1
+        vertical_segments = [
+            s
+            for s in reopened.by_type("IfcAlignmentSegment")
+            if s.DesignParameters and s.DesignParameters.is_a("IfcAlignmentVerticalSegment")
+        ]
+        vertical_types = {s.DesignParameters.PredefinedType for s in vertical_segments}
+        assert "CONSTANTGRADIENT" in vertical_types
+        assert "PARABOLICARC" in vertical_types
+        # The 3D combined representation survives the round-trip.
+        assert len(reopened.by_type("IfcGradientCurve")) >= 1
+
+
+# ---------------------------------------------------------------------------
+# ProfileViewTransform  (D2 — screen <-> profile-data coordinate mapping)
+# ---------------------------------------------------------------------------
+
+
+class TestProfileViewTransform(NewFile):
+    @staticmethod
+    def _transform():
+        return ProfileViewTransform(
+            station_min=0.0,
+            station_max=100.0,
+            elevation_min=10.0,
+            elevation_max=20.0,
+            rect_x=50.0,
+            rect_y=30.0,
+            rect_width=200.0,
+            rect_height=100.0,
+        )
+
+    def test_data_to_screen_at_origin(self):
+        px, py = self._transform().data_to_screen(0.0, 10.0)
+        assert_close(px, 50.0, tol=1e-6)
+        assert_close(py, 30.0, tol=1e-6)
+
+    def test_data_to_screen_at_far_corner(self):
+        px, py = self._transform().data_to_screen(100.0, 20.0)
+        assert_close(px, 250.0, tol=1e-6)
+        assert_close(py, 130.0, tol=1e-6)
+
+    def test_data_to_screen_at_midpoint(self):
+        px, py = self._transform().data_to_screen(50.0, 15.0)
+        assert_close(px, 150.0, tol=1e-6)
+        assert_close(py, 80.0, tol=1e-6)
+
+    def test_screen_to_data_round_trips(self):
+        transform = self._transform()
+        px, py = transform.data_to_screen(37.0, 14.5)
+        station, elevation = transform.screen_to_data(px, py)
+        assert_close(station, 37.0, tol=1e-6)
+        assert_close(elevation, 14.5, tol=1e-6)
+
+    def test_zero_span_does_not_divide_by_zero(self):
+        transform = ProfileViewTransform(5.0, 5.0, 5.0, 5.0, 0.0, 0.0, 100.0, 100.0)
+        px, py = transform.data_to_screen(5.0, 5.0)  # must not raise
+        station, elevation = transform.screen_to_data(px, py)
+        assert isinstance(station, float) and isinstance(elevation, float)
+
+
+class TestBuildProfileViewTransform(NewFile):
+    def test_returns_none_for_no_data(self):
+        assert subject.build_profile_view_transform([], [], 0.0, 0.0, 100.0, 100.0) is None
+
+    def test_bounds_cover_design_and_terrain_with_padding(self):
+        design = [(0.0, 100.0), (100.0, 110.0)]
+        terrain = [(0.0, 95.0), (100.0, 108.0)]
+        transform = subject.build_profile_view_transform(design, terrain, 10.0, 20.0, 300.0, 150.0)
+        assert_close(transform.station_min, 0.0)
+        assert_close(transform.station_max, 100.0)
+        # Elevation bounds are padded beyond the raw [95, 110] data range.
+        assert transform.elevation_min < 95.0
+        assert transform.elevation_max > 110.0
+        assert (transform.rect_x, transform.rect_y) == (10.0, 20.0)
+        assert (transform.rect_width, transform.rect_height) == (300.0, 150.0)
+
+
+# ---------------------------------------------------------------------------
+# sample_design_profile / sample_terrain_profile  (D2 profile sampling)
+# ---------------------------------------------------------------------------
+
+
+class TestSampleDesignProfile(NewFile):
+    def _build(self, vpoints, lengths):
+        import ifcopenshell.api.root
+        import ifcopenshell.api.unit
+
+        ifc = ifcopenshell.file(schema="IFC4X3_ADD2")
+        tool.Ifc.set(ifc)
+        ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
+        ifcopenshell.api.unit.assign_unit(ifc)
+        alignment = align_api.create(ifc, name="Profile", include_vertical=False)
+        h_layout = align_api.get_horizontal_layout(alignment)
+        align_api.layout_horizontal_alignment_by_pi_method(
+            ifc, h_layout, hpoints=[(0.0, 0.0), (vpoints[-1][0], 0.0)], radii=[]
+        )
+        v_layout = align_api.add_vertical_layout(ifc, alignment)
+        align_api.layout_vertical_alignment_by_pi_method(ifc, v_layout, vpoints, lengths)
+        return alignment
+
+    def test_endpoints_match_design(self):
+        alignment = self._build([(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)], [100.0])
+        points = subject.sample_design_profile(alignment, interval=100.0)
+        assert len(points) >= 2
+        assert_close(points[0][0], 0.0, tol=0.5)
+        assert_close(points[0][1], 100.0, tol=0.5)
+        assert_close(points[-1][0], 1000.0, tol=0.5)
+        assert_close(points[-1][1], 100.0, tol=0.5)
+
+    def test_profile_follows_parabola_apex_below_pvi(self):
+        """The crest apex (~109.5) is below the PVI tangent intersection (110),
+        proving the parabola — not the straight tangents — is being sampled."""
+        alignment = self._build([(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)], [100.0])
+        points = subject.sample_design_profile(alignment, interval=50.0)
+        max_elevation = max(elevation for _, elevation in points)
+        assert 109.0 <= max_elevation < 110.0
+
+    def test_returns_empty_without_horizontal(self):
+        import ifcopenshell.api.root
+
+        ifc = ifcopenshell.file(schema="IFC4X3_ADD2")
+        tool.Ifc.set(ifc)
+        ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
+        bare = ifc.createIfcAlignment()
+        assert subject.sample_design_profile(bare, interval=100.0) == []
+
+
+class TestSampleTerrainProfile(NewFile):
+    def _build_horizontal(self, length=1000.0):
+        import ifcopenshell.api.root
+        import ifcopenshell.api.unit
+
+        ifc = ifcopenshell.file(schema="IFC4X3_ADD2")
+        tool.Ifc.set(ifc)
+        ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
+        ifcopenshell.api.unit.assign_unit(ifc)
+        alignment = align_api.create(ifc, name="TerrainAlign", include_vertical=False)
+        h_layout = align_api.get_horizontal_layout(alignment)
+        align_api.layout_horizontal_alignment_by_pi_method(
+            ifc, h_layout, hpoints=[(0.0, 0.0), (length, 0.0)], radii=[]
+        )
+        return alignment
+
+    @staticmethod
+    def _make_flat_terrain(z, size):
+        """Flat terrain quad in Blender world metres at height ``z``."""
+        mesh = bpy.data.meshes.new("Terrain")
+        verts = [(-size, -size, z), (size, -size, z), (size, size, z), (-size, size, z)]
+        mesh.from_pydata(verts, [], [(0, 1, 2, 3)])
+        mesh.update()
+        obj = bpy.data.objects.new("Terrain", mesh)
+        bpy.context.collection.objects.link(obj)
+        return obj
+
+    def test_flat_terrain_returns_constant_elevation(self):
+        # The model is millimetres (unit_scale=0.001) and the 1000-unit alignment
+        # spans 0..1 m in Blender world. A flat terrain at z=0.05 m therefore
+        # reports a ground elevation of 0.05 / 0.001 = 50 project units.
+        alignment = self._build_horizontal(1000.0)
+        terrain = self._make_flat_terrain(z=0.05, size=5.0)
+        points = subject.sample_terrain_profile(alignment, terrain, interval=100.0)
+        assert len(points) >= 2
+        for _station, ground in points:
+            assert_close(ground, 50.0, tol=0.5)
+
+    def test_returns_empty_for_no_terrain(self):
+        alignment = self._build_horizontal(1000.0)
+        assert subject.sample_terrain_profile(alignment, None, interval=100.0) == []
+
+    def test_get_alignment_start_station_is_zero(self):
+        alignment = self._build_horizontal(1000.0)
+        assert_close(subject.get_alignment_start_station(alignment), 0.0, tol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Registration smoke test  (D2 + D3 operators / panel / props)
+# ---------------------------------------------------------------------------
+
+
+class TestProfileAndD3Registration(NewFile):
+    """The pytest-bdd conftest issue blocks the operator-test directory, so
+    this verifies the new D2/D3 operators, panel, and properties registered
+    cleanly with the Bonsai addon (the failure mode operator tests would catch)."""
+
+    def test_operators_registered(self):
+        for name in (
+            "CIVIL_OT_visualize_3d_alignment",
+            "CIVIL_OT_toggle_profile_view",
+            "CIVIL_OT_refresh_profile_view",
+            "CIVIL_OT_edit_pvi_in_profile",
+        ):
+            assert hasattr(bpy.types, name), f"{name} is not registered"
+
+    def test_panel_registered(self):
+        assert hasattr(bpy.types, "CIVIL_PT_profile_view")
+
+    def test_profile_view_properties_registered(self):
+        props = bpy.context.scene.CivilAlignmentProperties
+        assert hasattr(props, "profile_terrain")
+        assert hasattr(props, "show_profile_view")
+        assert hasattr(props, "profile_view_interval")
+        assert hasattr(props, "profile_view_height")
+
+
+# ---------------------------------------------------------------------------
+# clear_layout_segments  (re-implemented after upstream removed the API helper)
+# ---------------------------------------------------------------------------
+
+
+class TestClearLayoutSegments(NewFile):
+    """The alignment API exposes no segment-clearing helper and its layout
+    functions only append, so editing relies on tool.Alignment.clear_layout_segments.
+    These verify it removes real segments (both halves) without orphans and
+    keeps the zero-length terminator, for horizontal and vertical layouts."""
+
+    @staticmethod
+    def _new_ifc():
+        import ifcopenshell.api.root
+        import ifcopenshell.api.unit
+
+        ifc = ifcopenshell.file(schema="IFC4X3_ADD2")
+        tool.Ifc.set(ifc)
+        ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
+        ifcopenshell.api.unit.assign_unit(ifc)
+        return ifc
+
+    def test_clear_horizontal_keeps_only_terminator(self):
+        ifc = self._new_ifc()
+        alignment = align_api.create(ifc, name="Clr", include_vertical=False)
+        h = align_api.get_horizontal_layout(alignment)
+        align_api.layout_horizontal_alignment_by_pi_method(
+            ifc, h, hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0]
+        )
+        assert subject.layout_has_real_segments(h) is True
+        subject.clear_layout_segments(h)
+        assert subject.layout_has_real_segments(h) is False
+        assert len(align_api.get_layout_segments(h)) == 1  # terminator only
+
+    def test_relayout_after_clear_has_no_doubling_or_orphans(self):
+        ifc = self._new_ifc()
+        alignment = align_api.create(ifc, name="Clr2", include_vertical=False)
+        h = align_api.get_horizontal_layout(alignment)
+        align_api.layout_horizontal_alignment_by_pi_method(
+            ifc, h, hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0]
+        )
+        subject.clear_layout_segments(h)
+        align_api.layout_horizontal_alignment_by_pi_method(
+            ifc, h, hpoints=[(0.0, 0.0), (1000.0, 0.0)], radii=[]
+        )
+        nested = align_api.get_layout_segments(h)
+        real = [s for s in nested if not subject.is_zero_length_segment(s)]
+        assert len(real) == 1  # exactly one LINE — no leftover from the first layout
+        # No orphaned semantic segments left in the file.
+        assert len(ifc.by_type("IfcAlignmentSegment")) == len(nested)
+
+    def test_clear_vertical_keeps_only_terminator(self):
+        ifc = self._new_ifc()
+        alignment = align_api.create(ifc, name="ClrV", include_vertical=False)
+        h = align_api.get_horizontal_layout(alignment)
+        align_api.layout_horizontal_alignment_by_pi_method(ifc, h, hpoints=[(0.0, 0.0), (1000.0, 0.0)], radii=[])
+        v = align_api.add_vertical_layout(ifc, alignment)
+        align_api.layout_vertical_alignment_by_pi_method(
+            ifc, v, [(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)], [100.0]
+        )
+        assert subject.layout_has_real_segments(v) is True
+        subject.clear_layout_segments(v)
+        assert subject.layout_has_real_segments(v) is False
+
+
+class TestSetLayoutSegmentsSelectable(NewIfc4X3):
+    """PI edit mode disables segment-curve selection so clicks hit the PI
+    empties; set_layout_segments_selectable toggles hide_select accordingly."""
+
+    def test_toggles_segment_hide_select(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Sel", include_vertical=False)
+        h = align_api.get_horizontal_layout(alignment)
+        align_api.layout_horizontal_alignment_by_pi_method(
+            ifc_file, h, hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0]
+        )
+        subject.create_hierarchy_for_alignment(alignment)
+        segment_objects = [o for o in bpy.data.objects if "IfcAlignmentSegment" in o.name]
+        assert len(segment_objects) >= 1
+
+        subject.set_layout_segments_selectable(h, False)
+        assert all(o.hide_select for o in segment_objects)
+
+        subject.set_layout_segments_selectable(h, True)
+        assert all(not o.hide_select for o in segment_objects)

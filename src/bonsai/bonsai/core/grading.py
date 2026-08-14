@@ -163,6 +163,97 @@ def create_feature_line(
     return feature_line
 
 
+def create_feature_line_from_daylight(
+    ifc_tool: "type[tool.Ifc]",
+    grading_tool: "type[tool.Grading]",
+    grading_object_guid: str,
+    name: str = "",
+) -> Any:
+    """Promote a grading object's computed daylight line into a
+    first-class :class:`FeatureLine`.
+
+    :meth:`tool.Grading.compute_grading_object` already solves the
+    tie-out points where each slope ray meets the target surface and
+    stores them on :attr:`GradingObject.daylight_line` — but until now
+    that polyline only existed as GPU-decorator draw data and ribbon
+    geometry. Promoting it to a feature line makes the tie-in reusable:
+    it can be draped, offset, filleted, used as the footprint of a
+    *second* grading object (benched/terraced slopes), or consumed as a
+    boundary for surface clipping and terrain masking.
+
+    This is the standard Civil 3D "create feature line from daylight"
+    workflow, and it closes the loop that previously forced callers to
+    re-derive the tie-in by ray-marching the terrain themselves.
+
+    Business rules:
+
+    1. An IFC file must be loaded.
+    2. ``grading_object_guid`` must resolve to a registered
+       :class:`GradingObject` (computed outputs are registry-only —
+       see :meth:`tool.Grading.get_grading_object`).
+    3. The grading object's daylight line must have ≥ 2 vertices; a
+       projection that failed to daylight leaves it empty.
+
+    Sequencing:
+
+    1. Resolve the grading object from the registry.
+    2. Build a :class:`FeatureLine` from its ``daylight_line`` vertices,
+       inheriting ``closed`` from the source footprint — a closed pad
+       perimeter daylights to a closed tie-in loop.
+    3. :meth:`tool.Grading.author_feature_line` — persists as
+       :class:`IfcAlignment` with an :class:`IfcIndexedPolyCurve`.
+    4. :meth:`tool.Grading.register` — caches it for subsequent
+       ``get_feature_line`` calls.
+
+    :param grading_object_guid: GUID of the source grading object.
+    :param name: label for the new feature line; defaults to
+        ``"<grading-object-name> daylight"``.
+    :returns: the authored :class:`FeatureLine`.
+    :raises ValueError: if no IFC file is loaded or the daylight line
+        has fewer than 2 vertices.
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    grading_object = grading_tool.get_grading_object(
+        ifc_file, grading_object_guid
+    )
+
+    daylight = list(getattr(grading_object, "daylight_line", None) or [])
+    if len(daylight) < 2:
+        raise ValueError(
+            f"grading object {grading_object_guid!r} has "
+            f"{len(daylight)} daylight vertices; need ≥ 2. The slope "
+            "projection may have failed to daylight (check "
+            "criteria.max_distance and the target surface extent)"
+        )
+
+    # A closed footprint daylights to a closed tie-in; an open one
+    # (ditch centerline, road shoulder) stays open.
+    footprint = getattr(grading_object, "footprint", None)
+    closed = bool(getattr(footprint, "closed", False))
+
+    label = name.strip() if name and name.strip() else (
+        f"{grading_object.name or 'grading object'} daylight"
+    )
+
+    _warn_multi_site(ifc_file)
+
+    from ..tool.grading import FeatureLine
+
+    feature_line = FeatureLine(
+        name=label,
+        vertices=[
+            (float(v[0]), float(v[1]), float(v[2])) for v in daylight
+        ],
+        closed=closed,
+    )
+    grading_tool.author_feature_line(ifc_file, feature_line)
+    grading_tool.register(ifc_file, feature_line)
+    return feature_line
+
+
 def create_grading_criteria(
     ifc_tool: "type[tool.Ifc]",
     grading_tool: "type[tool.Grading]",

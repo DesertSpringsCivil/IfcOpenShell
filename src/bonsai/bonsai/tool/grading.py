@@ -1267,6 +1267,40 @@ class Grading:
         cls._registry[(id(ifc_file), entity.guid)] = entity
 
     @classmethod
+    def get_grading_object(
+        cls, ifc_file: "ifcopenshell.file", guid: str
+    ) -> GradingObject:
+        """Return the registered :class:`GradingObject` for ``guid``.
+
+        Unlike :meth:`get_feature_line` / :meth:`get_group` there is no
+        rehydration path: a :class:`GradingObject`'s
+        :attr:`~GradingObject.daylight_line` and
+        :attr:`~GradingObject.projection_triangles` are *computed
+        outputs* of :meth:`compute_grading_object`, not authoring
+        inputs. IFC persists the resulting ribbon geometry
+        (:class:`IfcEarthworksFill[SLOPEFILL]`) but not the sample-point
+        correspondence needed to reconstruct the daylight polyline, so a
+        cache miss means "recompute", not "read back".
+
+        :raises SaikeiGradingError: if no grading object is registered
+            under ``guid`` for this file, or the registered entity is of
+            another type.
+        """
+        entity = cls._registry.get((id(ifc_file), guid))
+        if entity is None:
+            raise SaikeiGradingError(
+                f"no GradingObject registered with GUID {guid!r}; "
+                "grading objects are computed outputs — run "
+                "add_grading_object (or rebuild the group) first"
+            )
+        if not isinstance(entity, GradingObject):
+            raise SaikeiGradingError(
+                f"GUID {guid!r} is registered as "
+                f"{type(entity).__name__}, not GradingObject"
+            )
+        return entity
+
+    @classmethod
     def invalidate(
         cls, ifc_file: "ifcopenshell.file", guid: str
     ) -> None:

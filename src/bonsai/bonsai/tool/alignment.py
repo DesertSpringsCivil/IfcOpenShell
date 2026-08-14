@@ -73,6 +73,75 @@ class PVIGeometryResult:
     total_length: float
 
 
+@dataclass
+class AlignmentPoint:
+    """A point evaluated on the 3D combined alignment at a given station.
+
+    This is the result type for ``evaluate_alignment_at_station`` — the
+    keystone query that downstream features (cross-section placement,
+    corridor sweep, terrain sampling, daylighting) all depend on.
+
+    Coordinates are in model (project) units, in the alignment's local
+    coordinate system — the same space used by ``segment_vertices`` and the
+    Blender segment objects. Callers needing global map coordinates should
+    georeference via ``tool.Georeference``.
+
+    The frame is orthonormal and right-handed:
+    - ``tangent`` points in the direction of increasing station,
+    - ``up`` is the local vertical of the alignment frame,
+    - ``normal`` is the in-plane lateral direction (left of travel).
+
+    ``grade`` is the vertical grade (rise/run) at the station, derived from
+    the tangent. It is 0.0 for a horizontal-only alignment.
+    """
+
+    station: float
+    position: Tuple[float, float, float]
+    tangent: Tuple[float, float, float]
+    normal: Tuple[float, float, float]
+    up: Tuple[float, float, float]
+    grade: float
+
+
+@dataclass
+class ProfileViewTransform:
+    """Maps between profile-data space (station, elevation) and viewport pixels.
+
+    The profile view (D2) is a 2D station-vs-elevation plot drawn as a screen
+    overlay. This transform is the single source of truth for both directions:
+    the decorator uses ``data_to_screen`` to plot the terrain/design polylines,
+    and the interactive PVI editor uses ``screen_to_data`` to turn a mouse
+    position into a (station, elevation). Keeping the mapping here (pure math)
+    makes it unit-testable independent of any GPU/viewport context.
+
+    The plot rectangle is given by its bottom-left corner (rect_x, rect_y) and
+    size (rect_w, rect_h) in pixels; data bounds are inclusive.
+    """
+
+    station_min: float
+    station_max: float
+    elevation_min: float
+    elevation_max: float
+    rect_x: float
+    rect_y: float
+    rect_width: float
+    rect_height: float
+
+    def data_to_screen(self, station: float, elevation: float) -> Tuple[float, float]:
+        station_span = (self.station_max - self.station_min) or 1.0
+        elevation_span = (self.elevation_max - self.elevation_min) or 1.0
+        px = self.rect_x + (station - self.station_min) / station_span * self.rect_width
+        py = self.rect_y + (elevation - self.elevation_min) / elevation_span * self.rect_height
+        return (px, py)
+
+    def screen_to_data(self, px: float, py: float) -> Tuple[float, float]:
+        station_span = (self.station_max - self.station_min) or 1.0
+        elevation_span = (self.elevation_max - self.elevation_min) or 1.0
+        station = self.station_min + (px - self.rect_x) / (self.rect_width or 1.0) * station_span
+        elevation = self.elevation_min + (py - self.rect_y) / (self.rect_height or 1.0) * elevation_span
+        return (station, elevation)
+
+
 class Alignment:
     """Tool class for alignment-related Blender operations.
 
@@ -881,6 +950,178 @@ class Alignment:
 
         return align_api.get_horizontal_layout(alignment)
 
+    # =========================================================================
+    # Alignment Evaluation — 3D Combination (D3)
+    # =========================================================================
+
+    @staticmethod
+    def _normalize3(vec) -> Tuple[float, float, float]:
+        """Return ``vec`` (any 3-indexable) as a unit vector tuple.
+
+        Returns the zero vector if the magnitude is degenerate.
+        """
+        x, y, z = float(vec[0]), float(vec[1]), float(vec[2])
+        magnitude = math.sqrt(x * x + y * y + z * z)
+        if magnitude < 1e-12:
+            return (0.0, 0.0, 0.0)
+        return (x / magnitude, y / magnitude, z / magnitude)
+
+    @classmethod
+    def get_alignment_curve(cls, alignment: "ifcopenshell.entity_instance"):
+        """Return the geometric representation curve for an alignment.
+
+        Delegates to the alignment API. The curve type reflects which layouts
+        are present:
+        - IfcCompositeCurve — horizontal only
+        - IfcGradientCurve — horizontal + vertical (3D, elevation baked in)
+        - IfcSegmentedReferenceCurve — horizontal + vertical + cant
+
+        Args:
+            alignment: The IfcAlignment entity
+
+        Returns:
+            The representation curve, or None if the alignment has none.
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        return align_api.get_curve(alignment)
+
+    @classmethod
+    def get_alignment_length(cls, alignment: "ifcopenshell.entity_instance") -> Optional[float]:
+        """Total length (model units) of the horizontal alignment domain.
+
+        Sums the SegmentLength of every horizontal IfcAlignmentSegment (the
+        mandatory zero-length terminator contributes 0). This is the upper
+        bound of the distance-along domain that can be evaluated.
+
+        Args:
+            alignment: The IfcAlignment entity
+
+        Returns:
+            Total length, or None if there is no horizontal layout.
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        h_layout = align_api.get_horizontal_layout(alignment)
+        if h_layout is None:
+            return None
+        total = 0.0
+        for rel in getattr(h_layout, "IsNestedBy", []) or []:
+            for segment in rel.RelatedObjects or []:
+                if segment.is_a() == "IfcAlignmentSegment" and segment.DesignParameters:
+                    length = getattr(segment.DesignParameters, "SegmentLength", None)
+                    if length:
+                        total += float(length)
+        return total
+
+    @classmethod
+    def _evaluate_curve_at_distance(cls, curve, distance_along: float, unit_scale: float):
+        """Evaluate the geometry engine on ``curve`` at a distance-along.
+
+        Shared low-level path for evaluate_alignment_at_station and the 3D
+        centerline sampler. Handles the SI unit convention: the engine's
+        parameter and reported translation are in SI, so the model-unit
+        distance is scaled up before evaluation and the position scaled back.
+
+        Args:
+            curve: An IfcCompositeCurve / IfcGradientCurve / IfcSegmentedReferenceCurve
+            distance_along: Distance along the curve, in model units
+            unit_scale: model->SI scale from ifcopenshell.util.unit
+
+        Returns:
+            (position, tangent, normal, up) all in model units, or None.
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        try:
+            # evaluate_representation returns a transposed 4x4 transform:
+            #   row 0 = tangent, row 1 = normal, row 2 = up, row 3 = position.
+            # The engine parameter and translation are SI; basis rows are
+            # orthonormal (unit-independent) direction vectors.
+            matrix = align_api.evaluate_representation(curve, distance_along * unit_scale)
+        except (RuntimeError, ValueError, NotImplementedError):
+            return None
+        if matrix is None:
+            return None
+
+        position = (
+            float(matrix[3, 0]) / unit_scale,
+            float(matrix[3, 1]) / unit_scale,
+            float(matrix[3, 2]) / unit_scale,
+        )
+        tangent = cls._normalize3(matrix[0, :3])
+        normal = cls._normalize3(matrix[1, :3])
+        up = cls._normalize3(matrix[2, :3])
+        return position, tangent, normal, up
+
+    @classmethod
+    def evaluate_alignment_at_station(
+        cls, alignment: "ifcopenshell.entity_instance", station: float
+    ) -> Optional[AlignmentPoint]:
+        """Evaluate 3D position and orientation frame at a station.
+
+        This is the keystone query for the road-design pipeline. Cross-section
+        placement, corridor mesh generation, terrain sampling, and daylight
+        calculations all build on it.
+
+        The IfcOpenShell geometry engine is evaluated directly on the
+        alignment's representation curve (consistent with the project's
+        "use the geometry engine, not manual trigonometry" principle):
+        - When a vertical layout exists the curve is an IfcGradientCurve, so
+          the returned position is a true 3D point with design elevation.
+        - For a horizontal-only alignment the curve is an IfcCompositeCurve
+          and Z is 0.0.
+
+        Args:
+            alignment: The IfcAlignment entity
+            station: Station value (start station + distance along)
+
+        Returns:
+            An AlignmentPoint in model units, or None if the alignment has no
+            evaluatable representation or the station is outside its domain.
+            (The engine extrapolates beyond the ends, so out-of-domain
+            stations are rejected explicitly rather than returning garbage.)
+        """
+        import ifcopenshell.api.alignment as align_api
+        import ifcopenshell.util.unit
+
+        curve = align_api.get_curve(alignment)
+        if curve is None:
+            return None
+        if curve.is_a() not in ("IfcCompositeCurve", "IfcGradientCurve", "IfcSegmentedReferenceCurve"):
+            # A layout-less alignment (bare polyline) cannot be parametrically evaluated.
+            return None
+
+        ifc_file = tool.Ifc.get()
+        # Station -> distance along the horizontal alignment (model units).
+        distance_along = align_api.distance_along_from_station(ifc_file, alignment, station)
+        if distance_along < -1e-9:
+            return None  # station precedes the start of the alignment
+
+        # Reject stations beyond the end (engine would silently extrapolate).
+        total_length = cls.get_alignment_length(alignment)
+        if total_length is not None and distance_along > total_length + 1e-6 * max(1.0, total_length):
+            return None
+
+        unit_scale = ifcopenshell.util.unit.calculate_unit_scale(ifc_file)
+        evaluated = cls._evaluate_curve_at_distance(curve, distance_along, unit_scale)
+        if evaluated is None:
+            return None
+        position, tangent, normal, up = evaluated
+
+        # Vertical grade (rise/run) derived from the tangent vector.
+        horizontal_run = math.hypot(tangent[0], tangent[1])
+        grade = (tangent[2] / horizontal_run) if horizontal_run > 1e-9 else 0.0
+
+        return AlignmentPoint(
+            station=float(station),
+            position=position,
+            tangent=tangent,
+            normal=normal,
+            up=up,
+            grade=grade,
+        )
+
     @classmethod
     def create_alignment(cls, name: str, start_station: float = 0.0) -> "ifcopenshell.entity_instance":
         """Create a full IfcAlignment with horizontal layout via the alignment API.
@@ -969,15 +1210,50 @@ class Alignment:
 
     @classmethod
     def clear_layout_segments(cls, layout: "ifcopenshell.entity_instance"):
-        """Clear all segments from a layout, preserving the layout entity.
+        """Clear the real (non-terminator) segments from a layout.
+
+        The alignment API's PI/PVI layout functions *append* segments and
+        expose no clear/remove helper, so editing a layout (PI/PVI recalc, edit
+        mode) requires removing the previous segments first. This removes both
+        halves of each real segment — the geometric IfcCurveSegment in the
+        layout's representation curve and the semantic IfcAlignmentSegment —
+        while preserving the layout entity and its mandatory zero-length
+        terminator (which the layout functions then update in place).
 
         Args:
-            layout: The IFC layout entity (IfcAlignmentHorizontal, etc.)
+            layout: The IFC layout entity (IfcAlignmentHorizontal/Vertical/Cant)
         """
         import ifcopenshell.api.alignment as align_api
+        import ifcopenshell.api.root
+        import ifcopenshell.util.element
 
         ifc_file = tool.Ifc.get()
-        align_api.clear_layout_segments(ifc_file, layout)
+
+        # 1) Remove the geometric curve segments (keep the zero-length terminator).
+        curve = align_api.get_layout_curve(layout)
+        if curve is not None and getattr(curve, "Segments", None):
+            kept_curve_segments = []
+            dropped_curve_segments = []
+            for curve_segment in curve.Segments:
+                segment_length = curve_segment.SegmentLength
+                value = float(getattr(segment_length, "wrappedValue", segment_length))
+                (kept_curve_segments if abs(value) < 1e-6 else dropped_curve_segments).append(curve_segment)
+            curve.Segments = kept_curve_segments
+            for curve_segment in dropped_curve_segments:
+                ifcopenshell.util.element.remove_deep2(ifc_file, curve_segment)
+
+        # 2) Remove the semantic IfcAlignmentSegments (keep the terminator).
+        dropped_segments = []
+        for rel in getattr(layout, "IsNestedBy", []) or []:
+            kept_related = []
+            for segment in rel.RelatedObjects or []:
+                if segment.is_a("IfcAlignmentSegment") and not cls.is_zero_length_segment(segment):
+                    dropped_segments.append(segment)
+                else:
+                    kept_related.append(segment)
+            rel.RelatedObjects = kept_related
+        for segment in dropped_segments:
+            ifcopenshell.api.root.remove_product(ifc_file, product=segment)
 
     @classmethod
     def layout_by_pi_method(cls, layout: "ifcopenshell.entity_instance", hpoints: list, radii: list):
@@ -1263,6 +1539,252 @@ class Alignment:
                     visible_index += 1  # Always increment for consistent numbering
 
         return result_objs
+
+    # =========================================================================
+    # 3D Combined Alignment Visualization (D3)
+    # =========================================================================
+
+    CENTERLINE_3D_TAG = "civil_3d_centerline_alignment_id"
+
+    @classmethod
+    def create_3d_alignment_object(
+        cls, alignment: "ifcopenshell.entity_instance", distance_interval: float = 5.0
+    ) -> Optional[bpy.types.Object]:
+        """Create/refresh a Blender polyline of the draped 3D centerline.
+
+        Samples the alignment's representation curve with the geometry engine
+        at ``distance_interval`` spacing — an IfcGradientCurve when a vertical
+        layout exists, giving the true 3D profile draped over the horizontal
+        alignment. The result is a single mesh object parented to the alignment
+        object.
+
+        This is the D3 "3D curve visualization": distinct from the per-segment
+        objects, whose vertical-layout geometry lives in profile space rather
+        than draped in real XYZ. Sampling via evaluate_representation (rather
+        than the engine's generate_vertices) keeps a single evaluation code
+        path and avoids engine-version-specific piecewise-step settings.
+        Calling it again rebuilds the object.
+
+        Args:
+            alignment: The IfcAlignment entity
+            distance_interval: Spacing between sampled vertices (model units)
+
+        Returns:
+            The created mesh object, or None if the alignment has no
+            evaluatable representation.
+        """
+        import ifcopenshell.api.alignment as align_api
+        import ifcopenshell.util.unit
+
+        curve = align_api.get_curve(alignment)
+        if curve is None or curve.is_a() not in (
+            "IfcCompositeCurve",
+            "IfcGradientCurve",
+            "IfcSegmentedReferenceCurve",
+        ):
+            return None
+
+        total_length = cls.get_alignment_length(alignment)
+        if not total_length or total_length <= 0:
+            return None
+
+        ifc_file = tool.Ifc.get()
+        unit_scale = ifcopenshell.util.unit.calculate_unit_scale(ifc_file)
+        interval = max(float(distance_interval), 1e-6)
+
+        # Sample distance-along over [0, length], always including the endpoint.
+        distances = []
+        distance = 0.0
+        while distance < total_length:
+            distances.append(distance)
+            distance += interval
+        distances.append(total_length)
+
+        coords = []
+        for distance in distances:
+            evaluated = cls._evaluate_curve_at_distance(curve, distance, unit_scale)
+            if evaluated is not None:
+                # evaluate returns model/project units; Blender mesh space is
+                # metres (1 BU = 1 m), so scale up to overlay the segment objects.
+                position = evaluated[0]
+                coords.append((position[0] * unit_scale, position[1] * unit_scale, position[2] * unit_scale))
+        if len(coords) < 2:
+            return None
+
+        # Idempotent: drop any prior centerline for this alignment first.
+        cls.remove_3d_alignment_object(alignment)
+
+        mesh = bpy.data.meshes.new(f"IfcAlignment/{alignment.Name or 'Unnamed'}/3D Centerline")
+        edges = [(i, i + 1) for i in range(len(coords) - 1)]
+        mesh.from_pydata(coords, edges, [])
+        mesh.update()
+
+        obj = bpy.data.objects.new(f"{alignment.Name or 'Alignment'} 3D Centerline", mesh)
+        obj[cls.CENTERLINE_3D_TAG] = alignment.id()
+
+        alignment_obj = tool.Ifc.get_object(alignment)
+        if alignment_obj:
+            obj.parent = alignment_obj
+            if alignment_obj.users_collection:
+                alignment_obj.users_collection[0].objects.link(obj)
+            else:
+                tool.Collector.assign(obj)
+        else:
+            tool.Collector.assign(obj)
+
+        return obj
+
+    @classmethod
+    def remove_3d_alignment_object(cls, alignment: "ifcopenshell.entity_instance") -> int:
+        """Remove the 3D centerline helper object for an alignment, if any.
+
+        Returns the number of objects removed (normally 0 or 1).
+        """
+        alignment_id = alignment.id()
+        removed = 0
+        for obj in list(bpy.data.objects):
+            if obj.get(cls.CENTERLINE_3D_TAG) == alignment_id:
+                cls._remove_blender_object(obj)
+                removed += 1
+        return removed
+
+    # =========================================================================
+    # Profile View — Terrain & Design Sampling (D2)
+    # =========================================================================
+
+    @classmethod
+    def get_alignment_start_station(cls, alignment: "ifcopenshell.entity_instance") -> float:
+        """Return the alignment's start station (model units).
+
+        Derived from the API's distance_along_from_station, which returns
+        (station - start_station): evaluating at station 0 yields -start, so the
+        start station is its negation. Robust to API renames and to alignments
+        whose stationing does not begin at 0.
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        ifc_file = tool.Ifc.get()
+        return -float(align_api.distance_along_from_station(ifc_file, alignment, 0.0))
+
+    @classmethod
+    def _station_samples(cls, start_station: float, length: float, interval: float):
+        """Yield stations from start..start+length inclusive at ``interval``."""
+        interval = max(float(interval), 1e-6)
+        distance = 0.0
+        while distance < length:
+            yield start_station + distance
+            distance += interval
+        yield start_station + length
+
+    @classmethod
+    def sample_design_profile(cls, alignment: "ifcopenshell.entity_instance", interval: float = 10.0):
+        """Sample the design profile (station, elevation) along the alignment.
+
+        Evaluates the combined alignment at each station and takes the Z of the
+        resulting 3D point (the design grade). For a horizontal-only alignment
+        every elevation is 0.0. Returns a list of (station, elevation) in model
+        units.
+        """
+        length = cls.get_alignment_length(alignment)
+        if not length or length <= 0:
+            return []
+        start = cls.get_alignment_start_station(alignment)
+        points = []
+        for station in cls._station_samples(start, length, interval):
+            evaluated = cls.evaluate_alignment_at_station(alignment, station)
+            if evaluated is not None:
+                points.append((station, evaluated.position[2]))
+        return points
+
+    @classmethod
+    def sample_terrain_profile(
+        cls, alignment: "ifcopenshell.entity_instance", terrain_obj: "bpy.types.Object", interval: float = 10.0
+    ):
+        """Sample existing-ground elevation under the alignment centerline.
+
+        For each station the horizontal (x, y) centerline position is computed
+        and the terrain mesh is ray-cast vertically to find the ground
+        elevation. Returns a list of (station, ground_elevation) in model units;
+        stations with no terrain hit are skipped (the centerline can run beyond
+        the terrain extent).
+
+        The terrain BVH is built in Blender world space (metres); the alignment
+        position from evaluate is in IFC project units, so it is scaled up by
+        unit_scale before the vertical ray-cast, and the returned ground
+        elevation is scaled back to project units (matching sample_design_profile
+        and the PVI markers, so the profile view is unit-consistent).
+        """
+        import ifcopenshell.util.unit
+        from mathutils import Vector
+        from mathutils.bvhtree import BVHTree
+
+        if terrain_obj is None or terrain_obj.type != "MESH" or not terrain_obj.data.polygons:
+            return []
+        length = cls.get_alignment_length(alignment)
+        if not length or length <= 0:
+            return []
+
+        unit_scale = ifcopenshell.util.unit.calculate_unit_scale(tool.Ifc.get())
+        matrix = terrain_obj.matrix_world
+        world_verts = [matrix @ v.co for v in terrain_obj.data.vertices]
+        polygons = [tuple(p.vertices) for p in terrain_obj.data.polygons]
+        if not world_verts or not polygons:
+            return []
+        bvh = BVHTree.FromPolygons(world_verts, polygons)
+
+        # Cast straight down from above the terrain's highest point.
+        max_z = max(v.z for v in world_verts)
+        min_z = min(v.z for v in world_verts)
+        ray_start_z = max_z + (max_z - min_z) + 1.0
+        down = Vector((0.0, 0.0, -1.0))
+
+        start = cls.get_alignment_start_station(alignment)
+        points = []
+        for station in cls._station_samples(start, length, interval):
+            evaluated = cls.evaluate_alignment_at_station(alignment, station)
+            if evaluated is None:
+                continue
+            x, y, _ = evaluated.position  # IFC project units
+            # Ray-cast in Blender world metres; report ground in project units.
+            location = bvh.ray_cast(Vector((x * unit_scale, y * unit_scale, ray_start_z)), down)[0]
+            if location is not None:
+                points.append((station, location.z / unit_scale))
+        return points
+
+    @classmethod
+    def build_profile_view_transform(
+        cls,
+        design_points,
+        terrain_points,
+        rect_x: float,
+        rect_y: float,
+        rect_width: float,
+        rect_height: float,
+        elevation_pad_fraction: float = 0.1,
+    ) -> Optional[ProfileViewTransform]:
+        """Build a ProfileViewTransform fitting the sampled profiles to a rect.
+
+        Station bounds come from the data; elevation bounds are padded by
+        ``elevation_pad_fraction`` of the elevation span so the polylines do not
+        touch the plot edges. Returns None if there is nothing to plot.
+        """
+        all_points = list(design_points) + list(terrain_points)
+        if not all_points:
+            return None
+        stations = [p[0] for p in all_points]
+        elevations = [p[1] for p in all_points]
+        elevation_span = (max(elevations) - min(elevations)) or 1.0
+        pad = elevation_span * elevation_pad_fraction
+        return ProfileViewTransform(
+            station_min=min(stations),
+            station_max=max(stations),
+            elevation_min=min(elevations) - pad,
+            elevation_max=max(elevations) + pad,
+            rect_x=rect_x,
+            rect_y=rect_y,
+            rect_width=rect_width,
+            rect_height=rect_height,
+        )
 
     @classmethod
     def update_pi_properties(cls, props, geometry_result) -> None:
@@ -1565,12 +2087,18 @@ class Alignment:
         else:
             collection = bpy.context.scene.collection
 
+        import ifcopenshell.util.unit
+
         alignment_id = alignment.id()
         empties = []
+        # Georeference returns IFC project units; Blender world space is metres
+        # (1 BU = 1 m), so scale up to place empties at the correct location.
+        unit_scale = ifcopenshell.util.unit.calculate_unit_scale(tool.Ifc.get())
 
         for i, pi in enumerate(pis):
-            # Convert IFC coordinates to Blender coordinates
-            blender_pos = tool.Georeference.enh2xyz((float(pi["e"]), float(pi["n"]), 0.0))
+            # IFC project units -> Blender world metres
+            local = tool.Georeference.enh2xyz((float(pi["e"]), float(pi["n"]), 0.0))
+            blender_pos = (local[0] * unit_scale, local[1] * unit_scale, local[2] * unit_scale)
 
             # Create EMPTY object
             name = f"PI.{i + 1:03d}"
@@ -1659,12 +2187,18 @@ class Alignment:
         if len(empties) < 2:
             return ([], [])
 
+        import ifcopenshell.util.unit
+
         hpoints = []
         radii = []
+        # Blender world metres -> IFC project units before georeferencing.
+        unit_scale = ifcopenshell.util.unit.calculate_unit_scale(tool.Ifc.get())
 
         for i, empty in enumerate(empties):
-            # Convert Blender position to IFC coordinates
-            ifc_pos = tool.Georeference.xyz2enh(tuple(empty.matrix_world.translation))
+            # Blender metres -> IFC project units -> global E/N
+            translation = empty.matrix_world.translation
+            local = (translation[0] / unit_scale, translation[1] / unit_scale, translation[2] / unit_scale)
+            ifc_pos = tool.Georeference.xyz2enh(local)
             hpoints.append((ifc_pos[0], ifc_pos[1]))
 
             # Collect radii for interior PIs only (not first or last)
@@ -1673,6 +2207,23 @@ class Alignment:
                 radii.append(radius)
 
         return (hpoints, radii)
+
+    @classmethod
+    def set_layout_segments_selectable(cls, layout: "ifcopenshell.entity_instance", selectable: bool) -> None:
+        """Toggle viewport selectability of a layout's segment objects.
+
+        During PI edit mode the segment curves are made non-selectable so
+        viewport clicks land on the PI edit empties rather than on the curves
+        drawn along the alignment (which otherwise intercept the clicks).
+        """
+        if layout is None:
+            return
+        for rel in getattr(layout, "IsNestedBy", []) or []:
+            for segment in rel.RelatedObjects or []:
+                if segment.is_a() == "IfcAlignmentSegment":
+                    obj = tool.Ifc.get_object(segment)
+                    if obj:
+                        obj.hide_select = not selectable
 
     @classmethod
     def get_active_alignment(cls) -> ifcopenshell.entity_instance | None:

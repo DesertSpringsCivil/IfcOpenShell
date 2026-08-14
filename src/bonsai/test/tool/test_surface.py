@@ -2125,9 +2125,8 @@ class TestSurfaceDataCache(NewIfc4X3):
         bpy.context.scene.CivilSurfaceProperties.surfaces.clear()
         assert len(bpy.context.scene.CivilSurfaceProperties.surfaces) == 0
 
-        # Force a load — the UIList should rebuild from the IFC tree.
-        SurfaceData.is_loaded = False
-        SurfaceData.load()
+        # Force a sync — the UIList should rebuild from the IFC tree.
+        SurfaceData.sync_uilists()
 
         surfaces = bpy.context.scene.CivilSurfaceProperties.surfaces
         assert len(surfaces) == 1
@@ -2156,8 +2155,7 @@ class TestSurfaceDataCache(NewIfc4X3):
         # Force a reload so the UIList is rebuilt from IFC, not from the
         # in-memory authoring path.
         bpy.context.scene.CivilSurfaceProperties.surfaces.clear()
-        SurfaceData.is_loaded = False
-        SurfaceData.load()
+        SurfaceData.sync_uilists()
 
         surfaces = bpy.context.scene.CivilSurfaceProperties.surfaces
         assert len(surfaces) == 1
@@ -2188,9 +2186,8 @@ class TestSurfaceDataCache(NewIfc4X3):
         props.active_surface_index = 0
         guid_a = props.active_surface_guid
 
-        # Force a reload — A's guid is still in the IFC, selection preserved.
-        SurfaceData.is_loaded = False
-        SurfaceData.load()
+        # Force a sync — A's guid is still in the IFC, selection preserved.
+        SurfaceData.sync_uilists()
         assert props.active_surface_guid == guid_a
 
 

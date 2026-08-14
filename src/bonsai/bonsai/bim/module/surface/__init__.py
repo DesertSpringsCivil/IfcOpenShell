@@ -88,8 +88,17 @@ def _on_load_post(_dummy: bpy.types.Scene) -> None:
     a module-level import chain at addon-register time.
     """
     from . import decorator as surface_decorator
+    from . import data as surface_data
 
     surface_decorator.SurfaceDecorator.uninstall()
+
+    # Re-sync the UIList from the freshly-loaded IFC. Runs outside panel draw()
+    # (where writing scene properties is forbidden), so opening a file that
+    # already contains surfaces shows them in the list.
+    try:
+        surface_data.SurfaceData.sync_uilists()
+    except Exception:
+        pass
 
 
 def register() -> None:

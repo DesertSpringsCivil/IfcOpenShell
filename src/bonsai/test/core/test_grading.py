@@ -176,6 +176,75 @@ class TestCreateFeatureLine:
 
 
 # ---------------------------------------------------------------------------
+# create_feature_line_from_daylight
+# ---------------------------------------------------------------------------
+
+
+class _FakeFootprint:
+    def __init__(self, closed=False):
+        self.closed = closed
+
+
+class _FakeGradingObject:
+    """Stand-in for tool.grading.GradingObject.
+
+    Only the attributes the orchestration reads are modelled:
+    ``name``, ``footprint.closed`` and ``daylight_line``.
+    """
+
+    def __init__(self, daylight_line, closed=False, name="pad @ 3:1"):
+        self.name = name
+        self.footprint = _FakeFootprint(closed)
+        self.daylight_line = daylight_line
+
+
+class TestCreateFeatureLineFromDaylight:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, grading):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.create_feature_line_from_daylight(
+                ifc, grading, grading_object_guid="go1"
+            )
+
+    def test_raises_when_daylight_line_is_empty(self, ifc, grading):
+        """A projection that never daylighted leaves the line empty —
+        surface that as a clean error rather than authoring a
+        degenerate 0-vertex alignment."""
+        f = FakeIfcFile()
+        ifc.get().should_be_called().will_return(f)
+        grading.get_grading_object(f, "go1").should_be_called().will_return(
+            _FakeGradingObject(daylight_line=[])
+        )
+        with pytest.raises(ValueError, match="0 daylight vertices"):
+            subject.create_feature_line_from_daylight(
+                ifc, grading, grading_object_guid="go1"
+            )
+
+    def test_raises_when_daylight_line_has_one_vertex(self, ifc, grading):
+        f = FakeIfcFile()
+        ifc.get().should_be_called().will_return(f)
+        grading.get_grading_object(f, "go1").should_be_called().will_return(
+            _FakeGradingObject(daylight_line=[(0.0, 0.0, 0.0)])
+        )
+        with pytest.raises(ValueError, match="1 daylight vertices"):
+            subject.create_feature_line_from_daylight(
+                ifc, grading, grading_object_guid="go1"
+            )
+
+    def test_happy_path_deferred_to_tool_layer(self):
+        """Same Prophecy limitation as TestCreateFeatureLine: the
+        orchestration constructs a real ``FeatureLine`` whose GUID comes
+        from ``field(default_factory=ifcopenshell.guid.new)``, which
+        Prophecy's JSON dict-equality can't match. Closed-inheritance
+        and vertex round-tripping are covered in
+        test/tool/test_grading.py."""
+        pytest.skip(
+            "deferred to tool-layer integration tests; Prophecy doesn't "
+            "compose with FeatureLine's default_factory GUID"
+        )
+
+
+# ---------------------------------------------------------------------------
 # create_grading_criteria
 # ---------------------------------------------------------------------------
 

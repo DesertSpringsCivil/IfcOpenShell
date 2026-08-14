@@ -53,6 +53,11 @@ def _on_radius_update(self, context):
     ops.on_radius_changed(self, context)
 
 
+def _terrain_object_poll(self, obj):
+    """Restrict the profile-view terrain picker to mesh objects."""
+    return obj.type == "MESH"
+
+
 class AlignmentPI(PropertyGroup):
     """Property group for a single PI (Point of Intersection)
 
@@ -63,7 +68,7 @@ class AlignmentPI(PropertyGroup):
 
     # Coordinates stored as global easting/northing (map coordinates).
     # Coordinate flow: Blender coords -> xyz2enh() -> global E/N (stored here)
-    #                  global E/N -> enh2xyz(to_blender=False) -> local IFC coords (for IfcOpenShell API)
+    #                  global E/N -> ifcopenshell.util.geolocation.auto_enh2xyz() -> local IFC coords (for IfcOpenShell API)
     e: StringProperty(name="E", description="Easting (global map coordinates)", default="0.0")
     n: StringProperty(name="N", description="Northing (global map coordinates)", default="0.0")
 
@@ -323,4 +328,34 @@ class CivilAlignmentProperties(PropertyGroup):
         default=100.0,
         min=1.0,
         unit="LENGTH",
+    )
+
+    # ---- Profile View (D2) ----
+    profile_terrain: bpy.props.PointerProperty(
+        name="Terrain",
+        description="Existing-ground mesh sampled for the profile view",
+        type=bpy.types.Object,
+        poll=_terrain_object_poll,
+    )
+
+    show_profile_view: BoolProperty(
+        name="Show Profile View",
+        description="Draw the 2D station-vs-elevation profile overlay in the 3D viewport",
+        default=False,
+    )
+
+    profile_view_interval: FloatProperty(
+        name="Sample Interval",
+        description="Station spacing for sampling the design and terrain profiles",
+        default=10.0,
+        min=0.1,
+        unit="LENGTH",
+    )
+
+    profile_view_height: IntProperty(
+        name="Profile Height",
+        description="Height of the profile overlay in pixels",
+        default=260,
+        min=120,
+        max=900,
     )

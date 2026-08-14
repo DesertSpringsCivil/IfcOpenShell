@@ -72,6 +72,7 @@ classes: tuple[type, ...] = (
     prop.CivilGradingProperties,
     operator.CIVIL_OT_feature_line_create,
     operator.CIVIL_OT_feature_line_drape,
+    operator.CIVIL_OT_feature_line_from_daylight,
     operator.CIVIL_OT_feature_line_edit_elevations,
     operator.CIVIL_OT_feature_line_delete,
     operator.CIVIL_OT_grading_create_criteria,
@@ -108,6 +109,7 @@ def _on_load_post(_dummy: bpy.types.Scene) -> None:
     module-level import chain at addon-register time.
     """
     from . import decorator as grading_decorator
+    from . import data as grading_data
 
     grading_decorator.GradingDecorator.uninstall()
 
@@ -116,6 +118,14 @@ def _on_load_post(_dummy: bpy.types.Scene) -> None:
     if props is not None:
         props.show_feature_lines = False
         props.show_daylight_lines = False
+
+    # Re-sync the UILists from the freshly-loaded IFC. This runs outside panel
+    # draw() (where writing scene properties is forbidden), so opening a file
+    # that already contains grading entities shows them in the lists.
+    try:
+        grading_data.GradingData.sync_uilists()
+    except Exception:
+        pass
 
 
 def register() -> None:
