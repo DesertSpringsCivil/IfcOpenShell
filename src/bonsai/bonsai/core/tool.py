@@ -1279,3 +1279,142 @@ class Wall:
 @interface
 class Web:
     pass
+
+
+# ############################################################################ #
+
+# Saikei Civil - horizontal infrastructure modules.
+# Alignment, Surface (TIN), Grading, Earthwork, and Voxel (IFC 4.4 TM27).
+
+
+@interface
+class Alignment:
+    # Alignment creation
+    def create_alignment(cls, name, start_station=0.0): pass
+    # Horizontal PI edit mode
+    def back_calculate_pis_from_alignment(cls, alignment): pass
+    def clear_layout_segments(cls, h_layout): pass
+    def collect_pis_from_empties(cls, alignment_id): pass
+    def create_objects_for_layout_segments(cls, h_layout, layout_obj): pass
+    def create_pi_edit_empties(cls, alignment, pis): pass
+    def get_horizontal_layout(cls, alignment): pass
+    def layout_by_pi_method(cls, h_layout, hpoints, radii): pass
+    def layout_has_real_segments(cls, h_layout): pass
+    def remove_layout_segment_objects(cls, h_layout): pass
+    def remove_pi_edit_empties(cls, alignment_id): pass
+    # Vertical PVI edit mode
+    def add_vertical_layout(cls, alignment): pass
+    def back_calculate_pvis_from_vertical(cls, alignment): pass
+    def collect_pvis_from_empties_vertical(cls, alignment_id): pass
+    def create_pvi_edit_empties(cls, alignment, pvis): pass
+    def get_vertical_layout(cls, alignment): pass
+    def layout_vertical_by_pvi_method(cls, layout, vpoints, lengths): pass
+    def remove_pvi_edit_empties(cls, alignment_id): pass
+
+
+@interface
+class Surface:
+    # Saikei surface tool — Phase 4. Math + IFC authoring + Blender linkage.
+    def build_tin_from_points(cls, name, points, kind="existing", guid=None): pass
+    def author_ifc_host(cls, ifc_file, surface, site=None, triangulation_tolerance=0.0): pass
+    def update_ifc_tin(cls, ifc_file, surface): pass
+    def author_ifc_breakline(cls, ifc_file, breakline, site=None, grading_group_guid=None, host_surface=None): pass
+    def retriangulate(cls, surface): pass
+    def z_at(cls, surface, x, y): pass
+    def register(cls, ifc_file, surface): pass
+    def get(cls, ifc_file, guid): pass
+    def invalidate(cls, ifc_file, guid): pass
+    def clear(cls): pass
+    def create_blender_mesh(cls, ifc_file, surface): pass
+    def update_blender_mesh(cls, ifc_file, surface): pass
+    def load_points_from_csv(cls, filepath, columns=(0, 1, 2), skip_header_rows=0): pass
+    def rename(cls, surface_guid, new_name): pass
+    def delete(cls, surface_guid): pass
+    def get_host_entity(cls, ifc_file, guid): pass
+    def iter_surfaces(cls, ifc_file): pass
+    def iter_proposed_surfaces(cls, ifc_file): pass
+    def simplify(cls, ifc_file, surface_id, tolerance): pass
+    def translate_z(cls, ifc_file, surface_guid, delta_z): pass
+    def build_boundary_polygon_from_ring(cls, ring_points): pass
+
+
+@interface
+class Grading:
+    # Saikei grading tool — Phase 5. Slope projection + IFC authoring + Blender linkage.
+    def author_feature_line(cls, ifc_file, feature_line, site=None): pass
+    def update_feature_line_vertices(cls, ifc_file, feature_line): pass
+    def author_criteria_template(cls, ifc_file, criteria): pass
+    def author_group(cls, ifc_file, group, target_surface=None, interior_fill_source=None, site=None, author=None): pass
+    def assign_criteria(cls, ifc_file, group, criteria, target_reference=None): pass
+    def author_slope_fill(cls, ifc_file, group, grading_object): pass
+    def author_interior_fill(cls, ifc_file, group, points, triangles, name=None): pass
+    def compute_grading_object(cls, feature_line, criteria, target_surface=None, sample_step=1.0, march_step=0.5, daylight_epsilon=0.001, max_iter=10000, side="auto", name=""): pass
+    def rebuild_group_surface(cls, ifc_file, group): pass
+    def register(cls, ifc_file, entity): pass
+    def get_feature_line(cls, ifc_file, guid): pass
+    def get_group(cls, ifc_file, guid): pass
+    def invalidate(cls, ifc_file, guid): pass
+    def clear(cls): pass
+    def create_blender_curve(cls, ifc_file, feature_line): pass
+    def create_blender_empty_for_group(cls, ifc_file, group): pass
+    def compute_stepped_offset(cls, ifc_file, fl_id, offset, step_dz): pass
+    def insert_fillet(cls, ifc_file, fl_id, vertex_index, radius): pass
+
+
+@interface
+class Earthwork:
+    # Saikei earthwork tool — Phase 6. TIN-to-TIN volumes + cut/fill solid construction + IFC authoring.
+    def compute_volumes(cls, existing_surface, proposed_surface, domain=None, shrink_factor=1.0, swell_factor=1.0, capture_per_triangle_deltas=False, build_solids=False): pass
+    def author_volume_result(cls, ifc_file, result, terrain=None, cut_name="Earthwork Cut", fill_name="Earthwork Fill", cut_predefined_type="EXCAVATION", fill_predefined_type="BACKFILL"): pass
+    def author_volume_label(cls, ifc_file, xyz, cut_depth, fill_depth, label_text=None): pass
+    def clear(cls): pass
+
+
+@interface
+class Voxel:
+    # Saikei voxel tool — Phase 5. RLE codec + occupancy ordering (Phase 1).
+    def rle_encode(cls, seq): pass
+    def rle_decode(cls, runs): pass
+    def rle_flatten(cls, runs): pass
+    def rle_unflatten(cls, flat): pass
+    def encode_runs(cls, values): pass
+    def decode_runs(cls, flat): pass
+    def compression_ratio(cls, seq): pass
+    def mask_to_voxels(cls, mask): pass
+    def voxels_to_mask(cls, voxels, nx, ny, nz): pass
+    def encode_occupancy(cls, mask): pass
+    def decode_occupancy(cls, voxels_rle, nx, ny, nz): pass
+    # Voxelization (Phase 2).
+    def make_grid(cls, origin, size, counts): pass
+    def grid_from_bounds(cls, min_xyz, max_xyz, cell_size): pass
+    def grid_from_surface(cls, surface, cell_size, z_min=None, z_max=None): pass
+    def xyz_bounds(cls, points): pass
+    def assert_shared_lattice(cls, a, b, tol=1e-9): pass
+    def cell_centers(cls, grid): pass
+    def height_fn_from_z_at(cls, z_at, surface): pass
+    def voxelize_below_surface(cls, grid, height_fn, supersample=1): pass
+    def voxelize_surface(cls, grid, surface, supersample=1): pass
+    def occupancy_volume(cls, grid, mask): pass
+    # Cut/fill (Phase 4).
+    def shared_grid(cls, surfaces, cell_size, z_min=None, z_max=None): pass
+    def cut_fill_masks(cls, existing_mask, design_mask): pass
+    def cut_fill(cls, existing_mask, design_mask, grid): pass
+    def bulk(cls, volume, factor): pass
+    # Sidecar authoring (Phase 4b).
+    def new_sidecar(cls): pass
+    def author_earthwork(cls, sidecar_file, grid, mask, host_class, predefined_type, name, bank_volume, source_surface_guid=None, swell_factor=1.0): pass
+    # Blender preview (Phase 6).
+    def create_preview_mesh(cls, grid, masks): pass
+    def clear_preview(cls): pass
+    # Stratum / geomodel (Phase 5).
+    def order_surfaces_by_elevation(cls, surfaces): pass
+    def strata_legend(cls, ordered_surfaces): pass
+    def classify_strata(cls, grid, height_fields): pass
+    def voxelize_strata(cls, grid, surfaces, supersample=1): pass
+    def gather_occupied(cls, values, mask): pass
+    def stratum_volume(cls, grid, code_layer, target_code): pass
+    def stratum_volumes(cls, grid, code_layer): pass
+    def author_geomodel(cls, sidecar_file, grid, code_layer, legend, name, source_surface_guids=None): pass
+    def create_strata_preview(cls, grid, code_layer, legend=None): pass
+    def cut_fill_by_stratum(cls, cut_mask, code_layer, grid): pass
+    def intersect_codes(cls, code_layer, mask): pass

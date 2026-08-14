@@ -20,6 +20,7 @@
 # ruff: file-ignore[unused-import]
 
 from bonsai.tool.aggregate import Aggregate
+from bonsai.tool.alignment import Alignment
 from bonsai.tool.array import Array
 from bonsai.tool.attribute import Attribute
 from bonsai.tool.bcf import Bcf
@@ -41,9 +42,11 @@ from bonsai.tool.demo import Demo
 from bonsai.tool.document import Document
 from bonsai.tool.drawing import Drawing
 from bonsai.tool.duplicate import Duplicate
+from bonsai.tool.earthwork import Earthwork
 from bonsai.tool.feature import Feature
 from bonsai.tool.geometry import Geometry
 from bonsai.tool.georeference import Georeference
+from bonsai.tool.grading import Grading
 from bonsai.tool.group import Group
 from bonsai.tool.ifc import Ifc
 from bonsai.tool.ifcgit import IfcGit, IfcGitRepo
@@ -73,11 +76,13 @@ from bonsai.tool.snap import Snap
 from bonsai.tool.spatial import Spatial
 from bonsai.tool.structural import Structural
 from bonsai.tool.style import Style
+from bonsai.tool.surface import Surface
 from bonsai.tool.surveyor import Surveyor
 from bonsai.tool.system import System
 from bonsai.tool.tester import Tester
 from bonsai.tool.type import Type
 from bonsai.tool.unit import Unit
+from bonsai.tool.voxel import Voxel
 from bonsai.tool.wall import Wall
 from bonsai.tool.web import Web
 
