@@ -223,6 +223,11 @@ class ProfileViewDecorator:
     terrain_points = []
     pvi_points = []
 
+    # Formatted station labels keyed by rounded station — populated lazily
+    # during draw so the (unit-dependent) formatter runs once per tick value,
+    # not once per frame. Cleared on refresh().
+    station_labels = {}
+
     # Live edit preview (tangent polyline through the PVIs being dragged); when
     # set, it is drawn over the design profile. None when not editing.
     preview_points = None
@@ -279,6 +284,7 @@ class ProfileViewDecorator:
         cls.design_points = []
         cls.terrain_points = []
         cls.pvi_points = []
+        cls.station_labels = {}
 
         ifc_file = tool.Ifc.get()
         if ifc_file is None or not cls.alignment_id:
@@ -386,7 +392,7 @@ class ProfileViewDecorator:
                 verts.append((px, transform.rect_y, 0.0))
                 verts.append((px, transform.rect_y + transform.rect_height, 0.0))
                 indices.append((base, base + 1))
-                self._draw_text(px - 14, transform.rect_y - 15, self._fmt(station), cls.COLOR_TEXT, size=9)
+                self._draw_text(px - 14, transform.rect_y - 15, self._station_label(station), cls.COLOR_TEXT, size=9)
                 station += station_step
         if elevation_step:
             elevation = math.ceil(transform.elevation_min / elevation_step) * elevation_step
@@ -459,6 +465,19 @@ class ProfileViewDecorator:
         else:
             nice = 10.0
         return nice * magnitude
+
+    @classmethod
+    def _station_label(cls, station):
+        """Project-notation station label, cached per tick value."""
+        key = round(station, 4)
+        label = cls.station_labels.get(key)
+        if label is None:
+            try:
+                label = tool.Alignment.format_station(station)
+            except Exception:
+                label = cls._fmt(station)
+            cls.station_labels[key] = label
+        return label
 
     @staticmethod
     def _fmt(value):

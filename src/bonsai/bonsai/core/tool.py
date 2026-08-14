@@ -1316,6 +1316,8 @@ class Alignment:
     def get_alignment_curve(cls, alignment): pass
     def get_alignment_length(cls, alignment): pass
     def remove_3d_alignment_object(cls, alignment): pass
+    # Stationing
+    def format_station(cls, station): pass
 
 
 @interface

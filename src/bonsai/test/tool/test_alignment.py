@@ -1856,3 +1856,36 @@ class TestSetLayoutSegmentsSelectable(NewIfc4X3):
 
         subject.set_layout_segments_selectable(h, True)
         assert all(not o.hide_select for o in segment_objects)
+
+
+class TestFormatStation(NewFile):
+    """tool.Alignment.format_station — project-unit-driven stationing notation."""
+
+    def _make_file(self, length):
+        import ifcopenshell.api.root
+        import ifcopenshell.api.unit
+
+        ifc = ifcopenshell.file(schema="IFC4X3_ADD2")
+        tool.Ifc.set(ifc)
+        ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
+        ifcopenshell.api.unit.assign_unit(ifc, length=length)
+        return ifc
+
+    def test_metric_metre_project_uses_three_digit_groups(self):
+        self._make_file(length={"is_metric": True, "raw": "METERS"})
+        assert subject.format_station(10050.0) == "10+050.000"
+
+    def test_imperial_foot_project_uses_two_digit_groups(self):
+        self._make_file(length={"is_metric": False, "raw": "FEET"})
+        assert subject.format_station(10050.0) == "100+50.00"
+
+    def test_zero_station_metric(self):
+        self._make_file(length={"is_metric": True, "raw": "METERS"})
+        assert subject.format_station(0.0) == "0+000.000"
+
+    def test_negative_station_keeps_sign(self):
+        self._make_file(length={"is_metric": True, "raw": "METERS"})
+        assert subject.format_station(-50.0) == "-0+050.000"
+
+    def test_without_project_falls_back_to_plain_number(self):
+        assert subject.format_station(1234.5) == "1234.50"

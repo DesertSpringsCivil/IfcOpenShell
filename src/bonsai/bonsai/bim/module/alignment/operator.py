@@ -1028,7 +1028,7 @@ class CIVIL_OT_add_stationing_referent(Operator, tool.Ifc.Operator):
         layout.prop(self, "station")
         layout.prop(self, "name")
         # Show station notation preview
-        station_str = format_station(self.station)
+        station_str = tool.Alignment.format_station(self.station)
         layout.label(text=f"Station notation: {station_str}")
 
     def _execute(self, context):
@@ -1045,7 +1045,7 @@ class CIVIL_OT_add_stationing_referent(Operator, tool.Ifc.Operator):
         distance_along = self.station - props.start_station
 
         # Auto-generate name if not provided
-        name = self.name if self.name else format_station(self.station)
+        name = self.name if self.name else tool.Alignment.format_station(self.station)
 
         # Use the alignment itself as the positioned product
         # (The referent marks a point on the alignment)
@@ -1061,18 +1061,6 @@ class CIVIL_OT_add_stationing_referent(Operator, tool.Ifc.Operator):
         )
 
         self.report({"INFO"}, f"Added referent '{name}' at station {self.station}")
-
-
-def format_station(station_value):
-    """Format a station value in standard notation (e.g., 10000 -> '100+00')"""
-    # Station notation: divide by 100 for the main part, remainder for the offset
-    # e.g., 10000 -> 100+00, 10050 -> 100+50, 10123.45 -> 101+23.45
-    main = int(station_value // 100)
-    offset = station_value % 100
-    if offset == int(offset):
-        return f"{main}+{int(offset):02d}"
-    else:
-        return f"{main}+{offset:05.2f}"
 
 
 class CIVIL_OT_name_segments(Operator, tool.Ifc.Operator):

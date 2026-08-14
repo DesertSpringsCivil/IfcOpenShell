@@ -682,32 +682,6 @@ class TestEndToEndIfcRoundtrip(NewIfc4X3):
         os.unlink(temp_path)
 
 
-# ===========================================================================
-# Utility Operators
-# ===========================================================================
-
-
-class TestFormatStation:
-    """Tests for the format_station utility function."""
-
-    def test_format_whole_station(self):
-        from bonsai.bim.module.alignment.operator import format_station
-
-        assert format_station(10000) == "100+00"
-
-    def test_format_station_with_offset(self):
-        from bonsai.bim.module.alignment.operator import format_station
-
-        assert format_station(10050) == "100+50"
-
-    def test_format_station_with_decimal(self):
-        from bonsai.bim.module.alignment.operator import format_station
-
-        result = format_station(10123.45)
-        assert "101+" in result
-        assert "23.45" in result
-
-    def test_format_station_zero(self):
-        from bonsai.bim.module.alignment.operator import format_station
-
-        assert format_station(0) == "0+00"
+# Station formatting is tool-layer now (tool.Alignment.format_station wrapping
+# ifcopenshell.util.alignment.station_as_string) — see TestFormatStation in
+# test/tool/test_alignment.py.

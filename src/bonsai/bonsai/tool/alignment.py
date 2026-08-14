@@ -1667,6 +1667,23 @@ class Alignment:
         return -float(align_api.distance_along_from_station(ifc_file, alignment, 0.0))
 
     @classmethod
+    def format_station(cls, station: float) -> str:
+        """Format a station (project units) in project stationing notation.
+
+        Delegates to ifcopenshell.util.alignment.station_as_string, which
+        derives the notation from the project LENGTHUNIT: imperial projects
+        read ``100+50.00``, metric projects ``10+050.000``. Falls back to a
+        plain number when no IFC file is open (e.g. dialog previews before a
+        project exists).
+        """
+        import ifcopenshell.util.alignment
+
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None:
+            return f"{float(station):.2f}"
+        return ifcopenshell.util.alignment.station_as_string(ifc_file, float(station))
+
+    @classmethod
     def _station_samples(cls, start_station: float, length: float, interval: float):
         """Yield stations from start..start+length inclusive at ``interval``."""
         interval = max(float(interval), 1e-6)
