@@ -133,12 +133,14 @@ classes = (
     prop.CivilCantPointProperties,
     prop.CantDisplayRow,
     prop.CivilReferentItem,
+    prop.CivilVerticalLayoutItem,
     prop.CivilAlignmentProperties,
     # UILists
     ui.CIVIL_UL_alignment_pis,
     ui.CIVIL_UL_vertical_pvis,
     ui.CIVIL_UL_cant_points,
     ui.CIVIL_UL_referents,
+    ui.CIVIL_UL_vertical_layouts,
     operator.ImportAlignmentCSV,
     # Operators - PI Management
     operator.CIVIL_OT_add_pi,
@@ -154,6 +156,10 @@ classes = (
     # Operators - Creation
     operator.CIVIL_OT_create_alignment_by_pis,
     operator.CIVIL_OT_create_alignment_by_pi,
+    # Operators - Offset Alignments (spec 1.7)
+    operator.CIVIL_OT_create_offset_alignment,
+    # Operators - Convert Curve to Alignment (spec 1.8)
+    operator.CIVIL_OT_convert_curve_to_alignment,
     # Operators - Stationing (spec Section 4)
     operator.CIVIL_OT_add_stationing_referent,
     operator.CIVIL_OT_add_station_equation,
@@ -166,6 +172,8 @@ classes = (
     operator.CIVIL_OT_enter_pi_edit_mode,
     # Operators - Vertical PVI Management
     operator.CIVIL_OT_add_vertical_to_alignment,
+    # Operators - Multi-Vertical Selector (spec 2.1)
+    operator.CIVIL_OT_add_alternative_vertical,
     operator.CIVIL_OT_add_pvi,
     operator.CIVIL_OT_remove_pvi,
     operator.CIVIL_OT_recalculate_pvis,

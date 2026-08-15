@@ -62,6 +62,7 @@ class ImportAlignmentCSV(bpy.types.Operator, tool.Ifc.Operator, ImportHelper):
         props.active_alignment_name = alignment.Name or "Imported Alignment"
         props.active_alignment_id = alignment.id()
         refresh_referent_list(props, alignment)
+        refresh_vertical_list(props, alignment)
 
         self.report({"INFO"}, "Imported in %s seconds" % (time.time() - start))
 
@@ -197,6 +198,99 @@ def refresh_referent_list(props, alignment):
         item.station = entry["station"] if entry["station"] is not None else 0.0
         item.is_equation = entry["is_equation"]
         item.incoming_station = entry["incoming_station"] if entry["incoming_station"] is not None else 0.0
+
+
+def refresh_vertical_list(props, alignment):
+    """Sync ``props.vertical_layouts`` (``CIVIL_UL_vertical_layouts``'
+    backing collection) from IFC (spec 2.1) -- every IfcAlignmentVertical
+    associated with ``alignment``: its own directly-nested vertical (if
+    any) plus one per aggregated design-alternative child.
+
+    Called at the same sync points ``refresh_referent_list`` is (alignment
+    activation on create/import/visualize, and whenever the vertical
+    structure changes -- add first/alternative, delete). Preserves the
+    current selection (by layout id) when it still exists in the refreshed
+    list; otherwise defaults to the first row, mirroring
+    ``refresh_referent_list``'s "just clear and rebuild" simplicity but
+    with one extra step since the PVI table needs to stay in sync with
+    whatever ends up selected.
+
+    Args:
+        props: CivilAlignmentProperties
+        alignment: The IfcAlignment entity, or None to just clear the list
+            (e.g. the active alignment was deleted).
+    """
+    previously_selected_id = props.active_vertical_layout_id
+
+    props.vertical_layouts.clear()
+    if alignment is None:
+        props.active_vertical_layout_index = 0
+        props.active_vertical_layout_id = 0
+        return
+
+    # is_alternative is deliberately POSITION-based (row 0 vs the rest),
+    # not a claim about creation order: once a second vertical exists, both
+    # live on aggregated children (CT 4.1.4.4.1.2) and "owning alignment !=
+    # parent" can no longer tell an original from an alternative -- nor
+    # does IFC itself record which was added first. get_vertical_layouts()'
+    # own return order (the alignment API's aggregation bookkeeping) is
+    # simply treated as "row 0 is the primary display row" for labeling
+    # purposes; see CivilVerticalLayoutItem.is_alternative's docstring.
+    for index, layout in enumerate(tool.Alignment.get_vertical_layouts(alignment)):
+        item = props.vertical_layouts.add()
+        item.layout_id = layout.id()
+        owning = layout.Nests[0].RelatingObject if layout.Nests else alignment
+        item.owning_alignment_id = owning.id()
+        item.is_alternative = index > 0
+        item.display_name = f"Vertical {index + 1}" + (" (alt)" if item.is_alternative else "")
+
+    restored_index = 0
+    for index, item in enumerate(props.vertical_layouts):
+        if item.layout_id == previously_selected_id:
+            restored_index = index
+            break
+
+    if props.vertical_layouts:
+        props.active_vertical_layout_index = restored_index
+        props.active_vertical_layout_id = props.vertical_layouts[restored_index].layout_id
+    else:
+        props.active_vertical_layout_index = 0
+        props.active_vertical_layout_id = 0
+
+
+def sync_pvis_from_selected_vertical_layout(props):
+    """Point ``props.active_vertical_layout_id`` at whichever row of
+    ``props.vertical_layouts`` is now selected, and resync the PVI table
+    from THAT layout (spec 2.1: "selecting a row ... re-syncs the PVI
+    table from THAT layout"). Called from
+    ``active_vertical_layout_index``'s update callback. No-op if the index
+    is out of range (e.g. the list was just cleared).
+    """
+    if not (0 <= props.active_vertical_layout_index < len(props.vertical_layouts)):
+        return
+    row = props.vertical_layouts[props.active_vertical_layout_index]
+    props.active_vertical_layout_id = row.layout_id
+
+    ifc = tool.Ifc.get()
+    if ifc is None:
+        return
+    alignment = tool.Alignment.get_active_alignment()
+    if alignment is None:
+        return
+    try:
+        v_layout = ifc.by_id(row.layout_id)
+    except RuntimeError:
+        return
+
+    if not tool.Alignment.layout_has_real_segments(v_layout):
+        props.vertical_pvis.clear()
+        props.active_pvi_index = 0
+        props.vertical_display_rows.clear()
+        props.active_vertical_display_row_index = 0
+        return
+
+    pvis = tool.Alignment.back_calculate_pvis_from_vertical(alignment, vertical_layout=v_layout)
+    _load_pvis_into_props(props, pvis)
 
 
 def on_radius_changed(pi, context):
@@ -1449,6 +1543,7 @@ class CIVIL_OT_create_alignment_by_pis(Operator, tool.Ifc.Operator):
         props.active_alignment_id = alignment.id()
         props.active_alignment_name = alignment.Name or self.alignment_name
         refresh_referent_list(props, alignment)
+        refresh_vertical_list(props, alignment)
 
         # Clear any existing PIs from previous work
         props.pis.clear()
@@ -1526,6 +1621,206 @@ class CIVIL_OT_create_alignment_by_pi(Operator, tool.Ifc.Operator):
                 tool.Alignment.create_objects_for_layout_segments(h_layout, h_layout_obj)
 
             self.report({"INFO"}, f"Added {len(hpoints)} PIs to existing alignment '{existing_alignment.Name}'")
+
+
+# =============================================================================
+# Offset Alignments (spec 1.7)
+# =============================================================================
+
+
+class CIVIL_OT_create_offset_alignment(Operator, tool.Ifc.Operator):
+    """Create an offset alignment riding on the active alignment's curve (spec 1.7)"""
+
+    bl_idname = "civil.create_offset_alignment"
+    bl_label = "Create Offset Alignment"
+    bl_description = (
+        "Create a new alignment offset from the active alignment's curve -- constant, or a single "
+        "linear taper over a station range (widening/narrowing). Appears as the active alignment's "
+        "child in the outliner and updates automatically when the parent's geometry changes"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    name: StringProperty(name="Name", default="")
+
+    offset_mode: EnumProperty(
+        name="Mode",
+        description="Constant offset across the whole alignment, or a single linear taper over a station range",
+        items=[
+            ("CONSTANT", "Constant", "The same offset across the whole alignment"),
+            ("TAPER", "Taper", "A linear widening/narrowing ramp over a station range, constant before/after"),
+        ],
+        default="CONSTANT",
+    )
+
+    offset: FloatProperty(
+        name="Offset",
+        description="Signed lateral offset -- positive is to the right of increasing stations",
+        default=5.0,
+        unit="LENGTH",
+    )
+
+    start_offset: FloatProperty(
+        name="Start Offset",
+        description="Offset held constant before station_from, and ramping from here",
+        default=5.0,
+        unit="LENGTH",
+    )
+    end_offset: FloatProperty(
+        name="End Offset",
+        description="Offset held constant after station_to, and ramping to here",
+        default=10.0,
+        unit="LENGTH",
+    )
+    station_from: FloatProperty(
+        name="Station From",
+        description="Distance along the alignment (from its start) where the taper ramp begins",
+        default=0.0,
+        unit="LENGTH",
+    )
+    station_to: FloatProperty(
+        name="Station To",
+        description="Distance along the alignment (from its start) where the taper ramp ends",
+        default=100.0,
+        unit="LENGTH",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("Select an alignment first")
+            return False
+        alignment = _resolve_active_alignment(context)
+        if alignment is None:
+            cls.poll_message_set("Selected alignment no longer exists")
+            return False
+        if tool.Alignment.get_curve_for_alignment(alignment) is None:
+            cls.poll_message_set("Alignment has no geometric representation to offset from")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        alignment = _resolve_active_alignment(context)
+        self.name = f"{alignment.Name or 'Alignment'} offset" if alignment else "Alignment offset"
+        if alignment is not None:
+            self.station_to = tool.Alignment.get_horizontal_extent_semantic(alignment)
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "name")
+        layout.prop(self, "offset_mode")
+        if self.offset_mode == "CONSTANT":
+            layout.prop(self, "offset")
+        else:
+            layout.prop(self, "start_offset")
+            layout.prop(self, "end_offset")
+            layout.prop(self, "station_from")
+            layout.prop(self, "station_to")
+            layout.label(text="Single linear taper only -- see docs for multi-station tables", icon="INFO")
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+
+        if self.offset_mode == "CONSTANT":
+            offset_spec = {"mode": "CONSTANT", "offset": self.offset}
+        else:
+            offset_spec = {
+                "mode": "TAPER",
+                "start_offset": self.start_offset,
+                "end_offset": self.end_offset,
+                "station_from": self.station_from,
+                "station_to": self.station_to,
+            }
+
+        try:
+            offset_alignment = core.create_offset_alignment(
+                tool.Ifc, tool.Alignment, props.active_alignment_id, self.name, offset_spec
+            )
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        tool.Blender.update_viewport()
+        self.report({"INFO"}, f"Created offset alignment '{offset_alignment.Name}'")
+        return {"FINISHED"}
+
+
+# =============================================================================
+# Convert Curve to Alignment (spec 1.8)
+# =============================================================================
+
+
+class CIVIL_OT_convert_curve_to_alignment(Operator, tool.Ifc.Operator):
+    """Convert the active Blender curve into a new all-tangent alignment (spec 1.8)"""
+
+    bl_idname = "civil.convert_curve_to_alignment"
+    bl_label = "Convert Curve to Alignment"
+    bl_description = (
+        "Convert the active Blender curve into a new alignment -- POLY splines are used directly, "
+        "BEZIER/NURBS are sampled and simplified to PI candidates. Every PI is a plain tangent "
+        "(radius 0); add curves afterward in the PI Editor"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    name: StringProperty(name="Name", default="")
+    simplify_tolerance: FloatProperty(
+        name="Simplify Tolerance",
+        description="Maximum deviation when simplifying sampled curves to PI candidates",
+        default=0.5,
+        min=0.0,
+        unit="LENGTH",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        obj = context.active_object
+        if obj is None or obj.type != "CURVE":
+            cls.poll_message_set("Select a curve object first")
+            return False
+        if not obj.data.splines:
+            cls.poll_message_set("Curve has no splines")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        obj = context.active_object
+        self.name = f"{obj.name} Alignment" if obj else "Alignment"
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "name")
+        layout.prop(self, "simplify_tolerance")
+
+    def _execute(self, context):
+        obj = context.active_object
+        points_xyz = tool.Alignment.extract_polyline_from_curve(obj)
+        points_xy = [(x, y) for x, y, _z in points_xyz]
+
+        try:
+            alignment, pi_count, sample_count = core.convert_curve_to_alignment(
+                tool.Ifc, tool.Alignment, self.name, points_xy, self.simplify_tolerance
+            )
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        props = context.scene.CivilAlignmentProperties
+        props.active_alignment_id = alignment.id()
+        props.active_alignment_name = alignment.Name or self.name
+        refresh_referent_list(props, alignment)
+        refresh_vertical_list(props, alignment)
+        tool.Blender.update_viewport()
+        self.report(
+            {"INFO"},
+            f"Created alignment '{alignment.Name}' with {pi_count} PIs (simplified from {sample_count} samples)",
+        )
+        return {"FINISHED"}
 
 
 # CSV import lives on the single upstream operator id `bim.import_alignment_csv`
@@ -2372,8 +2667,63 @@ class CIVIL_OT_add_vertical_to_alignment(Operator, tool.Ifc.Operator):
             alignment_obj = tool.Alignment.create_hierarchy_for_alignment(alignment)
         if v_layout and alignment_obj:
             tool.Alignment.create_object_for_layout(v_layout, alignment_obj)
+        refresh_vertical_list(props, alignment)
         tool.Blender.update_viewport()
         self.report({"INFO"}, "Vertical layout added — open the PVI Editor to add PVIs")
+
+
+class CIVIL_OT_add_alternative_vertical(Operator, tool.Ifc.Operator):
+    """Add a design-alternative vertical layout to the active alignment (spec 2.1)"""
+
+    bl_idname = "civil.add_alternative_vertical"
+    bl_label = "Add Alternative Vertical"
+    bl_description = (
+        "Add a SECOND (or subsequent) vertical layout as a design alternative -- the existing "
+        "vertical(s) are kept, never replaced. Migrates the alignment to IFC's multi-vertical "
+        "structure (CT 4.1.4.4.1.2), aggregating each vertical onto its own child alignment"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("No alignment selected")
+            return False
+        alignment = _resolve_active_alignment(context)
+        if alignment is None:
+            cls.poll_message_set("Selected alignment no longer exists")
+            return False
+        if tool.Alignment.get_horizontal_layout(alignment) is None:
+            cls.poll_message_set("Alignment has no horizontal layout")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        try:
+            v_layout = core.add_alternative_vertical(tool.Ifc, tool.Alignment, props.active_alignment_id)
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        alignment = tool.Ifc.get().by_id(props.active_alignment_id)
+        refresh_vertical_list(props, alignment)
+        # Select the newly added alternative in the list so the (empty) PVI
+        # table immediately reflects it, ready for the PVI Editor.
+        for index, item in enumerate(props.vertical_layouts):
+            if v_layout and item.layout_id == v_layout.id():
+                props.active_vertical_layout_index = index
+                props.active_vertical_layout_id = item.layout_id
+                break
+
+        tool.Blender.update_viewport()
+        self.report({"INFO"}, "Design-alternative vertical added — select it in the list and open the PVI Editor")
 
 
 class CIVIL_OT_visualize_3d_alignment(Operator, tool.Ifc.Operator):
@@ -2420,7 +2770,9 @@ class CIVIL_OT_visualize_3d_alignment(Operator, tool.Ifc.Operator):
         if obj is None:
             self.report({"WARNING"}, "Alignment has no geometry to visualize")
             return {"CANCELLED"}
-        refresh_referent_list(props, _resolve_active_alignment(context))
+        alignment = _resolve_active_alignment(context)
+        refresh_referent_list(props, alignment)
+        refresh_vertical_list(props, alignment)
         self.report({"INFO"}, "3D centerline updated")
 
 
@@ -2776,7 +3128,15 @@ class CIVIL_OT_recalculate_pvis(Operator, tool.Ifc.Operator):
             self.report({"INFO"}, f"Recalculated {len(props.vertical_pvis)} PVIs, total length: {total_len:.2f}")
             return
 
-        v_layout = tool.Alignment.get_vertical_layout(alignment)
+        # Target whichever vertical layout is selected in the list (spec
+        # 2.1) — 0/unset means the alignment's own/default vertical.
+        if props.active_vertical_layout_id:
+            try:
+                v_layout = tool.Ifc.get().by_id(props.active_vertical_layout_id)
+            except RuntimeError:
+                v_layout = None
+        else:
+            v_layout = tool.Alignment.get_vertical_layout(alignment)
         if v_layout is None:
             self.report({"ERROR"}, "Alignment has no vertical layout — add vertical first")
             return
@@ -2796,11 +3156,15 @@ class CIVIL_OT_recalculate_pvis(Operator, tool.Ifc.Operator):
 
         # Ensure the vertical layout has an outliner node so its segments display
         # (it won't if the layout was created before the node-creation fix).
+        # A design-alternative vertical (spec 2.1) is nested on a CHILD
+        # alignment, not the top-level one — resolve the actual owner so a
+        # freshly-created layout object gets the right parent.
+        owning_alignment = v_layout.Nests[0].RelatingObject if v_layout.Nests else alignment
         layout_obj = tool.Ifc.get_object(v_layout)
         if not layout_obj:
-            alignment_obj = tool.Ifc.get_object(alignment)
-            if alignment_obj:
-                layout_obj = tool.Alignment.create_object_for_layout(v_layout, alignment_obj)
+            owning_obj = tool.Ifc.get_object(owning_alignment)
+            if owning_obj:
+                layout_obj = tool.Alignment.create_object_for_layout(v_layout, owning_obj)
         if layout_obj:
             tool.Alignment.create_objects_for_layout_segments(v_layout, layout_obj)
 
@@ -2898,6 +3262,8 @@ class CIVIL_OT_delete_vertical_layout(Operator, tool.Ifc.Operator):
             profile_view.uninstall()
             props.show_profile_view = False
 
+        refresh_vertical_list(props, _resolve_active_alignment(context))
+
         tool.Blender.update_viewport()
         self.report({"INFO"}, "Vertical layout deleted")
         return {"FINISHED"}
@@ -2917,6 +3283,7 @@ class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
     _last_positions: list = []
     _area = None
     _alignment_id: int = 0
+    _vertical_layout_id: int = 0
 
     @classmethod
     def poll(cls, context):
@@ -2933,7 +3300,7 @@ class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
         if alignment is None:
             cls.poll_message_set("Selected alignment no longer exists")
             return False
-        if tool.Alignment.get_vertical_layout(alignment) is None:
+        if not tool.Alignment.get_vertical_layouts(alignment):
             cls.poll_message_set("Alignment has no vertical layout")
             return False
         return True
@@ -2944,6 +3311,9 @@ class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
     def _invoke(self, context, event):
         props = context.scene.CivilAlignmentProperties
         self._alignment_id = props.active_alignment_id
+        # 0 = the alignment's own/default vertical (spec 2.1's selector
+        # defaults to it when only one vertical exists).
+        self._vertical_layout_id = props.active_vertical_layout_id
 
         # Rehydrate the persisted advisory design speed (spec 2.4) so K flags
         # come back after save/reopen without re-entering the value.
@@ -2954,7 +3324,9 @@ class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
                 props.design_speed = persisted_speed
 
         try:
-            empties = core.enter_pvi_edit_mode(tool.Ifc, tool.Alignment, self._alignment_id)
+            empties = core.enter_pvi_edit_mode(
+                tool.Ifc, tool.Alignment, self._alignment_id, vertical_layout_id=self._vertical_layout_id or None
+            )
         except ValueError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
@@ -2976,6 +3348,7 @@ class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
 
         props.is_pvi_edit_mode = True
         props.pvi_edit_alignment_id = self._alignment_id
+        props.pvi_edit_vertical_layout_id = self._vertical_layout_id
 
         context.window_manager.modal_handler_add(self)
         self.report({"INFO"}, "PVI Edit Mode: Move PVIs with G. Press Enter to apply, Escape to cancel.")
@@ -3021,7 +3394,13 @@ class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
 
         try:
             if apply:
-                core.exit_pvi_edit_mode(tool.Ifc, tool.Alignment, self._alignment_id, apply=True)
+                core.exit_pvi_edit_mode(
+                    tool.Ifc,
+                    tool.Alignment,
+                    self._alignment_id,
+                    apply=True,
+                    vertical_layout_id=self._vertical_layout_id or None,
+                )
                 # exit_pvi_edit_mode already ran commit_layout_change — resync
                 # the referent list UI with whatever it (re)authored.
                 try:
@@ -3030,7 +3409,13 @@ class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
                     pass
                 self.report({"INFO"}, "PVI changes applied - vertical alignment updated")
             else:
-                core.exit_pvi_edit_mode(tool.Ifc, tool.Alignment, self._alignment_id, apply=False)
+                core.exit_pvi_edit_mode(
+                    tool.Ifc,
+                    tool.Alignment,
+                    self._alignment_id,
+                    apply=False,
+                    vertical_layout_id=self._vertical_layout_id or None,
+                )
                 self.report({"INFO"}, "PVI Edit Mode cancelled")
         except ValueError as e:
             self.report({"ERROR"}, str(e))
@@ -3039,6 +3424,7 @@ class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
 
         props.is_pvi_edit_mode = False
         props.pvi_edit_alignment_id = 0
+        props.pvi_edit_vertical_layout_id = 0
 
         self._pvi_empties = []
         self._last_positions = []

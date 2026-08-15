@@ -299,6 +299,23 @@ class CIVIL_UL_referents(UIList):
             layout.label(text="", icon="DECORATE")
 
 
+class CIVIL_UL_vertical_layouts(UIList):
+    """UIList for the active alignment's vertical layouts (spec 2.1) --
+    the alignment's own/default vertical plus one row per design-
+    alternative child. Selecting a row re-syncs the PVI table from that
+    layout (``active_vertical_layout_index``'s update callback).
+    """
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {"DEFAULT", "COMPACT"}:
+            row = layout.row(align=True)
+            row.label(text="", icon="ANIM" if item.is_alternative else "CURVE_PATH")
+            row.label(text=item.display_name or f"Vertical {index + 1}")
+        elif self.layout_type == "GRID":
+            layout.alignment = "CENTER"
+            layout.label(text="", icon="DECORATE")
+
+
 # =============================================================================
 # Creation Sub-Panel
 # =============================================================================
@@ -332,8 +349,14 @@ class CIVIL_PT_alignment_creation(Panel):
         # Creation operators
         col = layout.column(align=True)
         col.operator("civil.create_alignment_by_pi", icon="CURVE_DATA")
+        col.operator("civil.convert_curve_to_alignment", icon="OUTLINER_OB_CURVE")
 
         if props.active_alignment_id != 0:
+            layout.separator()
+            box = layout.box()
+            box.label(text="Offset (spec 1.7):", icon="MOD_OFFSET")
+            box.operator("civil.create_offset_alignment", icon="MOD_OFFSET")
+
             layout.separator()
             layout.operator("civil.delete_alignment", icon="TRASH")
 
@@ -463,8 +486,27 @@ class CIVIL_PT_vertical_creation(Panel):
                 except RuntimeError:
                     pass
             if has_vertical:
+                box.operator("civil.add_alternative_vertical", icon="ANIM")
                 box.operator("civil.delete_vertical_layout", icon="TRASH")
             layout.separator()
+
+            # Vertical layout selector (spec 2.1) — lists the alignment's
+            # own vertical plus any design alternatives; selecting a row
+            # re-syncs the PVI Editor table below from that layout. A
+            # single-vertical alignment just shows one row.
+            if len(props.vertical_layouts) > 1:
+                box = layout.box()
+                box.label(text="Vertical Layouts:", icon="PRESET")
+                box.template_list(
+                    "CIVIL_UL_vertical_layouts",
+                    "",
+                    props,
+                    "vertical_layouts",
+                    props,
+                    "active_vertical_layout_index",
+                    rows=3,
+                )
+                layout.separator()
 
             # 3D combined-alignment centerline (D3)
             box = layout.box()

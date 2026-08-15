@@ -146,6 +146,17 @@ def _on_cant_rotation_reference_update(self, context):
     tool.Alignment.set_cant_rotation_reference(cant_layout, self.cant_rotation_reference)
 
 
+def _on_active_vertical_layout_index_update(self, context):
+    """Sync the PVI table from whichever row of ``vertical_layouts`` is now
+    selected (spec 2.1: "selecting a row ... re-syncs the PVI table from
+    THAT layout"). Lazy import mirrors the other update callbacks
+    (prop.py loads before operator.py).
+    """
+    from . import operator as ops
+
+    ops.sync_pvis_from_selected_vertical_layout(context.scene.CivilAlignmentProperties)
+
+
 def _on_show_station_labels_update(self, context):
     """Install/uninstall the station-tick viewport decorator (spec 4.1).
 
@@ -620,6 +631,39 @@ class CivilReferentItem(PropertyGroup):
     )
 
 
+class CivilVerticalLayoutItem(PropertyGroup):
+    """Read-only mirror of one IfcAlignmentVertical associated with the
+    active alignment (spec 2.1) -- the parent's own directly-nested
+    vertical (if any) plus one per aggregated child alignment (CT
+    4.1.4.4.1.2's design alternatives). Populated by
+    ``operator.refresh_vertical_list()``; selecting a row in
+    ``CIVIL_UL_vertical_layouts`` re-syncs the PVI table from that layout
+    via ``active_vertical_layout_index``'s update callback.
+    """
+
+    layout_id: IntProperty(name="Layout ID", description="IFC entity id of the IfcAlignmentVertical", default=0)
+    owning_alignment_id: IntProperty(
+        name="Owning Alignment ID",
+        description=(
+            "IFC entity id of the IfcAlignment this layout is nested under -- the active alignment "
+            "itself when only one vertical exists, or an aggregated child once a second is added"
+        ),
+        default=0,
+    )
+    display_name: StringProperty(name="Name", default="")
+    is_alternative: BoolProperty(
+        name="Is Alternative",
+        description=(
+            "Position-based label: False for the first row returned by tool.Alignment."
+            "get_vertical_layouts() (whichever the alignment API's own aggregation bookkeeping "
+            "surfaces first), True for every other row. Not a claim about creation order -- once a "
+            "second vertical exists, both live on aggregated children and IFC itself does not "
+            "record which one was added first"
+        ),
+        default=False,
+    )
+
+
 class CivilAlignmentProperties(PropertyGroup):
     """Properties for the alignment module"""
 
@@ -689,6 +733,28 @@ class CivilAlignmentProperties(PropertyGroup):
     pvi_edit_alignment_id: IntProperty(
         name="Editing Alignment ID (Vertical)",
         description="IFC ID of alignment being edited in PVI edit mode",
+        default=0,
+    )
+
+    pvi_edit_vertical_layout_id: IntProperty(
+        name="Editing Vertical Layout ID",
+        description=(
+            "IFC ID of the specific IfcAlignmentVertical being edited in PVI edit mode (spec 2.1) -- "
+            "0 means the alignment's own/default vertical"
+        ),
+        default=0,
+    )
+
+    # ---- Multi-Vertical Selector (spec 2.1) ----
+    vertical_layouts: CollectionProperty(type=CivilVerticalLayoutItem)
+    active_vertical_layout_index: IntProperty(
+        name="Active Vertical Layout",
+        default=0,
+        update=_on_active_vertical_layout_index_update,
+    )
+    active_vertical_layout_id: IntProperty(
+        name="Active Vertical Layout ID",
+        description="IFC entity id of the IfcAlignmentVertical the PVI table currently reads from/writes to",
         default=0,
     )
 
