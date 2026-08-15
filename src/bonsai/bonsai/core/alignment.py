@@ -430,6 +430,37 @@ def exit_pi_edit_mode(
         return True
 
 
+def delete_pi_in_edit_mode(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+    index: int,
+) -> None:
+    """Delete a single PI empty during PI edit mode (spec 1.3, ``X`` key).
+
+    Business rule: at least 3 PIs must remain after the deletion. This
+    preserves at least one interior PI, so an in-progress edit can never be
+    whittled down to a single bare tangent with no PI left that could ever
+    hold a curve.
+
+    Args:
+        ifc_tool: The IFC tool class (unused — kept for signature parity
+            with the other PI edit mode functions).
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment being edited
+        index: The ``civil_pi_index`` of the PI empty to delete
+
+    Raises:
+        ValueError: If fewer than 3 PIs would remain, or ``index`` does not
+            match an existing PI empty.
+    """
+    empties = alignment_tool.get_pi_edit_empties(alignment_id)
+    if len(empties) - 1 < 3:
+        raise ValueError("At least 3 PIs must remain in PI edit mode — cannot delete")
+    if not alignment_tool.delete_pi_edit_empty(alignment_id, index):
+        raise ValueError(f"PI at index {index} not found")
+
+
 # =============================================================================
 # Alignment Evaluation & 3D Combination (D3)
 # =============================================================================
@@ -452,6 +483,71 @@ def _resolve_alignment(ifc_tool, alignment_id):
     if not alignment.is_a("IfcAlignment"):
         raise ValueError(f"Entity {alignment_id} is not an IfcAlignment")
     return alignment
+
+
+# =============================================================================
+# Alignment / Vertical Deletion (spec 1.4, 2.6)
+# =============================================================================
+
+
+def delete_alignment(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+) -> int:
+    """Delete an alignment entirely: its IFC entity and all viewport objects.
+
+    Business rules:
+    1. The alignment must exist and be an IfcAlignment.
+    2. Blender objects for the alignment, its layouts/segments, and the 3D
+       centerline helper (if any) are removed first, then the IFC entity.
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment to delete
+
+    Returns:
+        The number of Blender objects removed.
+
+    Raises:
+        ValueError: If the alignment doesn't exist or is the wrong type.
+    """
+    alignment = _resolve_alignment(ifc_tool, alignment_id)
+    removed_objects = alignment_tool.remove_alignment_hierarchy(alignment)
+    alignment_tool.remove_3d_alignment_object(alignment)
+    alignment_tool.remove_alignment_entity(alignment)
+    return removed_objects
+
+
+def delete_vertical_layout(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+) -> bool:
+    """Delete the vertical layout, reverting the alignment to horizontal-only.
+
+    Business rules:
+    1. The alignment must exist and be an IfcAlignment.
+    2. The alignment must currently have a vertical layout.
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment
+
+    Returns:
+        True if successful.
+
+    Raises:
+        ValueError: If the alignment doesn't exist, is the wrong type, or has
+            no vertical layout.
+    """
+    alignment = _resolve_alignment(ifc_tool, alignment_id)
+    if alignment_tool.get_vertical_layout(alignment) is None:
+        raise ValueError(f"Alignment '{alignment.Name}' has no vertical layout")
+    alignment_tool.remove_vertical_layout(alignment)
+    return True
 
 
 def evaluate_alignment_at_station(

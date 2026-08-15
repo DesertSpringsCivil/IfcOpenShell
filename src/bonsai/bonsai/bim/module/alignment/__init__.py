@@ -38,6 +38,7 @@ classes = (
     operator.CIVIL_OT_pick_pi_from_viewport,
     operator.CIVIL_OT_recalculate_pis,
     operator.CIVIL_OT_clear_pis,
+    operator.CIVIL_OT_delete_alignment,
     # Operators - Creation
     operator.CIVIL_OT_create_alignment_by_pis,
     operator.CIVIL_OT_create_alignment_by_pi,
@@ -45,6 +46,7 @@ classes = (
     operator.CIVIL_OT_add_stationing_referent,
     operator.CIVIL_OT_name_segments,
     # Operators - PI Edit Mode
+    operator.CIVIL_OT_set_pi_curve_radius,
     operator.CIVIL_OT_enter_pi_edit_mode,
     # Operators - Vertical PVI Management
     operator.CIVIL_OT_add_vertical_to_alignment,
@@ -52,6 +54,7 @@ classes = (
     operator.CIVIL_OT_remove_pvi,
     operator.CIVIL_OT_recalculate_pvis,
     operator.CIVIL_OT_clear_pvis,
+    operator.CIVIL_OT_delete_vertical_layout,
     # Operators - PVI Edit Mode
     operator.CIVIL_OT_enter_pvi_edit_mode,
     # Operators - 3D Combination (D3)

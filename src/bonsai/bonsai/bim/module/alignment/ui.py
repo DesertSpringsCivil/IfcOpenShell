@@ -215,6 +215,10 @@ class CIVIL_PT_alignment_creation(Panel):
         col = layout.column(align=True)
         col.operator("civil.create_alignment_by_pi", icon="CURVE_DATA")
 
+        if props.active_alignment_id != 0:
+            layout.separator()
+            layout.operator("civil.delete_alignment", icon="TRASH")
+
 
 # =============================================================================
 # PI Editor Sub-Panel
@@ -323,6 +327,17 @@ class CIVIL_PT_vertical_creation(Panel):
             box = layout.box()
             box.label(text="Setup:", icon="ADD")
             box.operator("civil.add_vertical_to_alignment", icon="CURVE_PATH")
+
+            has_vertical = False
+            ifc_file = tool.Ifc.get()
+            if ifc_file is not None:
+                try:
+                    alignment = ifc_file.by_id(props.active_alignment_id)
+                    has_vertical = tool.Alignment.get_vertical_layout(alignment) is not None
+                except RuntimeError:
+                    pass
+            if has_vertical:
+                box.operator("civil.delete_vertical_layout", icon="TRASH")
             layout.separator()
 
             # 3D combined-alignment centerline (D3)

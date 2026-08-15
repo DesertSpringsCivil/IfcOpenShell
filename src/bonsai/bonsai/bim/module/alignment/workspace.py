@@ -70,6 +70,7 @@ def _draw_sidebar(layout):
     row = col.row(align=True)
     row.operator("civil.recalculate_pis", text="Visualize", icon="FILE_REFRESH")
     row.operator("civil.clear_pis", text="Clear", icon="TRASH")
+    col.operator("civil.delete_alignment", icon="TRASH")
     col.separator()
     col.operator("civil.add_stationing_referent", icon="EMPTY_AXIS")
     col.operator("civil.name_segments", icon="FONT_DATA")

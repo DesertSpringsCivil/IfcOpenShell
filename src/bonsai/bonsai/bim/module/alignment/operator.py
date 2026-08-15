@@ -20,6 +20,7 @@
 
 
 import bpy
+import math
 import time
 import bonsai.core.alignment as core
 import bonsai.tool as tool
@@ -28,8 +29,9 @@ import ifcopenshell.api.spatial
 import ifcopenshell.util.geolocation
 import ifcopenshell.util.unit
 from bpy_extras.io_utils import ImportHelper
+from bpy_extras.view3d_utils import region_2d_to_origin_3d, region_2d_to_vector_3d, location_3d_to_region_2d
 from bpy.types import Operator
-from bpy.props import StringProperty, FloatProperty
+from bpy.props import StringProperty, FloatProperty, IntProperty
 from . import decorator as alignment_decorator
 from bonsai.bim.module.model.polyline import PolylineOperator
 from bonsai.bim.module.model.decorator import PolylineDecorator
@@ -776,7 +778,6 @@ class CIVIL_OT_clear_pis(Operator, tool.Ifc.Operator):
         return context.window_manager.invoke_confirm(self, event)
 
     def _execute(self, context):
-        ifc = tool.Ifc.get()
         props = context.scene.CivilAlignmentProperties
 
         removed_objects = 0
@@ -784,10 +785,11 @@ class CIVIL_OT_clear_pis(Operator, tool.Ifc.Operator):
         # Delete the active alignment entirely (Blender + IFC) so the file is
         # never left with an orphaned, PI-less alignment. Resolved through
         # props.active_alignment_id — the same reference every other panel
-        # operator uses — not the viewport's active object.
+        # operator uses — not the viewport's active object. Routed through
+        # the same core.delete_alignment path as civil.delete_alignment so
+        # there is exactly one alignment-deletion code path.
         if alignment := _resolve_active_alignment(context):
-            removed_objects = tool.Alignment.remove_alignment_hierarchy(alignment)
-            ifcopenshell.api.run("root.remove_product", ifc, product=alignment)
+            removed_objects = core.delete_alignment(tool.Ifc, tool.Alignment, alignment.id())
             props.active_alignment_id = 0
             props.active_alignment_name = ""
 
@@ -803,6 +805,63 @@ class CIVIL_OT_clear_pis(Operator, tool.Ifc.Operator):
             self.report({"INFO"}, f"Deleted alignment and removed {removed_objects} objects")
         else:
             self.report({"INFO"}, "Cleared all PIs")
+
+
+class CIVIL_OT_delete_alignment(Operator, tool.Ifc.Operator):
+    """Delete the active alignment: its IFC entity and all viewport objects"""
+
+    bl_idname = "civil.delete_alignment"
+    bl_label = "Delete Alignment"
+    bl_description = (
+        "Delete the active alignment — its IFC entity and all of its viewport "
+        "objects (layouts, segments, 3D centerline). Cannot be undone from "
+        "the IFC side beyond Blender's normal undo stack."
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        if _resolve_active_alignment(context) is None:
+            cls.poll_message_set("No alignment selected")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+
+        alignment = _resolve_active_alignment(context)
+        if alignment is None:
+            self.report({"ERROR"}, "Alignment no longer exists")
+            return {"CANCELLED"}
+
+        removed_objects = core.delete_alignment(tool.Ifc, tool.Alignment, alignment.id())
+
+        # Reset every piece of UI state that referenced the now-deleted alignment.
+        props.active_alignment_id = 0
+        props.active_alignment_name = ""
+        props.pis.clear()
+        props.active_pi_index = 0
+        props.display_rows.clear()
+        props.active_display_row_index = 0
+        props.vertical_pvis.clear()
+        props.active_pvi_index = 0
+        props.vertical_display_rows.clear()
+        props.active_vertical_display_row_index = 0
+
+        # The profile view (D2) samples this alignment — drop it if showing.
+        profile_view = alignment_decorator.ProfileViewDecorator
+        if profile_view.is_installed:
+            profile_view.uninstall()
+            props.show_profile_view = False
+
+        tool.Blender.update_viewport()
+        self.report({"INFO"}, f"Deleted alignment and removed {removed_objects} objects")
+        return {"FINISHED"}
 
 
 # =============================================================================
@@ -1043,19 +1102,81 @@ class CIVIL_OT_name_segments(Operator, tool.Ifc.Operator):
 # =============================================================================
 
 
+class CIVIL_OT_set_pi_curve_radius(Operator, tool.Ifc.Operator):
+    """Set (or change) the curve radius at a PI while in PI edit mode"""
+
+    bl_idname = "civil.set_pi_curve_radius"
+    bl_label = "Set PI Curve Radius"
+    bl_description = "Set the curve radius at a PI, validating that it fits within the adjacent tangents"
+    bl_options = {"REGISTER", "UNDO"}
+
+    alignment_id: IntProperty(default=0)
+    pi_index: IntProperty(default=0)
+    radius: FloatProperty(name="Radius", description="Curve radius", default=100.0, min=0.0, unit="LENGTH")
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.CivilAlignmentProperties
+        if not props.is_pi_edit_mode:
+            cls.poll_message_set("Only available during PI edit mode")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        # Pre-fill from the empty's current radius, if it already has a curve.
+        empties = tool.Alignment.get_pi_edit_empties(self.alignment_id)
+        if 0 <= self.pi_index < len(empties):
+            current = empties[self.pi_index].get("civil_pi_radius", 0.0)
+            if current:
+                self.radius = current
+        return context.window_manager.invoke_props_dialog(self)
+
+    def _execute(self, context):
+        empties = tool.Alignment.get_pi_edit_empties(self.alignment_id)
+        if not (0 <= self.pi_index < len(empties)):
+            self.report({"ERROR"}, "PI not found")
+            return {"CANCELLED"}
+
+        ok, reason = tool.Alignment.validate_curve_fit(empties, self.pi_index, self.radius)
+        if not ok:
+            self.report({"ERROR"}, reason)
+            return {"CANCELLED"}
+
+        tool.Alignment.set_pi_radius(empties, self.pi_index, self.radius)
+        alignment_decorator.PIEditDecorator.update_positions(empties)
+        tool.Blender.update_viewport()
+        self.report({"INFO"}, f"Curve radius set to {self.radius:.2f}")
+        return {"FINISHED"}
+
+
 class CIVIL_OT_enter_pi_edit_mode(Operator, tool.Ifc.Operator):
     """Enter PI editing mode - move PIs with G key, press Enter to apply or Escape to cancel"""
 
     bl_idname = "civil.enter_pi_edit_mode"
     bl_label = "Edit PIs"
-    bl_description = "Enter PI edit mode. Move PI points with G key. Press Enter to apply changes, Escape to cancel."
+    bl_description = (
+        "Enter PI edit mode. G: move selected PI. I: insert PI on tangent. "
+        "X: delete nearest PI. C / Alt+C: add / delete curve. T: slide tangent. "
+        "Enter to apply changes, Escape to cancel."
+    )
     bl_options = {"REGISTER", "UNDO"}
+
+    PICK_RADIUS_PX = 20.0
 
     # Instance state for modal operation
     _pi_empties: list = []
     _last_positions: list = []
     _area = None
     _alignment_id: int = 0
+
+    # Tangent slide ("T" key) sub-state
+    _tangent_slide_mode: bool = False
+    _sliding_tangent_index: int = -1
+    _slide_start_a = None
+    _slide_start_b = None
+    _slide_start_prev = None
+    _slide_start_next = None
+    _slide_anchor = None
 
     @classmethod
     def poll(cls, context):
@@ -1098,6 +1219,8 @@ class CIVIL_OT_enter_pi_edit_mode(Operator, tool.Ifc.Operator):
         # Cache references to empties and their positions
         self._pi_empties = empties
         self._last_positions = [e.location.copy() for e in empties]
+        self._tangent_slide_mode = False
+        self._sliding_tangent_index = -1
 
         # Find viewport for redraws
         self._area = None
@@ -1123,32 +1246,85 @@ class CIVIL_OT_enter_pi_edit_mode(Operator, tool.Ifc.Operator):
 
         # Start modal loop
         context.window_manager.modal_handler_add(self)
-        self.report({"INFO"}, "PI Edit Mode: Move PIs with G. Press Enter to apply, Escape to cancel.")
+        self.report(
+            {"INFO"},
+            "PI Edit Mode: G move, I insert, X delete, C/Alt+C curve, T slide tangent. Enter=apply, Esc=cancel.",
+        )
         return {"RUNNING_MODAL"}
 
     def modal(self, context, event):
         return IfcStore.execute_ifc_operator(self, context, event, method="MODAL")
 
     def _modal(self, context, event):
-        props = context.scene.CivilAlignmentProperties
-
         # Safety: check if empties still exist (handles undo edge case)
         if not self._empties_still_exist():
             self.report({"WARNING"}, "PI Edit Mode cancelled - empties were removed")
             return self._cleanup_and_finish(context, apply=False)
 
-        # Detect position changes and update decorator
+        # --- Tangent slide drag in progress: this takes over input first. ---
+        if self._sliding_tangent_index >= 0:
+            if event.type == "MOUSEMOVE":
+                self._update_tangent_slide(context, event)
+                return {"RUNNING_MODAL"}
+            if (event.type == "LEFTMOUSE" and event.value == "PRESS") or (
+                event.type in {"RET", "NUMPAD_ENTER"} and event.value == "PRESS"
+            ):
+                self._confirm_tangent_slide(context)
+                return {"RUNNING_MODAL"}
+            if event.type == "ESC" and event.value == "PRESS":
+                self._abort_tangent_slide(context)
+                return {"RUNNING_MODAL"}
+            # Swallow everything else while dragging.
+            return {"RUNNING_MODAL"}
+
+        # Detect position changes from ordinary G-key moves and update decorator.
         positions_changed = False
         for i, empty in enumerate(self._pi_empties):
             if empty.location != self._last_positions[i]:
                 positions_changed = True
                 self._last_positions[i] = empty.location.copy()
-
         if positions_changed:
-            # Update decorator to show new tangent lines
             alignment_decorator.PIEditDecorator.update_positions(self._pi_empties)
             if self._area:
                 self._area.tag_redraw()
+
+        # --- I: insert PI on nearest tangent ---
+        if event.type == "I" and event.value == "PRESS":
+            self._handle_insert_pi(context, event)
+            return {"RUNNING_MODAL"}
+
+        # --- X: delete nearest PI ---
+        if event.type == "X" and event.value == "PRESS":
+            self._handle_delete_pi(context, event)
+            return {"RUNNING_MODAL"}
+
+        # --- C: add curve / Alt+C: delete curve ---
+        if event.type == "C" and event.value == "PRESS":
+            if event.alt:
+                self._handle_delete_curve(context, event)
+            else:
+                self._handle_add_curve(context, event)
+            return {"RUNNING_MODAL"}
+
+        # --- T: toggle tangent slide mode ---
+        if event.type == "T" and event.value == "PRESS":
+            self._tangent_slide_mode = not self._tangent_slide_mode
+            alignment_decorator.PIEditDecorator.set_tangent_handles_visible(self._tangent_slide_mode)
+            if self._area:
+                self._area.tag_redraw()
+            self.report(
+                {"INFO"},
+                "Tangent slide: click a handle to grab" if self._tangent_slide_mode else "Tangent slide off",
+            )
+            return {"RUNNING_MODAL"}
+
+        # --- LEFTMOUSE while tangent-slide mode is armed: try to grab a handle ---
+        if self._tangent_slide_mode and event.type == "LEFTMOUSE" and event.value == "PRESS":
+            index = self._nearest_tangent_handle(context, event)
+            if index >= 0:
+                self._start_tangent_slide(context, event, index)
+                return {"RUNNING_MODAL"}
+            # Missed all handles - fall through to normal viewport handling.
 
         # Handle keyboard input
         if event.type in {"RET", "NUMPAD_ENTER"} and event.value == "PRESS":
@@ -1168,6 +1344,172 @@ class CIVIL_OT_enter_pi_edit_mode(Operator, tool.Ifc.Operator):
             if empty.name not in bpy.data.objects:
                 return False
         return True
+
+    # -- Viewport picking helpers -------------------------------------------------
+
+    def _mouse_to_ground_point(self, context, event):
+        """Ray-cast the mouse into the alignment's Z=0 plane (PI empties live there)."""
+        region = context.region
+        rv3d = context.region_data
+        if region is None or rv3d is None:
+            return None
+        coord = (event.mouse_region_x, event.mouse_region_y)
+        origin = region_2d_to_origin_3d(region, rv3d, coord)
+        direction = region_2d_to_vector_3d(region, rv3d, coord)
+        if abs(direction.z) < 1e-9:
+            return None
+        t = -origin.z / direction.z
+        if t < 0:
+            return None
+        point = origin + direction * t
+        return (point.x, point.y)
+
+    def _nearest_pi_empty(self, context, event, predicate=None, max_px=None):
+        region = context.region
+        rv3d = context.region_data
+        if region is None or rv3d is None:
+            return -1
+        max_px = self.PICK_RADIUS_PX if max_px is None else max_px
+        mouse = (event.mouse_region_x, event.mouse_region_y)
+        best_index, best_distance = -1, max_px
+        for i, empty in enumerate(self._pi_empties):
+            if predicate is not None and not predicate(i, empty):
+                continue
+            # .location, not matrix_world — see the comment in
+            # tool.Alignment.validate_curve_fit for why.
+            co2d = location_3d_to_region_2d(region, rv3d, empty.location)
+            if co2d is None:
+                continue
+            distance = math.hypot(co2d.x - mouse[0], co2d.y - mouse[1])
+            if distance <= best_distance:
+                best_index, best_distance = i, distance
+        return best_index
+
+    def _nearest_tangent_handle(self, context, event, max_px=None):
+        region = context.region
+        rv3d = context.region_data
+        if region is None or rv3d is None:
+            return -1
+        max_px = self.PICK_RADIUS_PX if max_px is None else max_px
+        mouse = (event.mouse_region_x, event.mouse_region_y)
+        best_index, best_distance = -1, max_px
+        for i in range(len(self._pi_empties) - 1):
+            a = self._pi_empties[i].location
+            b = self._pi_empties[i + 1].location
+            mid = ((a.x + b.x) / 2.0, (a.y + b.y) / 2.0, (a.z + b.z) / 2.0)
+            co2d = location_3d_to_region_2d(region, rv3d, mid)
+            if co2d is None:
+                continue
+            distance = math.hypot(co2d.x - mouse[0], co2d.y - mouse[1])
+            if distance <= best_distance:
+                best_index, best_distance = i, distance
+        return best_index
+
+    def _refresh_empties(self, context):
+        """Reload the empty list/positions after the SET of empties changed
+        (insert/delete), and push the update to the decorator."""
+        self._pi_empties = tool.Alignment.get_pi_edit_empties(self._alignment_id)
+        self._last_positions = [e.location.copy() for e in self._pi_empties]
+        alignment_decorator.PIEditDecorator.update_positions(self._pi_empties)
+        if self._area:
+            self._area.tag_redraw()
+
+    # -- Key handlers ---------------------------------------------------------
+
+    def _handle_insert_pi(self, context, event):
+        ground_point = self._mouse_to_ground_point(context, event)
+        if ground_point is None:
+            return
+        new_empty, reason = tool.Alignment.insert_pi_on_tangent(self._alignment_id, ground_point)
+        if new_empty is None:
+            self.report({"ERROR"}, reason or "Could not insert a PI here")
+            return
+        self._refresh_empties(context)
+        self.report({"INFO"}, "PI inserted")
+
+    def _handle_delete_pi(self, context, event):
+        index = self._nearest_pi_empty(context, event)
+        if index < 0:
+            return
+        try:
+            core.delete_pi_in_edit_mode(tool.Ifc, tool.Alignment, self._alignment_id, index)
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return
+        self._refresh_empties(context)
+        self.report({"INFO"}, "PI deleted")
+
+    def _handle_add_curve(self, context, event):
+        def is_interior(i, empty):
+            return 0 < i < len(self._pi_empties) - 1
+
+        index = self._nearest_pi_empty(context, event, predicate=is_interior)
+        if index < 0:
+            return
+        bpy.ops.civil.set_pi_curve_radius("INVOKE_DEFAULT", alignment_id=self._alignment_id, pi_index=index)
+
+    def _handle_delete_curve(self, context, event):
+        def is_curved(i, empty):
+            return float(empty.get("civil_pi_radius", 0.0)) > 0.0
+
+        index = self._nearest_pi_empty(context, event, predicate=is_curved)
+        if index < 0:
+            return
+        tool.Alignment.clear_pi_radius(self._alignment_id, index)
+        self._refresh_empties(context)
+        self.report({"INFO"}, "Curve removed")
+
+    # -- Tangent slide (T key) -------------------------------------------------
+
+    def _start_tangent_slide(self, context, event, index):
+        empties = self._pi_empties
+        self._sliding_tangent_index = index
+        self._slide_start_a = tuple(empties[index].location)[:2]
+        self._slide_start_b = tuple(empties[index + 1].location)[:2]
+        self._slide_start_prev = tuple(empties[index - 1].location)[:2] if index - 1 >= 0 else None
+        self._slide_start_next = tuple(empties[index + 2].location)[:2] if index + 2 < len(empties) else None
+        self._slide_anchor = self._mouse_to_ground_point(context, event)
+
+    def _update_tangent_slide(self, context, event):
+        if self._slide_anchor is None:
+            return
+        ground_point = self._mouse_to_ground_point(context, event)
+        if ground_point is None:
+            return
+        delta = (ground_point[0] - self._slide_anchor[0], ground_point[1] - self._slide_anchor[1])
+        new_a, new_b = tool.Alignment.slide_tangent(
+            self._slide_start_prev, self._slide_start_a, self._slide_start_b, self._slide_start_next, delta
+        )
+        index = self._sliding_tangent_index
+        empties = self._pi_empties
+        empties[index].location.x, empties[index].location.y = new_a
+        empties[index + 1].location.x, empties[index + 1].location.y = new_b
+        alignment_decorator.PIEditDecorator.update_positions(empties)
+        if self._area:
+            self._area.tag_redraw()
+
+    def _end_tangent_slide(self):
+        self._sliding_tangent_index = -1
+        self._slide_start_a = self._slide_start_b = None
+        self._slide_start_prev = self._slide_start_next = None
+        self._slide_anchor = None
+        self._last_positions = [e.location.copy() for e in self._pi_empties]
+
+    def _confirm_tangent_slide(self, context):
+        self._end_tangent_slide()
+        self.report({"INFO"}, "Tangent slide confirmed")
+
+    def _abort_tangent_slide(self, context):
+        index = self._sliding_tangent_index
+        empties = self._pi_empties
+        if index >= 0 and self._slide_start_a is not None:
+            empties[index].location.x, empties[index].location.y = self._slide_start_a
+            empties[index + 1].location.x, empties[index + 1].location.y = self._slide_start_b
+            alignment_decorator.PIEditDecorator.update_positions(empties)
+            if self._area:
+                self._area.tag_redraw()
+        self._end_tangent_slide()
+        self.report({"INFO"}, "Tangent slide aborted")
 
     def _cleanup_and_finish(self, context, apply: bool):
         """Exit edit mode, optionally applying changes."""
@@ -1208,6 +1550,11 @@ class CIVIL_OT_enter_pi_edit_mode(Operator, tool.Ifc.Operator):
         # Clear instance state
         self._pi_empties = []
         self._last_positions = []
+        self._tangent_slide_mode = False
+        self._sliding_tangent_index = -1
+        self._slide_start_a = self._slide_start_b = None
+        self._slide_start_prev = self._slide_start_next = None
+        self._slide_anchor = None
 
         if self._area:
             self._area.tag_redraw()
@@ -1721,6 +2068,66 @@ class CIVIL_OT_clear_pvis(Operator, tool.Ifc.Operator):
         props.vertical_display_rows.clear()
         props.active_vertical_display_row_index = 0
         self.report({"INFO"}, "Cleared all PVIs")
+
+
+class CIVIL_OT_delete_vertical_layout(Operator, tool.Ifc.Operator):
+    """Delete the vertical layout and its IFC segments, reverting to horizontal-only"""
+
+    bl_idname = "civil.delete_vertical_layout"
+    bl_label = "Delete Vertical Layout"
+    bl_description = (
+        "Delete the vertical layout and its IFC segments, reverting the "
+        "alignment to horizontal-only. Unlike Clear All PVIs — which only "
+        "clears the table rows above — this also removes the underlying "
+        "IfcAlignmentVertical and its segments from the IFC model"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("No alignment selected")
+            return False
+        alignment = _resolve_active_alignment(context)
+        if alignment is None:
+            cls.poll_message_set("Selected alignment no longer exists")
+            return False
+        if tool.Alignment.get_vertical_layout(alignment) is None:
+            cls.poll_message_set("Alignment has no vertical layout")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+
+        try:
+            core.delete_vertical_layout(tool.Ifc, tool.Alignment, props.active_alignment_id)
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        # The PVI table represented the layout that is now gone.
+        props.vertical_pvis.clear()
+        props.active_pvi_index = 0
+        props.vertical_display_rows.clear()
+        props.active_vertical_display_row_index = 0
+
+        # The profile view (D2) samples the vertical layout — drop it if it
+        # was showing this alignment so it doesn't keep drawing stale data.
+        profile_view = alignment_decorator.ProfileViewDecorator
+        if profile_view.is_installed and profile_view.alignment_id == props.active_alignment_id:
+            profile_view.uninstall()
+            props.show_profile_view = False
+
+        tool.Blender.update_viewport()
+        self.report({"INFO"}, "Vertical layout deleted")
+        return {"FINISHED"}
 
 
 class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):

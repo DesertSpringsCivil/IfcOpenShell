@@ -50,13 +50,18 @@ class PIEditDecorator:
     # References to PI empty objects
     pi_empties = []
 
+    # Whether to draw tangent-slide grab handles (spec 1.3, "T" key)
+    show_tangent_handles = False
+
     # Colors
     COLOR_TANGENT_LINE = (1.0, 0.9, 0.2, 1.0)  # Yellow for tangent lines
     COLOR_HUD_TEXT = (1.0, 1.0, 1.0, 1.0)  # White for HUD text
     COLOR_EDIT_MODE_BG = (0.2, 0.4, 0.8, 0.8)  # Blue tint for edit mode indicator
+    COLOR_TANGENT_HANDLE = (1.0, 0.3, 0.85, 1.0)  # Magenta for tangent-slide handles
 
     # Drawing parameters
     LINE_WIDTH = 2.5
+    HANDLE_POINT_SIZE = 11.0
 
     @classmethod
     def install(cls, context, pi_empties):
@@ -93,6 +98,7 @@ class PIEditDecorator:
         cls.handlers = []
         cls.is_installed = False
         cls.pi_empties = []
+        cls.show_tangent_handles = False
 
     @classmethod
     def update_positions(cls, pi_empties):
@@ -102,6 +108,11 @@ class PIEditDecorator:
             pi_empties: Updated list of PI EMPTY objects
         """
         cls.pi_empties = pi_empties
+
+    @classmethod
+    def set_tangent_handles_visible(cls, visible: bool):
+        """Toggle drawing of tangent-slide grab handles (spec 1.3, "T" key)."""
+        cls.show_tangent_handles = visible
 
     def draw_batch_3d(self, shader_type, content_pos, color, indices=None):
         """Draw a batch of 3D primitives using GPU shader.
@@ -151,6 +162,25 @@ class PIEditDecorator:
         # Draw lines
         self.draw_batch_3d("LINES", positions, self.COLOR_TANGENT_LINE, edges)
 
+        # Tangent-slide grab handles (spec 1.3, "T" key) — one per tangent
+        # chord midpoint, shown only while tangent-slide mode is armed.
+        if PIEditDecorator.show_tangent_handles and len(positions) >= 2:
+            midpoints = [
+                (
+                    (positions[i][0] + positions[i + 1][0]) / 2.0,
+                    (positions[i][1] + positions[i + 1][1]) / 2.0,
+                    (positions[i][2] + positions[i + 1][2]) / 2.0,
+                )
+                for i in range(len(positions) - 1)
+            ]
+            if tool.Blender.validate_shader_batch_data(midpoints, None):
+                gpu.state.point_size_set(self.HANDLE_POINT_SIZE)
+                shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+                batch = batch_for_shader(shader, "POINTS", {"pos": midpoints})
+                shader.bind()
+                shader.uniform_float("color", self.COLOR_TANGENT_HANDLE)
+                batch.draw(shader)
+
         # Restore state
         gpu.state.blend_set("NONE")
         gpu.state.depth_test_set("NONE")
@@ -183,6 +213,11 @@ class PIEditDecorator:
             f"PIs: {valid_count}",
             "",
             "G: Move selected PI",
+            "I: Insert PI on tangent",
+            "X: Delete nearest PI",
+            "C: Add curve   Alt+C: Delete curve",
+            "T: Tangent slide" + (" (ON)" if PIEditDecorator.show_tangent_handles else ""),
+            "",
             "ENTER: Apply changes",
             "ESC: Cancel",
         ]
