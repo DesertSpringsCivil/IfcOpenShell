@@ -29,7 +29,10 @@ class AlignmentTool(WorkSpaceTool):
     bl_context_mode = "OBJECT"
     bl_idname = "bim.alignment_tool"
     bl_label = "Alignment"
-    bl_description = "Civil alignment tools — create and edit horizontal alignments using PI method"
+    bl_description = (
+        "Civil alignment tools — create and edit horizontal/vertical "
+        "alignments using PI/PVI method"
+    )
     bl_icon = os.path.join(os.path.dirname(__file__), "ops.authoring.alignment")
     bl_widget = None
     bl_keymap = tool.Blender.get_default_selection_keypmap()
@@ -67,6 +70,21 @@ def _draw_sidebar(layout):
     row = col.row(align=True)
     row.operator("civil.recalculate_pis", text="Visualize", icon="FILE_REFRESH")
     row.operator("civil.clear_pis", text="Clear", icon="TRASH")
+    col.operator("civil.delete_alignment", icon="TRASH")
     col.separator()
     col.operator("civil.add_stationing_referent", icon="EMPTY_AXIS")
     col.operator("civil.name_segments", icon="FONT_DATA")
+
+    layout.separator()
+
+    # -- Vertical Alignment --
+    col = layout.column(align=True)
+    col.label(text="Vertical Alignment", icon="GRAPH")
+    col.operator("civil.add_vertical_to_alignment", icon="GRAPH")
+    col.operator("civil.enter_pvi_edit_mode", icon="EDITMODE_HLT")
+    row = col.row(align=True)
+    row.operator("civil.add_pvi", icon="ADD")
+    row.operator("civil.remove_pvi", icon="REMOVE")
+    row = col.row(align=True)
+    row.operator("civil.recalculate_pvis", text="Recalculate", icon="FILE_REFRESH")
+    row.operator("civil.clear_pvis", text="Clear", icon="TRASH")
