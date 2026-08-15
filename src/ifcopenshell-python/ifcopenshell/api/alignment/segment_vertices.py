@@ -68,7 +68,7 @@ def segment_vertices(file: ifcopenshell.file, segment: entity_instance):
     if segment_type == "IFCALIGNMENTSEGMENT":
         segments = ifcopenshell.api.alignment.get_mapped_segments(segment)
         start_segment_curve = segments[0]
-        end_segment_curve = start_segment_curve if segments[1] == None else segment[1]
+        end_segment_curve = start_segment_curve if segments[1] is None else segments[1]
     else:
         start_segment_curve = segment
         end_segment_curve = segment
