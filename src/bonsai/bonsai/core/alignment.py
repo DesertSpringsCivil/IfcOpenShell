@@ -226,23 +226,116 @@ def add_vertical_to_alignment(
     return alignment_tool.add_vertical_layout(alignment)
 
 
+def add_alternative_vertical(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+):
+    """Add a SECOND (or subsequent) vertical layout as a design alternative
+    (spec 2.1) — a distinct action from ``add_vertical_to_alignment``: an
+    existing vertical design is never silently replaced. Deliberately does
+    NOT carry that function's "already has a vertical layout" refusal —
+    that is precisely the case this function exists to allow.
+
+    Business rules:
+    1. Alignment must exist and be an IfcAlignment
+    2. Horizontal layout must still be required (vertical, alternative or
+       not, always needs a horizontal to ride on)
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment
+
+    Returns:
+        The newly created IfcAlignmentVertical entity
+
+    Raises:
+        ValueError: If alignment doesn't exist, is wrong type, or has no
+                   horizontal layout
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    try:
+        alignment = ifc_file.by_id(alignment_id)
+    except RuntimeError:
+        raise ValueError(f"Alignment with ID {alignment_id} not found")
+
+    if not alignment.is_a("IfcAlignment"):
+        raise ValueError(f"Entity {alignment_id} is not an IfcAlignment")
+
+    if alignment_tool.get_horizontal_layout(alignment) is None:
+        raise ValueError(f"Alignment '{alignment.Name}' has no horizontal layout — add horizontal first")
+
+    return alignment_tool.add_alternative_vertical(alignment)
+
+
+def _resolve_vertical_layout(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment: "ifcopenshell.entity_instance",
+    vertical_layout_id: "Optional[int]",
+):
+    """Resolve which IfcAlignmentVertical an operation should target
+    (spec 2.1's multi-vertical selector).
+
+    ``vertical_layout_id`` is None for the common single-vertical case (or
+    a caller that hasn't opted into the selector yet): falls back to
+    ``alignment_tool.get_vertical_layout`` (the vertical nested directly on
+    ``alignment``), preserving the original single-vertical behavior.
+
+    When given, ``vertical_layout_id`` must resolve to one of
+    ``alignment_tool.get_vertical_layouts(alignment)`` (the parent's own
+    vertical plus one per aggregated design-alternative child) -- refuses
+    an id that doesn't belong to this alignment at all, rather than
+    silently operating on an unrelated entity.
+
+    Raises:
+        ValueError: If ``vertical_layout_id`` doesn't resolve to an entity,
+            or resolves to one that isn't one of ``alignment``'s own
+            vertical layouts.
+    """
+    if vertical_layout_id is None:
+        return alignment_tool.get_vertical_layout(alignment)
+
+    ifc_file = ifc_tool.get()
+    try:
+        candidate = ifc_file.by_id(vertical_layout_id)
+    except RuntimeError:
+        raise ValueError(f"Vertical layout with ID {vertical_layout_id} not found")
+
+    if candidate not in alignment_tool.get_vertical_layouts(alignment):
+        raise ValueError(f"Vertical layout #{vertical_layout_id} does not belong to alignment '{alignment.Name}'")
+
+    return candidate
+
+
 def enter_pvi_edit_mode(
     ifc_tool: "type[tool.Ifc]",
     alignment_tool: "type[tool.Alignment]",
     alignment_id: int,
+    vertical_layout_id: "Optional[int]" = None,
 ) -> list:
     """Enter PVI edit mode for vertical alignment.
 
     Business logic:
     1. Validates that the alignment exists and has a vertical layout
-    2. Validates that the vertical layout has real (non-terminator) segments
-    3. Back-calculates PVI positions from existing segments
-    4. Creates temporary EMPTY objects at each PVI location in profile space
+    2. Resolves WHICH vertical layout to edit (spec 2.1's selector) --
+       ``vertical_layout_id`` (the row currently active in the vertical
+       layout list), or the parent's own vertical when None
+    3. Validates that the vertical layout has real (non-terminator) segments
+    4. Back-calculates PVI positions from existing segments
+    5. Creates temporary EMPTY objects at each PVI location in profile space
 
     Args:
         ifc_tool: The IFC tool class
         alignment_tool: The Alignment tool class
         alignment_id: The IFC ID of the alignment to edit
+        vertical_layout_id: IFC ID of the specific IfcAlignmentVertical to
+            edit (spec 2.1), or None for the parent's own vertical (default,
+            unchanged single-vertical behavior)
 
     Returns:
         List of created PVI EMPTY objects
@@ -262,14 +355,14 @@ def enter_pvi_edit_mode(
     if not alignment.is_a("IfcAlignment"):
         raise ValueError(f"Entity {alignment_id} is not an IfcAlignment")
 
-    v_layout = alignment_tool.get_vertical_layout(alignment)
+    v_layout = _resolve_vertical_layout(ifc_tool, alignment_tool, alignment, vertical_layout_id)
     if v_layout is None:
         raise ValueError(f"Alignment '{alignment.Name}' has no vertical layout")
 
     if not alignment_tool.layout_has_real_segments(v_layout):
         raise ValueError(f"Alignment '{alignment.Name}' has no editable vertical segments")
 
-    pvis = alignment_tool.back_calculate_pvis_from_vertical(alignment)
+    pvis = alignment_tool.back_calculate_pvis_from_vertical(alignment, vertical_layout=v_layout)
 
     if len(pvis) < 2:
         raise ValueError(f"Alignment '{alignment.Name}' must have at least 2 PVIs")
@@ -282,6 +375,7 @@ def exit_pvi_edit_mode(
     alignment_tool: "type[tool.Alignment]",
     alignment_id: int,
     apply: bool,
+    vertical_layout_id: "Optional[int]" = None,
 ) -> bool:
     """Exit PVI edit mode for vertical alignment.
 
@@ -289,6 +383,9 @@ def exit_pvi_edit_mode(
     1. If apply=True:
        - Collect new PVI positions from empties
        - Validate the new configuration
+       - Resolve WHICH vertical layout to write (spec 2.1's selector) --
+         same resolution as ``enter_pvi_edit_mode``, so an edit session
+         always writes back to whatever layout it was entered against
        - Update vertical segments in-place (preserves alignment ID)
        - Refresh Blender visualization
     2. Always:
@@ -300,6 +397,9 @@ def exit_pvi_edit_mode(
         alignment_tool: The Alignment tool class
         alignment_id: The IFC ID of the alignment being edited
         apply: If True, update alignment with new PVI positions
+        vertical_layout_id: IFC ID of the specific IfcAlignmentVertical that
+            was being edited (spec 2.1), or None for the parent's own
+            vertical (default, unchanged single-vertical behavior)
 
     Returns:
         True if successful
@@ -324,7 +424,7 @@ def exit_pvi_edit_mode(
         if len(vpoints) < 2:
             raise ValueError("At least 2 PVIs are required")
 
-        v_layout = alignment_tool.get_vertical_layout(alignment)
+        v_layout = _resolve_vertical_layout(ifc_tool, alignment_tool, alignment, vertical_layout_id)
         if v_layout is None:
             raise ValueError("Alignment has no vertical layout")
 
@@ -616,6 +716,152 @@ def visualize_3d_alignment(
     if alignment_tool.get_horizontal_layout(alignment) is None:
         raise ValueError(f"Alignment '{alignment.Name}' has no horizontal layout")
     return alignment_tool.create_3d_alignment_object(alignment, distance_interval)
+
+
+# =============================================================================
+# Offset Alignments (spec 1.7)
+# =============================================================================
+
+
+def create_offset_alignment(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+    name: str,
+    offset_spec: dict,
+):
+    """Create an offset alignment riding on the active alignment's current
+    curve (spec 1.7: "Constant, or varying between stations").
+
+    ``offset_spec`` is either ``{"mode": "CONSTANT", "offset": <float>}`` or
+    ``{"mode": "TAPER", "start_offset": <float>, "end_offset": <float>,
+    "station_from": <float>, "station_to": <float>}`` — a single linear
+    taper over a station range, constant before/after, covering the named
+    "widening or taper" use cases without a full multi-station table (see
+    ``tool.Alignment._build_offset_points`` for the extension path to one).
+    "station" here is a 0-based DISTANCE-ALONG the alignment (same
+    convention as the cant point table's "station", NOT a true engineering
+    station offset by start_station).
+
+    Business rules:
+    1. Parent alignment must exist, be an IfcAlignment, and already have a
+       geometric representation curve to offset from.
+    2. Name must not be empty.
+    3. ``offset_spec["mode"]`` must be "CONSTANT" or "TAPER".
+    4. CONSTANT: the offset must be non-zero (a zero offset is not an
+       offset at all).
+    5. TAPER: the two offsets cannot both be zero; ``station_from`` must be
+       < ``station_to``; both must fall within the parent's current
+       horizontal extent (computed semantically, no geometry engine, via
+       ``get_horizontal_extent_semantic``).
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the parent alignment
+        name: Name for the new (offset) alignment
+        offset_spec: See above
+
+    Returns:
+        The newly created (offset) IfcAlignment entity
+
+    Raises:
+        ValueError: If validation fails
+    """
+    alignment = _resolve_alignment(ifc_tool, alignment_id)
+
+    if alignment_tool.get_curve_for_alignment(alignment) is None:
+        raise ValueError(f"Alignment '{alignment.Name}' has no geometric representation to offset from")
+
+    if not name or not name.strip():
+        raise ValueError("Offset alignment name cannot be empty")
+
+    mode = offset_spec.get("mode", "CONSTANT")
+    if mode not in ("CONSTANT", "TAPER"):
+        raise ValueError(f"Unknown offset mode '{mode}' — expected 'CONSTANT' or 'TAPER'")
+
+    extent = alignment_tool.get_horizontal_extent_semantic(alignment)
+
+    if mode == "CONSTANT":
+        offset = float(offset_spec.get("offset", 0.0))
+        if offset == 0.0:
+            raise ValueError("Constant offset must be non-zero")
+    else:
+        start_offset = float(offset_spec.get("start_offset", 0.0))
+        end_offset = float(offset_spec.get("end_offset", 0.0))
+        station_from = float(offset_spec.get("station_from", 0.0))
+        station_to = float(offset_spec.get("station_to", 0.0))
+
+        if start_offset == 0.0 and end_offset == 0.0:
+            raise ValueError("Taper start and end offsets cannot both be zero")
+        if station_from >= station_to:
+            raise ValueError("Taper station_from must be less than station_to")
+        if station_from < -1e-6 or station_to > extent + 1e-6:
+            raise ValueError(f"Taper station range must fall within the alignment's extent (0 to {extent:.3f})")
+
+    return alignment_tool.create_offset_alignment(alignment, name.strip(), offset_spec)
+
+
+# =============================================================================
+# Convert Curve to Alignment (spec 1.8)
+# =============================================================================
+
+
+def convert_curve_to_alignment(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    name: str,
+    points_xy: list,
+    simplify_tolerance: float = 0.5,
+):
+    """Convert a sampled Blender curve/polyline into a new all-tangent
+    horizontal alignment (spec 1.8).
+
+    Business rules:
+    1. An IFC file must be loaded.
+    2. Name must not be empty.
+    3. ``points_xy`` must have at least 2 points to begin with.
+    4. After Ramer-Douglas-Peucker simplification (delegated to
+       ``alignment_tool.simplify_polyline`` — pure math, tool layer), at
+       least 2 DISTINCT points must remain (``alignment_tool.
+       count_distinct_points``) — a fully-degenerate (single-point) curve
+       cannot become an alignment even after simplification.
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        name: Name for the new alignment
+        points_xy: Ordered (x, y) world-space points sampled from the
+            source curve (Z already discarded per spec 1.1's XY-plane rule)
+        simplify_tolerance: Maximum perpendicular deviation allowed when
+            simplifying ``points_xy`` to PI candidates
+
+    Returns:
+        A ``(alignment, pi_count, sample_count)`` tuple: the newly created
+        IfcAlignment, the number of PIs it was built from (after
+        simplification), and the number of raw samples it was simplified
+        from.
+
+    Raises:
+        ValueError: If validation fails
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    if not name or not name.strip():
+        raise ValueError("Alignment name cannot be empty")
+
+    if len(points_xy) < 2:
+        raise ValueError("Need at least 2 points to convert a curve to an alignment")
+
+    simplified = alignment_tool.simplify_polyline(points_xy, simplify_tolerance)
+
+    if alignment_tool.count_distinct_points(simplified) < 2:
+        raise ValueError("Curve simplifies to fewer than 2 distinct points — lower the simplify tolerance")
+
+    alignment = alignment_tool.convert_points_to_alignment(name.strip(), simplified)
+    return alignment, len(simplified), len(points_xy)
 
 
 # =============================================================================

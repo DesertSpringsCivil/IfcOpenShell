@@ -1307,13 +1307,16 @@ class Alignment:
     def delete_pi_edit_empty(cls, alignment_id, index): pass
     # Vertical PVI edit mode
     def add_vertical_layout(cls, alignment): pass
-    def back_calculate_pvis_from_vertical(cls, alignment): pass
+    def back_calculate_pvis_from_vertical(cls, alignment, vertical_layout=None): pass
     def collect_pvis_from_empties_vertical(cls, alignment_id): pass
     def create_pvi_edit_empties(cls, alignment, pvis): pass
     def get_vertical_layout(cls, alignment): pass
     def layout_vertical_by_pvi_method(cls, layout, vpoints, lengths): pass
     def remove_pvi_edit_empties(cls, alignment_id): pass
     def remove_vertical_layout(cls, alignment): pass
+    # Multi-vertical selector (spec 2.1)
+    def get_vertical_layouts(cls, alignment): pass
+    def add_alternative_vertical(cls, alignment): pass
     # Alignment evaluation & 3D combination (D3)
     def create_3d_alignment_object(cls, alignment, distance_interval=5.0): pass
     def evaluate_alignment_at_station(cls, alignment, station): pass
@@ -1344,6 +1347,13 @@ class Alignment:
     def add_station_equation_referent(cls, alignment, distance_along, back_station, ahead_station): pass
     def add_event_referent(cls, alignment, event_type, station, name="", value=None): pass
     def remove_referent(cls, alignment, referent_id): pass
+    # Offset alignments (spec 1.7)
+    def get_curve_for_alignment(cls, alignment): pass
+    def create_offset_alignment(cls, parent, name, offset_spec): pass
+    # Convert curve to alignment (spec 1.8)
+    def simplify_polyline(cls, points, tolerance): pass
+    def count_distinct_points(cls, points, epsilon=1e-6): pass
+    def convert_points_to_alignment(cls, name, points_xy): pass
 
 
 @interface
