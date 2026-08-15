@@ -3715,3 +3715,530 @@ class TestCommitLayoutChange(NewIfc4X3):
 
         with pytest.raises(RuntimeError, match="some unrelated failure"):
             subject.commit_layout_change(alignment)
+
+
+# ===========================================================================
+# Convert Curve to Alignment (spec 1.8) — pure math / Blender extraction
+# ===========================================================================
+
+
+class TestSimplifyPolyline(NewFile):
+    """Tests for Alignment.simplify_polyline() — Ramer-Douglas-Peucker."""
+
+    def test_returns_shallow_copy_when_fewer_than_three_points(self):
+        points = [(0.0, 0.0), (10.0, 0.0)]
+        result = subject.simplify_polyline(points, tolerance=0.5)
+        assert result == points
+        assert result is not points
+
+    def test_returns_shallow_copy_when_tolerance_is_zero_or_negative(self):
+        points = [(0.0, 0.0), (5.0, 5.0), (10.0, 0.0)]
+        assert subject.simplify_polyline(points, tolerance=0.0) == points
+        assert subject.simplify_polyline(points, tolerance=-1.0) == points
+
+    def test_collapses_collinear_points(self):
+        # A straight run of points on the X axis simplifies to just the endpoints.
+        points = [(0.0, 0.0), (10.0, 0.0), (20.0, 0.0), (30.0, 0.0), (40.0, 0.0)]
+        result = subject.simplify_polyline(points, tolerance=0.5)
+        assert result == [(0.0, 0.0), (40.0, 0.0)]
+
+    def test_keeps_a_point_that_exceeds_tolerance(self):
+        # The midpoint deviates 5.0 off the chord -- keep it at a tight tolerance.
+        points = [(0.0, 0.0), (5.0, 5.0), (10.0, 0.0)]
+        result = subject.simplify_polyline(points, tolerance=1.0)
+        assert result == [(0.0, 0.0), (5.0, 5.0), (10.0, 0.0)]
+
+    def test_drops_a_point_within_tolerance(self):
+        # Same shape, but a loose tolerance absorbs the 5.0 deviation.
+        points = [(0.0, 0.0), (5.0, 5.0), (10.0, 0.0)]
+        result = subject.simplify_polyline(points, tolerance=10.0)
+        assert result == [(0.0, 0.0), (10.0, 0.0)]
+
+    def test_always_keeps_first_and_last_points(self):
+        points = [(0.0, 0.0), (1.0, 0.01), (2.0, -0.01), (3.0, 0.02), (100.0, 50.0)]
+        result = subject.simplify_polyline(points, tolerance=0.5)
+        assert result[0] == points[0]
+        assert result[-1] == points[-1]
+
+    def test_handles_coincident_chord_endpoints(self):
+        # start == end (dx == dy == 0) exercises the perpendicular-distance
+        # fallback (plain Euclidean distance to the shared point).
+        points = [(5.0, 5.0), (5.0, 6.0), (5.0, 5.0)]
+        result = subject.simplify_polyline(points, tolerance=0.5)
+        assert result == [(5.0, 5.0), (5.0, 6.0), (5.0, 5.0)]
+
+    def test_recursion_keeps_multiple_significant_points(self):
+        # A zig-zag where every vertex exceeds tolerance -- nothing should
+        # be dropped, exercising the recursive split on both halves.
+        points = [(0.0, 0.0), (10.0, 10.0), (20.0, -10.0), (30.0, 10.0), (40.0, 0.0)]
+        result = subject.simplify_polyline(points, tolerance=0.1)
+        assert result == points
+
+
+class TestCountDistinctPoints(NewFile):
+    """Tests for Alignment.count_distinct_points()."""
+
+    def test_empty_list_returns_zero(self):
+        assert subject.count_distinct_points([]) == 0
+
+    def test_single_point_returns_one(self):
+        assert subject.count_distinct_points([(0.0, 0.0)]) == 1
+
+    def test_all_distinct_points_counted(self):
+        points = [(0.0, 0.0), (10.0, 0.0), (20.0, 0.0)]
+        assert subject.count_distinct_points(points) == 3
+
+    def test_coincident_points_collapse(self):
+        points = [(0.0, 0.0), (0.0, 0.0), (0.0, 1e-9)]
+        assert subject.count_distinct_points(points) == 1
+
+    def test_epsilon_is_configurable(self):
+        points = [(0.0, 0.0), (0.01, 0.0)]
+        assert subject.count_distinct_points(points, epsilon=1e-6) == 2
+        assert subject.count_distinct_points(points, epsilon=1.0) == 1
+
+
+class TestExtractPolylineFromCurve(NewFile):
+    """Tests for Alignment.extract_polyline_from_curve() — POLY case."""
+
+    def _make_poly_curve_object(self, points, name="TestCurve"):
+        curve_data = bpy.data.curves.new(name, type="CURVE")
+        spline = curve_data.splines.new("POLY")
+        spline.points.add(len(points) - 1)  # spline starts with 1 point already
+        for i, (x, y, z) in enumerate(points):
+            spline.points[i].co = (x, y, z, 1.0)
+        obj = bpy.data.objects.new(name, curve_data)
+        bpy.context.scene.collection.objects.link(obj)
+        return obj
+
+    def test_returns_empty_list_for_non_curve_object(self):
+        bpy.ops.mesh.primitive_cube_add()
+        obj = bpy.context.active_object
+        assert subject.extract_polyline_from_curve(obj) == []
+
+    def test_returns_empty_list_for_none(self):
+        assert subject.extract_polyline_from_curve(None) == []
+
+    def test_returns_empty_list_for_curve_with_no_splines(self):
+        curve_data = bpy.data.curves.new("Empty", type="CURVE")
+        obj = bpy.data.objects.new("Empty", curve_data)
+        bpy.context.scene.collection.objects.link(obj)
+        assert subject.extract_polyline_from_curve(obj) == []
+
+    def test_extracts_poly_spline_points_in_world_space(self):
+        points = [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (10.0, 10.0, 0.0)]
+        obj = self._make_poly_curve_object(points)
+        result = subject.extract_polyline_from_curve(obj)
+        assert len(result) == 3
+        for actual, expected in zip(result, points):
+            assert_close(actual[0], expected[0])
+            assert_close(actual[1], expected[1])
+            assert_close(actual[2], expected[2])
+
+    def test_applies_object_world_transform(self):
+        points = [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)]
+        obj = self._make_poly_curve_object(points)
+        obj.location = (100.0, 200.0, 0.0)
+        bpy.context.view_layer.update()
+        result = subject.extract_polyline_from_curve(obj)
+        assert_close(result[0][0], 100.0)
+        assert_close(result[0][1], 200.0)
+        assert_close(result[1][0], 110.0)
+        assert_close(result[1][1], 200.0)
+
+    def test_uses_only_the_first_spline(self):
+        points_a = [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)]
+        obj = self._make_poly_curve_object(points_a)
+        # A second spline should never be sampled.
+        second = obj.data.splines.new("POLY")
+        second.points.add(1)
+        second.points[0].co = (999.0, 999.0, 0.0, 1.0)
+        second.points[1].co = (999.0, 999.0, 0.0, 1.0)
+        result = subject.extract_polyline_from_curve(obj)
+        assert len(result) == 2
+
+
+# ===========================================================================
+# Offset Alignments (spec 1.7)
+# ===========================================================================
+
+
+def _distance_along(point) -> float:
+    """Unwrap an IfcPointByDistanceExpression.DistanceAlong (an
+    IfcLengthMeasure, explicitly built via ``createIfcLengthMeasure`` in
+    ``_build_offset_points``) to a plain float -- mirrors
+    ``clear_layout_segments``'s ``getattr(x, "wrappedValue", x)`` idiom
+    for reading a simple-typed IFC attribute defensively."""
+    return float(getattr(point.DistanceAlong, "wrappedValue", point.DistanceAlong))
+
+
+class TestBuildOffsetPoints(NewIfc4X3):
+    """Tests for Alignment._build_offset_points() — semantic point-spec
+    construction, entirely isolated from any real alignment (the basis
+    curve is just an entity reference, never evaluated)."""
+
+    def _make_basis_curve(self):
+        ifc_file = tool.Ifc.get()
+        return ifc_file.createIfcCompositeCurve(Segments=[], SelfIntersect=False)
+
+    def test_constant_mode_produces_two_points_at_extent_bounds(self):
+        ifc_file = tool.Ifc.get()
+        basis_curve = self._make_basis_curve()
+        points = subject._build_offset_points(ifc_file, basis_curve, {"mode": "CONSTANT", "offset": 5.0}, extent=500.0)
+        assert len(points) == 2
+        assert all(p.is_a("IfcPointByDistanceExpression") for p in points)
+        assert all(p.BasisCurve == basis_curve for p in points)
+        assert_close(_distance_along(points[0]), 0.0)
+        assert_close(points[0].OffsetLateral, 5.0)
+        assert_close(_distance_along(points[1]), 500.0)
+        assert_close(points[1].OffsetLateral, 5.0)
+
+    def test_taper_mode_produces_four_points(self):
+        ifc_file = tool.Ifc.get()
+        basis_curve = self._make_basis_curve()
+        offset_spec = {
+            "mode": "TAPER",
+            "start_offset": 5.0,
+            "end_offset": 10.0,
+            "station_from": 100.0,
+            "station_to": 200.0,
+        }
+        points = subject._build_offset_points(ifc_file, basis_curve, offset_spec, extent=500.0)
+        stations = [_distance_along(p) for p in points]
+        offsets = [p.OffsetLateral for p in points]
+        assert stations == [0.0, 100.0, 200.0, 500.0]
+        assert offsets == [5.0, 5.0, 10.0, 10.0]
+
+    def test_taper_touching_start_merges_to_three_points(self):
+        ifc_file = tool.Ifc.get()
+        basis_curve = self._make_basis_curve()
+        offset_spec = {
+            "mode": "TAPER",
+            "start_offset": 5.0,
+            "end_offset": 10.0,
+            "station_from": 0.0,
+            "station_to": 200.0,
+        }
+        points = subject._build_offset_points(ifc_file, basis_curve, offset_spec, extent=500.0)
+        stations = [_distance_along(p) for p in points]
+        assert stations == [0.0, 200.0, 500.0]
+
+    def test_taper_touching_end_merges_to_three_points(self):
+        ifc_file = tool.Ifc.get()
+        basis_curve = self._make_basis_curve()
+        offset_spec = {
+            "mode": "TAPER",
+            "start_offset": 5.0,
+            "end_offset": 10.0,
+            "station_from": 100.0,
+            "station_to": 500.0,
+        }
+        points = subject._build_offset_points(ifc_file, basis_curve, offset_spec, extent=500.0)
+        stations = [_distance_along(p) for p in points]
+        assert stations == [0.0, 100.0, 500.0]
+
+    def test_taper_stations_are_clamped_into_extent(self):
+        ifc_file = tool.Ifc.get()
+        basis_curve = self._make_basis_curve()
+        offset_spec = {
+            "mode": "TAPER",
+            "start_offset": 5.0,
+            "end_offset": 10.0,
+            "station_from": -50.0,
+            "station_to": 9000.0,
+        }
+        points = subject._build_offset_points(ifc_file, basis_curve, offset_spec, extent=500.0)
+        stations = [_distance_along(p) for p in points]
+        assert stations[0] >= 0.0
+        assert stations[-1] <= 500.0
+
+
+class TestOffsetPsetRoundTrip(NewIfc4X3):
+    """Tests for Alignment._write_offset_pset() / get_offset_spec() —
+    Pset_SaikeiOffset round-trip (spec 1.7)."""
+
+    def _make_alignments(self):
+        ifc_file = tool.Ifc.get()
+        parent = ifc_file.createIfcAlignment(GlobalId=ifcopenshell.guid.new(), Name="Parent")
+        offset_alignment = ifc_file.createIfcAlignment(GlobalId=ifcopenshell.guid.new(), Name="Offset")
+        return parent, offset_alignment
+
+    def test_returns_none_when_never_written(self):
+        _, offset_alignment = self._make_alignments()
+        assert subject.get_offset_spec(offset_alignment) is None
+
+    def test_round_trips_constant_spec(self):
+        parent, offset_alignment = self._make_alignments()
+        spec = {"mode": "CONSTANT", "offset": 5.0}
+        subject._write_offset_pset(offset_alignment, parent, spec)
+        result = subject.get_offset_spec(offset_alignment)
+        assert result["mode"] == "CONSTANT"
+        assert result["parent_global_id"] == parent.GlobalId
+        assert_close(result["offset"], 5.0)
+
+    def test_round_trips_taper_spec(self):
+        parent, offset_alignment = self._make_alignments()
+        spec = {"mode": "TAPER", "start_offset": 5.0, "end_offset": 10.0, "station_from": 100.0, "station_to": 200.0}
+        subject._write_offset_pset(offset_alignment, parent, spec)
+        result = subject.get_offset_spec(offset_alignment)
+        assert result["mode"] == "TAPER"
+        assert_close(result["start_offset"], 5.0)
+        assert_close(result["end_offset"], 10.0)
+        assert_close(result["station_from"], 100.0)
+        assert_close(result["station_to"], 200.0)
+
+    def test_writing_twice_updates_in_place(self):
+        parent, offset_alignment = self._make_alignments()
+        subject._write_offset_pset(offset_alignment, parent, {"mode": "CONSTANT", "offset": 5.0})
+        subject._write_offset_pset(offset_alignment, parent, {"mode": "CONSTANT", "offset": 9.0})
+        result = subject.get_offset_spec(offset_alignment)
+        assert_close(result["offset"], 9.0)
+        ifc_file = tool.Ifc.get()
+        psets = [p for p in ifc_file.by_type("IfcPropertySet") if p.Name == "Pset_SaikeiOffset"]
+        assert len(psets) == 1
+
+
+class TestFindOffsetChildren(NewIfc4X3):
+    """Tests for Alignment.find_offset_children()."""
+
+    def test_returns_empty_list_when_no_children(self):
+        ifc_file = tool.Ifc.get()
+        parent = ifc_file.createIfcAlignment(GlobalId=ifcopenshell.guid.new(), Name="Parent")
+        assert subject.find_offset_children(parent) == []
+
+    def test_finds_children_recorded_against_this_parent(self):
+        ifc_file = tool.Ifc.get()
+        parent = ifc_file.createIfcAlignment(GlobalId=ifcopenshell.guid.new(), Name="Parent")
+        other_parent = ifc_file.createIfcAlignment(GlobalId=ifcopenshell.guid.new(), Name="Other")
+        child_1 = ifc_file.createIfcAlignment(GlobalId=ifcopenshell.guid.new(), Name="Child1")
+        child_2 = ifc_file.createIfcAlignment(GlobalId=ifcopenshell.guid.new(), Name="Child2")
+        unrelated_child = ifc_file.createIfcAlignment(GlobalId=ifcopenshell.guid.new(), Name="Unrelated")
+
+        subject._write_offset_pset(child_1, parent, {"mode": "CONSTANT", "offset": 5.0})
+        subject._write_offset_pset(child_2, parent, {"mode": "CONSTANT", "offset": -5.0})
+        subject._write_offset_pset(unrelated_child, other_parent, {"mode": "CONSTANT", "offset": 3.0})
+
+        result = subject.find_offset_children(parent)
+        assert set(result) == {child_1, child_2}
+
+
+class TestCreateOffsetAlignment(NewIfc4X3):
+    """Tests for Alignment.create_offset_alignment() — full authoring flow
+    (spec 1.7), entirely semantic (the parent has one manually-authored
+    horizontal segment giving it a non-zero extent, but no geometry engine
+    evaluation is involved anywhere in this flow)."""
+
+    def _make_parent_with_extent(self, length=500.0):
+        import ifcopenshell.api.nest
+
+        ifc_file = tool.Ifc.get()
+        parent = align_api.create(ifc_file, name="Parent", include_geometry=True)
+        subject.create_hierarchy_for_alignment(parent)
+        h_layout = align_api.get_horizontal_layout(parent)
+        design_params = ifc_file.createIfcAlignmentHorizontalSegment(
+            StartPoint=ifc_file.createIfcCartesianPoint((0.0, 0.0)),
+            StartDirection=0.0,
+            StartRadiusOfCurvature=0.0,
+            EndRadiusOfCurvature=0.0,
+            SegmentLength=length,
+            PredefinedType="LINE",
+        )
+        segment = ifc_file.createIfcAlignmentSegment(GlobalId=ifcopenshell.guid.new(), DesignParameters=design_params)
+        ifcopenshell.api.nest.assign_object(ifc_file, related_objects=[segment], relating_object=h_layout)
+        return parent
+
+    def test_creates_offset_alignment_with_recorded_pset(self):
+        parent = self._make_parent_with_extent()
+        offset_alignment = subject.create_offset_alignment(parent, "Offset", {"mode": "CONSTANT", "offset": 5.0})
+        assert offset_alignment.is_a("IfcAlignment")
+        curve = align_api.get_curve(offset_alignment)
+        assert curve.is_a("IfcOffsetCurveByDistances")
+        assert curve.BasisCurve == align_api.get_curve(parent)
+
+        spec = subject.get_offset_spec(offset_alignment)
+        assert spec["mode"] == "CONSTANT"
+        assert spec["parent_global_id"] == parent.GlobalId
+
+    def test_parents_offset_object_under_parent_object_in_outliner(self):
+        parent = self._make_parent_with_extent()
+        parent_obj = tool.Ifc.get_object(parent)
+        assert parent_obj is not None
+
+        offset_alignment = subject.create_offset_alignment(parent, "Offset", {"mode": "CONSTANT", "offset": 5.0})
+        offset_obj = tool.Ifc.get_object(offset_alignment)
+        assert offset_obj is not None
+        assert offset_obj.parent == parent_obj
+
+    def test_creates_taper_offset_alignment(self):
+        parent = self._make_parent_with_extent()
+        offset_spec = {
+            "mode": "TAPER",
+            "start_offset": 5.0,
+            "end_offset": 10.0,
+            "station_from": 0.0,
+            "station_to": 500.0,
+        }
+        offset_alignment = subject.create_offset_alignment(parent, "Taper Offset", offset_spec)
+        curve = align_api.get_curve(offset_alignment)
+        stations = [_distance_along(p) for p in curve.OffsetValues]
+        assert stations == [0.0, 500.0]
+
+
+class TestResyncOffsetAlignments(NewIfc4X3):
+    """Tests for Alignment.resync_offset_alignments() — repoints the offset's
+    BasisCurve when the parent's top-level curve entity changes (spec 1.7:
+    "Updates with the parent")."""
+
+    def test_returns_zero_when_parent_has_no_offset_children(self):
+        ifc_file = tool.Ifc.get()
+        parent = align_api.create(ifc_file, name="Parent", include_geometry=True)
+        assert subject.resync_offset_alignments(parent) == 0
+
+    def test_repoints_basis_curve_when_parent_curve_entity_changes(self):
+        ifc_file = tool.Ifc.get()
+        parent = align_api.create(ifc_file, name="Parent", include_geometry=True)
+        subject.create_hierarchy_for_alignment(parent)
+
+        curve_v1 = align_api.get_curve(parent)
+        offset_alignment = subject.create_offset_alignment(parent, "Offset", {"mode": "CONSTANT", "offset": 5.0})
+        curve = align_api.get_curve(offset_alignment)
+        assert curve.BasisCurve == curve_v1
+        old_points = list(curve.OffsetValues)
+
+        # Simulate the parent transitioning to horizontal+vertical: its
+        # top-level curve becomes a different entity (a new wrapper), same
+        # as align_api.add_vertical_layout does to a bare alignment (no
+        # geometry engine call needed here -- the mandatory zero-length
+        # terminator already satisfies update_end_point's only guard).
+        align_api.add_vertical_layout(ifc_file, parent)
+        curve_v2 = align_api.get_curve(parent)
+        assert curve_v2 != curve_v1
+
+        resynced = subject.resync_offset_alignments(parent)
+        assert resynced == 1
+
+        curve = align_api.get_curve(offset_alignment)
+        assert curve.BasisCurve == curve_v2
+        for old_point in old_points:
+            assert old_point not in curve.OffsetValues
+
+    def test_resync_is_idempotent(self):
+        ifc_file = tool.Ifc.get()
+        parent = align_api.create(ifc_file, name="Parent", include_geometry=True)
+        subject.create_hierarchy_for_alignment(parent)
+        subject.create_offset_alignment(parent, "Offset", {"mode": "CONSTANT", "offset": 5.0})
+
+        first = subject.resync_offset_alignments(parent)
+        second = subject.resync_offset_alignments(parent)
+        assert first == 1
+        assert second == 1
+
+
+# ===========================================================================
+# Multi-Vertical Selector (spec 2.1)
+# ===========================================================================
+
+
+class TestGetVerticalLayouts(NewIfc4X3):
+    """Tests for Alignment.get_vertical_layouts() — plural wrapper."""
+
+    def test_returns_empty_list_when_no_vertical(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="NoVert")
+        assert subject.get_vertical_layouts(alignment) == []
+
+    def test_returns_single_vertical_when_only_one_exists(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="OneVert", include_vertical=True)
+        v_layout = align_api.get_vertical_layout(alignment)
+        result = subject.get_vertical_layouts(alignment)
+        assert result == [v_layout]
+
+    def test_returns_both_verticals_after_alternative_added(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="TwoVert", include_vertical=True)
+        v_layout_1 = align_api.get_vertical_layout(alignment)
+
+        v_layout_2 = subject.add_alternative_vertical(alignment)
+
+        result = subject.get_vertical_layouts(alignment)
+        assert len(result) == 2
+        assert v_layout_1 in result
+        assert v_layout_2 in result
+
+
+class TestAddAlternativeVertical(NewIfc4X3):
+    """Tests for Alignment.add_alternative_vertical() (spec 2.1)."""
+
+    def test_adds_a_second_vertical_without_removing_the_first(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Parent", include_vertical=True)
+        subject.create_hierarchy_for_alignment(alignment)
+        v_layout_1 = align_api.get_vertical_layout(alignment)
+
+        v_layout_2 = subject.add_alternative_vertical(alignment)
+
+        assert v_layout_2 is not None
+        assert v_layout_2 != v_layout_1
+        assert v_layout_2.is_a("IfcAlignmentVertical")
+        # Both verticals must still exist afterward -- nothing was replaced.
+        all_verticals = subject.get_vertical_layouts(alignment)
+        assert v_layout_1 in all_verticals
+        assert v_layout_2 in all_verticals
+
+    def test_migrates_first_vertical_to_a_child_alignment(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Parent", include_vertical=True)
+        subject.create_hierarchy_for_alignment(alignment)
+
+        subject.add_alternative_vertical(alignment)
+
+        # Per CT 4.1.4.4.1.2, the parent's own nest no longer directly
+        # holds a vertical -- both now live on aggregated children.
+        assert align_api.get_vertical_layout(alignment) is None
+        children = subject.get_child_alignments(alignment)
+        assert len(children) == 2
+
+    def test_gives_new_child_alignments_a_blender_hierarchy(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Parent", include_vertical=True)
+        subject.create_hierarchy_for_alignment(alignment)
+
+        subject.add_alternative_vertical(alignment)
+
+        for child in subject.get_child_alignments(alignment):
+            child_obj = tool.Ifc.get_object(child)
+            assert child_obj is not None
+            child_vertical = align_api.get_vertical_layout(child)
+            assert child_vertical is not None
+            v_layout_obj = tool.Ifc.get_object(child_vertical)
+            assert v_layout_obj is not None
+            assert v_layout_obj.parent == child_obj
+
+
+class TestBackCalculatePvisFromVerticalWithExplicitLayout(NewIfc4X3):
+    """Tests for back_calculate_pvis_from_vertical()'s vertical_layout
+    override (spec 2.1) -- the default (None) behavior is already covered
+    by TestBackCalculatePvisFromVertical above."""
+
+    def test_raises_using_default_when_alignment_has_no_vertical(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="NoVert")
+        with pytest.raises(ValueError, match="no vertical layout"):
+            subject.back_calculate_pvis_from_vertical(alignment)
+
+    def test_explicit_vertical_layout_bypasses_default_lookup(self):
+        # After add_alternative_vertical, the parent's own get_vertical_layout
+        # returns None -- passing the CHILD's vertical explicitly must still
+        # work, which a bare call (relying on the default lookup) could not.
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Parent", include_vertical=True)
+        subject.create_hierarchy_for_alignment(alignment)
+        v_layout_1 = align_api.get_vertical_layout(alignment)
+        assert align_api.get_layout_segments(v_layout_1)  # has its mandatory terminator
+
+        v_layout_2 = subject.add_alternative_vertical(alignment)
+        assert align_api.get_vertical_layout(alignment) is None  # default lookup now fails
+
+        with pytest.raises(ValueError, match="no real vertical segments"):
+            subject.back_calculate_pvis_from_vertical(alignment, vertical_layout=v_layout_2)

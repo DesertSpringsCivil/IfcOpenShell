@@ -1683,3 +1683,404 @@ class TestRefreshReferentList(NewIfc4X3):
         # create_empty_alignment() -> align_api.create() already seeds one
         # default STATION referent; the WIDTHEVENT referent is the second.
         assert len(props.referents) == 2
+
+
+# ---------------------------------------------------------------------------
+# Offset Alignments (spec 1.7)
+# ---------------------------------------------------------------------------
+
+
+def add_real_horizontal_segment(alignment, length=500.0):
+    """Give a bare alignment (create_empty_alignment()) a non-zero
+    horizontal extent by manually authoring one IfcAlignmentHorizontalSegment
+    -- semantic only, mirrors tool/test_alignment.py's
+    TestCreateOffsetAlignment._make_parent_with_extent so the TAPER mode's
+    station-range validation has something other than an empty [0, 0]
+    extent to validate against, without needing the geometry engine.
+    """
+    import ifcopenshell.api.nest
+
+    ifc_file = tool.Ifc.get()
+    h_layout = tool.Alignment.get_horizontal_layout(alignment)
+    design_params = ifc_file.createIfcAlignmentHorizontalSegment(
+        StartPoint=ifc_file.createIfcCartesianPoint((0.0, 0.0)),
+        StartDirection=0.0,
+        StartRadiusOfCurvature=0.0,
+        EndRadiusOfCurvature=0.0,
+        SegmentLength=length,
+        PredefinedType="LINE",
+    )
+    segment = ifc_file.createIfcAlignmentSegment(GlobalId=ifcopenshell.guid.new(), DesignParameters=design_params)
+    ifcopenshell.api.nest.assign_object(ifc_file, related_objects=[segment], relating_object=h_layout)
+
+
+class TestCreateOffsetAlignment(NewIfc4X3):
+    """Tests for CIVIL_OT_create_offset_alignment (civil.create_offset_alignment).
+
+    Offset authoring (create_as_offset_curve + IfcPointByDistanceExpression
+    construction) is purely semantic -- see tool/test_alignment.py's
+    TestCreateOffsetAlignment -- so this whole operator is testable without
+    the geometry engine.
+    """
+
+    def test_poll_fails_without_alignment(self):
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.create_offset_alignment()
+
+    def test_poll_fails_when_alignment_has_no_curve(self):
+        # A bare createIfcAlignment() with no representation at all.
+        ifc_file = tool.Ifc.get()
+        alignment = ifc_file.createIfcAlignment(GlobalId=ifcopenshell.guid.new(), Name="NoCurve")
+        alignment_obj = tool.Alignment.create_object_for_alignment(alignment)
+        bpy.context.view_layer.objects.active = alignment_obj
+        props = get_alignment_props()
+        props.active_alignment_id = alignment.id()
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.create_offset_alignment()
+
+    def test_creates_constant_offset_alignment(self):
+        alignment, alignment_obj = create_empty_alignment("Parent")
+        ifc_file = tool.Ifc.get()
+        assert len(ifc_file.by_type("IfcAlignment")) == 1
+
+        result = bpy.ops.civil.create_offset_alignment(
+            "EXEC_DEFAULT", name="Parent offset", offset_mode="CONSTANT", offset=5.0
+        )
+        assert result == {"FINISHED"}
+
+        alignments = ifc_file.by_type("IfcAlignment")
+        assert len(alignments) == 2
+        offset_alignment = next(a for a in alignments if a.id() != alignment.id())
+        assert offset_alignment.Name == "Parent offset"
+        curve = align_api.get_curve(offset_alignment)
+        assert curve.is_a("IfcOffsetCurveByDistances")
+
+    def test_offset_alignment_is_parented_under_parent_in_outliner(self):
+        alignment, alignment_obj = create_empty_alignment("Parent")
+        bpy.ops.civil.create_offset_alignment("EXEC_DEFAULT", name="Parent offset", offset_mode="CONSTANT", offset=5.0)
+
+        ifc_file = tool.Ifc.get()
+        offset_alignment = next(a for a in ifc_file.by_type("IfcAlignment") if a.id() != alignment.id())
+        offset_obj = tool.Ifc.get_object(offset_alignment)
+        assert offset_obj is not None
+        assert offset_obj.parent == alignment_obj
+
+    def test_records_pset_saikei_offset(self):
+        alignment, alignment_obj = create_empty_alignment("Parent")
+        bpy.ops.civil.create_offset_alignment("EXEC_DEFAULT", name="Parent offset", offset_mode="CONSTANT", offset=5.0)
+
+        ifc_file = tool.Ifc.get()
+        offset_alignment = next(a for a in ifc_file.by_type("IfcAlignment") if a.id() != alignment.id())
+        spec = tool.Alignment.get_offset_spec(offset_alignment)
+        assert spec["mode"] == "CONSTANT"
+        assert spec["parent_global_id"] == alignment.GlobalId
+        assert spec["offset"] == pytest.approx(5.0)
+
+    def test_rejects_zero_constant_offset(self):
+        create_empty_alignment("Parent")
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.create_offset_alignment("EXEC_DEFAULT", name="Bad", offset_mode="CONSTANT", offset=0.0)
+
+    def test_creates_taper_offset_alignment(self):
+        alignment, alignment_obj = create_empty_alignment("Parent")
+        add_real_horizontal_segment(alignment, length=500.0)
+
+        result = bpy.ops.civil.create_offset_alignment(
+            "EXEC_DEFAULT",
+            name="Taper Offset",
+            offset_mode="TAPER",
+            start_offset=5.0,
+            end_offset=10.0,
+            station_from=0.0,
+            station_to=200.0,
+        )
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        offset_alignment = next(a for a in ifc_file.by_type("IfcAlignment") if a.id() != alignment.id())
+        curve = align_api.get_curve(offset_alignment)
+        assert len(curve.OffsetValues) == 3  # station_from touches 0 -> merged
+
+    def test_resyncs_on_recalculate_pis(self):
+        """spec 1.7 "Updates with the parent": a horizontal recalculation
+        goes through commit_layout_change, which now also resyncs offsets."""
+        alignment, alignment_obj = create_empty_alignment("Parent")
+        add_real_horizontal_segment(alignment, length=500.0)
+        bpy.ops.civil.create_offset_alignment("EXEC_DEFAULT", name="Offset", offset_mode="CONSTANT", offset=5.0)
+
+        ifc_file = tool.Ifc.get()
+        offset_alignment = next(a for a in ifc_file.by_type("IfcAlignment") if a.id() != alignment.id())
+        curve_before = align_api.get_curve(offset_alignment)
+        basis_before = curve_before.BasisCurve
+
+        # add_vertical_layout swaps the parent's top-level curve entity to a
+        # new IfcGradientCurve wrapper -- exercised directly here (semantic,
+        # no geometry engine) then resynced via the tool funnel, mirroring
+        # what commit_layout_change does after any real PI/PVI recalculation.
+        align_api.add_vertical_layout(ifc_file, alignment)
+        tool.Alignment.commit_layout_change(alignment)
+
+        curve_after = align_api.get_curve(offset_alignment)
+        assert curve_after.BasisCurve != basis_before
+        assert curve_after.BasisCurve == align_api.get_curve(alignment)
+
+
+# ---------------------------------------------------------------------------
+# Convert Curve to Alignment (spec 1.8)
+# ---------------------------------------------------------------------------
+
+
+def create_poly_curve_object(points, name="SourceCurve"):
+    """Build a Blender CURVE object with one POLY spline through ``points``
+    (world-space (x, y, z) triples) and link it into the scene."""
+    curve_data = bpy.data.curves.new(name, type="CURVE")
+    spline = curve_data.splines.new("POLY")
+    spline.points.add(len(points) - 1)
+    for i, (x, y, z) in enumerate(points):
+        spline.points[i].co = (x, y, z, 1.0)
+    obj = bpy.data.objects.new(name, curve_data)
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+
+class TestConvertCurveToAlignmentPoll(NewIfc4X3):
+    """Poll-level tests for CIVIL_OT_convert_curve_to_alignment -- no IFC
+    write, so these need no geometry engine."""
+
+    def test_poll_fails_without_active_object(self):
+        bpy.context.view_layer.objects.active = None
+        assert bpy.ops.civil.convert_curve_to_alignment.poll() is False
+
+    def test_poll_fails_for_non_curve_object(self):
+        bpy.ops.mesh.primitive_cube_add()
+        assert bpy.ops.civil.convert_curve_to_alignment.poll() is False
+
+    def test_poll_fails_for_curve_with_no_splines(self):
+        curve_data = bpy.data.curves.new("Empty", type="CURVE")
+        obj = bpy.data.objects.new("Empty", curve_data)
+        bpy.context.scene.collection.objects.link(obj)
+        bpy.context.view_layer.objects.active = obj
+        assert bpy.ops.civil.convert_curve_to_alignment.poll() is False
+
+    def test_poll_succeeds_for_poly_curve(self):
+        obj = create_poly_curve_object([(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)])
+        bpy.context.view_layer.objects.active = obj
+        assert bpy.ops.civil.convert_curve_to_alignment.poll() is True
+
+
+@requires_geometry_engine
+class TestConvertCurveToAlignment(NewIfc4X3):
+    """End-to-end tests for CIVIL_OT_convert_curve_to_alignment -- the
+    underlying layout_by_pi_method IFC write needs the geometry engine (see
+    tool/test_alignment.py's TestLayoutByPiMethod), so this whole class is
+    gated; the ungated tool.simplify_polyline/count_distinct_points/
+    extract_polyline_from_curve pieces are covered directly in
+    tool/test_alignment.py."""
+
+    def test_converts_poly_curve_to_alignment_with_expected_pi_count(self):
+        points = [(0.0, 0.0, 0.0), (500.0, 0.0, 0.0), (1000.0, 500.0, 0.0)]
+        obj = create_poly_curve_object(points)
+        bpy.context.view_layer.objects.active = obj
+
+        ifc_file = tool.Ifc.get()
+        assert len(ifc_file.by_type("IfcAlignment")) == 0
+
+        result = bpy.ops.civil.convert_curve_to_alignment("EXEC_DEFAULT", name="From Curve", simplify_tolerance=0.5)
+        assert result == {"FINISHED"}
+
+        alignments = ifc_file.by_type("IfcAlignment")
+        assert len(alignments) == 1
+        assert alignments[0].Name == "From Curve"
+        h_layout = align_api.get_horizontal_layout(alignments[0])
+        real_segments = [
+            s for s in align_api.get_layout_segments(h_layout) if not tool.Alignment.is_zero_length_segment(s)
+        ]
+        # 3 collinear-free PIs -> 2 tangent segments (all-tangent, radius 0).
+        assert len(real_segments) == 2
+
+    def test_sets_active_alignment_and_syncs_lists(self):
+        points = [(0.0, 0.0, 0.0), (500.0, 0.0, 0.0)]
+        obj = create_poly_curve_object(points)
+        bpy.context.view_layer.objects.active = obj
+
+        bpy.ops.civil.convert_curve_to_alignment("EXEC_DEFAULT", name="From Curve", simplify_tolerance=0.5)
+
+        props = get_alignment_props()
+        ifc_file = tool.Ifc.get()
+        alignment = ifc_file.by_type("IfcAlignment")[0]
+        assert props.active_alignment_id == alignment.id()
+        assert len(props.referents) >= 1  # default STATION referent seeded
+
+
+# ---------------------------------------------------------------------------
+# Multi-Vertical Selector (spec 2.1)
+# ---------------------------------------------------------------------------
+
+
+class TestAddAlternativeVertical(NewIfc4X3):
+    """Tests for CIVIL_OT_add_alternative_vertical (civil.add_alternative_vertical).
+
+    add_vertical_layout's migration path is purely semantic (see
+    tool/test_alignment.py's TestAddAlternativeVertical), so this operator
+    needs no geometry engine.
+    """
+
+    def test_poll_fails_without_alignment(self):
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.add_alternative_vertical("EXEC_DEFAULT")
+
+    def test_poll_fails_without_horizontal_layout(self):
+        ifc_file = tool.Ifc.get()
+        alignment = ifc_file.createIfcAlignment(GlobalId=ifcopenshell.guid.new(), Name="NoHorizontal")
+        alignment_obj = tool.Alignment.create_object_for_alignment(alignment)
+        bpy.context.view_layer.objects.active = alignment_obj
+        props = get_alignment_props()
+        props.active_alignment_id = alignment.id()
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.add_alternative_vertical("EXEC_DEFAULT")
+
+    def test_poll_succeeds_even_when_a_vertical_already_exists(self):
+        # The whole point of this operator (spec 2.1) -- unlike
+        # add_vertical_to_alignment's poll, an existing vertical must NOT
+        # block it.
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        assert bpy.ops.civil.add_alternative_vertical.poll() is True
+
+    def test_adds_second_vertical_without_removing_first(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        ifc_file = tool.Ifc.get()
+        assert len(ifc_file.by_type("IfcAlignmentVertical")) == 1
+
+        result = bpy.ops.civil.add_alternative_vertical("EXEC_DEFAULT")
+        assert result == {"FINISHED"}
+
+        assert len(ifc_file.by_type("IfcAlignmentVertical")) == 2
+
+    def test_updates_vertical_layout_list_and_selects_new_row(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        props = get_alignment_props()
+        # Selector defaults to the single vertical once one exists.
+        assert len(props.vertical_layouts) == 1
+
+        result = bpy.ops.civil.add_alternative_vertical("EXEC_DEFAULT")
+        assert result == {"FINISHED"}
+
+        assert len(props.vertical_layouts) == 2
+        # The operator selects whichever row is the NEWLY returned vertical
+        # -- which one that is by position isn't guaranteed (get_vertical_
+        # layouts' order reflects the alignment API's own aggregation
+        # bookkeeping, not creation order), so assert the selection is
+        # self-consistent rather than assuming a specific index/flag.
+        selected = props.vertical_layouts[props.active_vertical_layout_index]
+        assert selected.layout_id == props.active_vertical_layout_id
+        # Exactly one row is flagged "not the primary" (is_alternative is a
+        # position-based label -- index 0 vs the rest -- see
+        # refresh_vertical_list's docstring).
+        assert sum(1 for row in props.vertical_layouts if row.is_alternative) == 1
+
+
+def add_real_vertical_segment(v_layout, start_height=100.0, horizontal_length=500.0, gradient=0.02):
+    """Manually author one CONSTANTGRADIENT IfcAlignmentVerticalSegment on
+    ``v_layout`` -- semantic only (mirrors add_real_horizontal_segment
+    above), so a selector test can give a vertical layout real PVI data
+    without going through the geometry-gated civil.recalculate_pvis write
+    path (layout_vertical_by_pi_method shares _add_segment_to_curve's
+    update_end_point call with the horizontal method, which
+    TestCreateAlignmentByPi confirms needs the geometry engine)."""
+    import ifcopenshell.api.nest
+
+    ifc_file = tool.Ifc.get()
+    design_params = ifc_file.createIfcAlignmentVerticalSegment(
+        StartDistAlong=0.0,
+        HorizontalLength=horizontal_length,
+        StartHeight=start_height,
+        StartGradient=gradient,
+        EndGradient=gradient,
+        PredefinedType="CONSTANTGRADIENT",
+    )
+    segment = ifc_file.createIfcAlignmentSegment(GlobalId=ifcopenshell.guid.new(), DesignParameters=design_params)
+    ifcopenshell.api.nest.assign_object(ifc_file, related_objects=[segment], relating_object=v_layout)
+
+
+class TestVerticalLayoutSelector(NewIfc4X3):
+    """Tests for the vertical layout list sync (refresh_vertical_list) and
+    selection-driven PVI table resync (sync_pvis_from_selected_vertical_layout),
+    spec 2.1 -- entirely semantic (back_calculate_pvis_from_vertical reads
+    IFC design parameters directly, no geometry engine)."""
+
+    def test_refresh_populates_single_row_for_the_common_case(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        props = get_alignment_props()
+        assert len(props.vertical_layouts) == 1
+        v_layout = tool.Alignment.get_vertical_layout(tool.Ifc.get().by_id(alignment.id()))
+        assert props.vertical_layouts[0].layout_id == v_layout.id()
+        assert props.active_vertical_layout_id == v_layout.id()
+
+    def test_selecting_a_row_resyncs_pvi_table_from_that_layout(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        props = get_alignment_props()
+
+        # Migrate to the two-vertical structure FIRST, while both verticals
+        # are still bare (semantic segment count == geometric segment count,
+        # i.e. just the zero-length terminator) -- add_alternative_vertical
+        # builds a full Blender hierarchy per new child, including segment
+        # curve objects, which needs that count to stay consistent.
+        bpy.ops.civil.add_alternative_vertical("EXEC_DEFAULT")
+        assert len(props.vertical_layouts) == 2
+
+        # NOW give the first (already-migrated, no longer touched by any
+        # further hierarchy-building call) vertical real semantic PVI data.
+        ifc_file = tool.Ifc.get()
+        first_layout_id = next(row.layout_id for row in props.vertical_layouts if not row.is_alternative)
+        v_layout_1 = ifc_file.by_id(first_layout_id)
+        add_real_vertical_segment(v_layout_1, start_height=100.0, horizontal_length=500.0, gradient=0.02)
+
+        # Select it explicitly and confirm the PVI table reflects it, not an
+        # empty one.
+        first_index = next(i for i, row in enumerate(props.vertical_layouts) if row.layout_id == first_layout_id)
+        props.active_vertical_layout_index = first_index
+
+        assert props.active_vertical_layout_id == first_layout_id
+        assert len(props.vertical_pvis) >= 2
+        assert props.vertical_pvis[0].elevation == pytest.approx(100.0)
+
+        # Selecting the brand-new (empty) alternative clears the table back out.
+        second_index = next(i for i, row in enumerate(props.vertical_layouts) if row.is_alternative)
+        props.active_vertical_layout_index = second_index
+        assert len(props.vertical_pvis) == 0
+
+
+@requires_geometry_engine
+class TestVerticalLayoutSelectorWritePath(NewIfc4X3):
+    """civil.recalculate_pvis's actual IFC write (layout_vertical_by_pi_method)
+    needs the geometry engine (shares _add_segment_to_curve's
+    update_end_point call with the horizontal PI method -- see
+    TestCreateAlignmentByPi) -- gated separately from the semantic selector
+    sync tests in TestVerticalLayoutSelector above."""
+
+    def test_recalculate_pvis_targets_the_selected_layout(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        props = get_alignment_props()
+        bpy.ops.civil.add_alternative_vertical("EXEC_DEFAULT")
+
+        # Select the alternative (still empty) and write PVIs into it.
+        alt_index = next(i for i, row in enumerate(props.vertical_layouts) if row.is_alternative)
+        props.active_vertical_layout_index = alt_index
+        alt_layout_id = props.active_vertical_layout_id
+
+        bpy.ops.civil.add_pvi()
+        bpy.ops.civil.add_pvi()
+        props.vertical_pvis[0].station = 0.0
+        props.vertical_pvis[0].elevation = 200.0
+        props.vertical_pvis[1].station = 500.0
+        props.vertical_pvis[1].elevation = 220.0
+
+        bpy.ops.civil.recalculate_pvis()
+
+        ifc_file = tool.Ifc.get()
+        alt_layout = ifc_file.by_id(alt_layout_id)
+        assert tool.Alignment.layout_has_real_segments(alt_layout)
+
+        default_layout_id = next(row.layout_id for row in props.vertical_layouts if not row.is_alternative)
+        default_layout = ifc_file.by_id(default_layout_id)
+        assert not tool.Alignment.layout_has_real_segments(default_layout)

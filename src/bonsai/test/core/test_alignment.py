@@ -43,15 +43,28 @@ class FakeIfcEntity(dict):
 
 
 class FakeIfcFile:
-    """Minimal stand-in for an open IFC file."""
+    """Minimal stand-in for an open IFC file.
 
-    def __init__(self, entity=None, not_found: bool = False):
+    ``by_id_map``, when given, resolves ``by_id(id)`` per-id (needed for
+    tests that exercise more than one ``by_id`` lookup against different
+    entities, e.g. the multi-vertical selector's ``vertical_layout_id``
+    resolution). When omitted, every ``by_id`` call returns the same
+    ``entity`` regardless of id, matching the original single-entity
+    behavior every other test in this module relies on.
+    """
+
+    def __init__(self, entity=None, not_found: bool = False, by_id_map: dict = None):
         self._entity = entity
         self._not_found = not_found
+        self._by_id_map = by_id_map
 
     def by_id(self, entity_id: int):
         if self._not_found:
             raise RuntimeError(f"Could not find #{entity_id}")
+        if self._by_id_map is not None:
+            if entity_id not in self._by_id_map:
+                raise RuntimeError(f"Could not find #{entity_id}")
+            return self._by_id_map[entity_id]
         return self._entity
 
 
@@ -315,7 +328,9 @@ class TestEnterPviEditMode:
         ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
         alignment.get_vertical_layout(entity).should_be_called().will_return("v_layout")
         alignment.layout_has_real_segments("v_layout").should_be_called().will_return(True)
-        alignment.back_calculate_pvis_from_vertical(entity).should_be_called().will_return(pvis)
+        alignment.back_calculate_pvis_from_vertical(entity, vertical_layout="v_layout").should_be_called().will_return(
+            pvis
+        )
         with pytest.raises(ValueError, match="at least 2 PVIs"):
             subject.enter_pvi_edit_mode(ifc, alignment, alignment_id=1)
 
@@ -329,10 +344,42 @@ class TestEnterPviEditMode:
         ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
         alignment.get_vertical_layout(entity).should_be_called().will_return("v_layout")
         alignment.layout_has_real_segments("v_layout").should_be_called().will_return(True)
-        alignment.back_calculate_pvis_from_vertical(entity).should_be_called().will_return(pvis)
+        alignment.back_calculate_pvis_from_vertical(entity, vertical_layout="v_layout").should_be_called().will_return(
+            pvis
+        )
         alignment.create_pvi_edit_empties(entity, pvis).should_be_called().will_return(empties)
         result = subject.enter_pvi_edit_mode(ifc, alignment, alignment_id=1)
         assert result == empties
+
+    def test_targets_the_selected_vertical_layout_when_given(self, ifc, alignment):
+        entity = make_alignment_entity()
+        v_layout_2 = FakeIfcEntity({"ifc_class": "IfcAlignmentVertical", "name": "V2"})
+        pvis = [
+            {"station": 0.0, "elevation": 100.0, "curve_length": 0.0},
+            {"station": 500.0, "elevation": 110.0, "curve_length": 0.0},
+        ]
+        empties = ["pvi_empty_0", "pvi_empty_1"]
+        # ifc.get() is called twice: once to resolve the alignment, once
+        # inside _resolve_vertical_layout to look up vertical_layout_id.
+        fake_file = FakeIfcFile(by_id_map={1: entity, 42: v_layout_2})
+        ifc.get().should_be_called(2).will_return(fake_file)
+        alignment.get_vertical_layouts(entity).should_be_called().will_return(["v_layout", v_layout_2])
+        alignment.layout_has_real_segments(v_layout_2).should_be_called().will_return(True)
+        alignment.back_calculate_pvis_from_vertical(entity, vertical_layout=v_layout_2).should_be_called().will_return(
+            pvis
+        )
+        alignment.create_pvi_edit_empties(entity, pvis).should_be_called().will_return(empties)
+        result = subject.enter_pvi_edit_mode(ifc, alignment, alignment_id=1, vertical_layout_id=42)
+        assert result == empties
+
+    def test_raises_when_vertical_layout_id_does_not_belong_to_alignment(self, ifc, alignment):
+        entity = make_alignment_entity()
+        unrelated_layout = FakeIfcEntity({"ifc_class": "IfcAlignmentVertical", "name": "Unrelated"})
+        fake_file = FakeIfcFile(by_id_map={1: entity, 42: unrelated_layout})
+        ifc.get().should_be_called(2).will_return(fake_file)
+        alignment.get_vertical_layouts(entity).should_be_called().will_return(["v_layout"])
+        with pytest.raises(ValueError, match="does not belong"):
+            subject.enter_pvi_edit_mode(ifc, alignment, alignment_id=1, vertical_layout_id=42)
 
 
 # ---------------------------------------------------------------------------
@@ -891,3 +938,221 @@ class TestRemoveReferent:
         alignment.get_referents(entity).should_be_called().will_return([{"id": 99, "name": "x"}])
         alignment.remove_referent(entity, 99).should_be_called()
         subject.remove_referent(ifc, alignment, alignment_id=1, referent_id=99)
+
+
+# ---------------------------------------------------------------------------
+# create_offset_alignment  (spec 1.7)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateOffsetAlignment:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.create_offset_alignment(ifc, alignment, alignment_id=1, name="Offset", offset_spec={})
+
+    def test_raises_when_alignment_not_found(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        with pytest.raises(ValueError, match="not found"):
+            subject.create_offset_alignment(ifc, alignment, alignment_id=1, name="Offset", offset_spec={})
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.create_offset_alignment(ifc, alignment, alignment_id=1, name="Offset", offset_spec={})
+
+    def test_raises_when_parent_has_no_curve(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_curve_for_alignment(entity).should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="no geometric representation"):
+            subject.create_offset_alignment(ifc, alignment, alignment_id=1, name="Offset", offset_spec={})
+
+    def test_raises_when_name_is_empty(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_curve_for_alignment(entity).should_be_called().will_return("curve")
+        with pytest.raises(ValueError, match="cannot be empty"):
+            subject.create_offset_alignment(ifc, alignment, alignment_id=1, name="   ", offset_spec={})
+
+    def test_raises_when_mode_is_unknown(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_curve_for_alignment(entity).should_be_called().will_return("curve")
+        with pytest.raises(ValueError, match="Unknown offset mode"):
+            subject.create_offset_alignment(
+                ifc, alignment, alignment_id=1, name="Offset", offset_spec={"mode": "BOGUS"}
+            )
+
+    def test_raises_when_constant_offset_is_zero(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_curve_for_alignment(entity).should_be_called().will_return("curve")
+        alignment.get_horizontal_extent_semantic(entity).should_be_called().will_return(500.0)
+        with pytest.raises(ValueError, match="must be non-zero"):
+            subject.create_offset_alignment(
+                ifc, alignment, alignment_id=1, name="Offset", offset_spec={"mode": "CONSTANT", "offset": 0.0}
+            )
+
+    def test_creates_constant_offset_alignment(self, ifc, alignment):
+        entity = make_alignment_entity()
+        offset_spec = {"mode": "CONSTANT", "offset": 5.0}
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_curve_for_alignment(entity).should_be_called().will_return("curve")
+        alignment.get_horizontal_extent_semantic(entity).should_be_called().will_return(500.0)
+        alignment.create_offset_alignment(entity, "Offset", offset_spec).should_be_called().will_return(
+            "offset_alignment"
+        )
+        result = subject.create_offset_alignment(ifc, alignment, alignment_id=1, name="Offset", offset_spec=offset_spec)
+        assert result == "offset_alignment"
+
+    def test_raises_when_taper_offsets_both_zero(self, ifc, alignment):
+        entity = make_alignment_entity()
+        offset_spec = {
+            "mode": "TAPER",
+            "start_offset": 0.0,
+            "end_offset": 0.0,
+            "station_from": 0.0,
+            "station_to": 100.0,
+        }
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_curve_for_alignment(entity).should_be_called().will_return("curve")
+        alignment.get_horizontal_extent_semantic(entity).should_be_called().will_return(500.0)
+        with pytest.raises(ValueError, match="cannot both be zero"):
+            subject.create_offset_alignment(ifc, alignment, alignment_id=1, name="Offset", offset_spec=offset_spec)
+
+    def test_raises_when_taper_station_from_not_less_than_station_to(self, ifc, alignment):
+        entity = make_alignment_entity()
+        offset_spec = {
+            "mode": "TAPER",
+            "start_offset": 5.0,
+            "end_offset": 10.0,
+            "station_from": 200.0,
+            "station_to": 100.0,
+        }
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_curve_for_alignment(entity).should_be_called().will_return("curve")
+        alignment.get_horizontal_extent_semantic(entity).should_be_called().will_return(500.0)
+        with pytest.raises(ValueError, match="station_from must be less than station_to"):
+            subject.create_offset_alignment(ifc, alignment, alignment_id=1, name="Offset", offset_spec=offset_spec)
+
+    def test_raises_when_taper_range_outside_extent(self, ifc, alignment):
+        entity = make_alignment_entity()
+        offset_spec = {
+            "mode": "TAPER",
+            "start_offset": 5.0,
+            "end_offset": 10.0,
+            "station_from": 0.0,
+            "station_to": 600.0,
+        }
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_curve_for_alignment(entity).should_be_called().will_return("curve")
+        alignment.get_horizontal_extent_semantic(entity).should_be_called().will_return(500.0)
+        with pytest.raises(ValueError, match="must fall within the alignment's extent"):
+            subject.create_offset_alignment(ifc, alignment, alignment_id=1, name="Offset", offset_spec=offset_spec)
+
+    def test_creates_taper_offset_alignment(self, ifc, alignment):
+        entity = make_alignment_entity()
+        offset_spec = {
+            "mode": "TAPER",
+            "start_offset": 5.0,
+            "end_offset": 10.0,
+            "station_from": 0.0,
+            "station_to": 100.0,
+        }
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_curve_for_alignment(entity).should_be_called().will_return("curve")
+        alignment.get_horizontal_extent_semantic(entity).should_be_called().will_return(500.0)
+        alignment.create_offset_alignment(entity, "Taper Offset", offset_spec).should_be_called().will_return(
+            "offset_alignment"
+        )
+        result = subject.create_offset_alignment(
+            ifc, alignment, alignment_id=1, name="Taper Offset", offset_spec=offset_spec
+        )
+        assert result == "offset_alignment"
+
+
+# ---------------------------------------------------------------------------
+# convert_curve_to_alignment  (spec 1.8)
+# ---------------------------------------------------------------------------
+
+
+class TestConvertCurveToAlignment:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.convert_curve_to_alignment(ifc, alignment, name="A1", points_xy=[(0.0, 0.0), (1.0, 1.0)])
+
+    def test_raises_when_name_is_empty(self, ifc, alignment):
+        ifc.get().should_be_called().will_return("ifc_file")
+        with pytest.raises(ValueError, match="cannot be empty"):
+            subject.convert_curve_to_alignment(ifc, alignment, name="  ", points_xy=[(0.0, 0.0), (1.0, 1.0)])
+
+    def test_raises_when_fewer_than_two_raw_points(self, ifc, alignment):
+        ifc.get().should_be_called().will_return("ifc_file")
+        with pytest.raises(ValueError, match="at least 2 points"):
+            subject.convert_curve_to_alignment(ifc, alignment, name="A1", points_xy=[(0.0, 0.0)])
+
+    def test_raises_when_simplified_has_fewer_than_two_distinct_points(self, ifc, alignment):
+        points_xy = [(0.0, 0.0), (0.0, 1e-9), (0.0, 2e-9)]
+        ifc.get().should_be_called().will_return("ifc_file")
+        alignment.simplify_polyline(points_xy, 0.5).should_be_called().will_return([(0.0, 0.0)])
+        alignment.count_distinct_points([(0.0, 0.0)]).should_be_called().will_return(1)
+        with pytest.raises(ValueError, match="fewer than 2 distinct points"):
+            subject.convert_curve_to_alignment(ifc, alignment, name="A1", points_xy=points_xy)
+
+    def test_creates_alignment_and_returns_counts(self, ifc, alignment):
+        points_xy = [(0.0, 0.0), (50.0, 0.0), (100.0, 5.0), (150.0, 5.0)]
+        simplified = [(0.0, 0.0), (100.0, 5.0), (150.0, 5.0)]
+        ifc.get().should_be_called().will_return("ifc_file")
+        alignment.simplify_polyline(points_xy, 0.5).should_be_called().will_return(simplified)
+        alignment.count_distinct_points(simplified).should_be_called().will_return(3)
+        alignment.convert_points_to_alignment("A1", simplified).should_be_called().will_return("alignment")
+        result_alignment, pi_count, sample_count = subject.convert_curve_to_alignment(
+            ifc, alignment, name="A1", points_xy=points_xy
+        )
+        assert result_alignment == "alignment"
+        assert pi_count == 3
+        assert sample_count == 4
+
+
+# ---------------------------------------------------------------------------
+# add_alternative_vertical  (spec 2.1)
+# ---------------------------------------------------------------------------
+
+
+class TestAddAlternativeVertical:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.add_alternative_vertical(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_alignment_not_found(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        with pytest.raises(ValueError, match="not found"):
+            subject.add_alternative_vertical(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.add_alternative_vertical(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_no_horizontal_layout(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_horizontal_layout(entity).should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="no horizontal layout"):
+            subject.add_alternative_vertical(ifc, alignment, alignment_id=1)
+
+    def test_does_not_refuse_when_alignment_already_has_a_vertical(self, ifc, alignment):
+        # The whole point of add_alternative_vertical (spec 2.1): unlike
+        # add_vertical_to_alignment, an existing vertical is NOT a refusal
+        # condition -- so this deliberately never calls get_vertical_layout.
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_horizontal_layout(entity).should_be_called().will_return("h_layout")
+        alignment.add_alternative_vertical(entity).should_be_called().will_return("v_layout_2")
+        result = subject.add_alternative_vertical(ifc, alignment, alignment_id=1)
+        assert result == "v_layout_2"
