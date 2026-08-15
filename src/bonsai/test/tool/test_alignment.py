@@ -292,6 +292,178 @@ class TestTangentSegmentLength(NewFile):
 
 
 # ---------------------------------------------------------------------------
+# Spiral transitions & compound/reverse curves — pure math (spec 1.5, 1.6)
+# ---------------------------------------------------------------------------
+
+
+class TestSpiralAValueConversion(NewFile):
+    """A^2 = R * L — the classic clothoid design parameter."""
+
+    def test_spiral_length_from_a_value_golden(self):
+        # A=300, R=500 -> L=180 (300^2 / 500 = 90000 / 500 = 180)
+        assert_close(subject.spiral_length_from_a_value(300.0, 500.0), 180.0)
+
+    def test_a_value_from_spiral_length_is_the_inverse(self):
+        assert_close(subject.a_value_from_spiral_length(180.0, 500.0), 300.0)
+
+    def test_round_trips_arbitrary_values(self):
+        a = subject.a_value_from_spiral_length(150.0, 500.0)
+        length_back = subject.spiral_length_from_a_value(a, 500.0)
+        assert_close(length_back, 150.0)
+
+    def test_spiral_length_from_a_value_zero_radius(self):
+        assert subject.spiral_length_from_a_value(300.0, 0.0) == 0.0
+
+    def test_spiral_length_from_a_value_zero_a(self):
+        assert subject.spiral_length_from_a_value(0.0, 500.0) == 0.0
+
+    def test_a_value_from_spiral_length_zero_radius(self):
+        assert subject.a_value_from_spiral_length(180.0, 0.0) == 0.0
+
+    def test_a_value_from_spiral_length_zero_length(self):
+        assert subject.a_value_from_spiral_length(0.0, 500.0) == 0.0
+
+
+class TestBuildPiRadiusElement(NewFile):
+    """Shapes one element of the PI-method solver's ``radii`` sequence —
+    plain float / (R, Lin, Lout) tuple / join_next dict."""
+
+    def test_plain_radius_with_no_spirals_or_join(self):
+        assert subject.build_pi_radius_element(500.0) == 500.0
+
+    def test_zero_radius_pass_through_tangent(self):
+        assert subject.build_pi_radius_element(0.0) == 0.0
+
+    def test_tuple_form_with_entry_spiral_only(self):
+        assert subject.build_pi_radius_element(500.0, spiral_in=150.0) == (500.0, 150.0, 0.0)
+
+    def test_tuple_form_with_exit_spiral_only(self):
+        assert subject.build_pi_radius_element(500.0, spiral_out=150.0) == (500.0, 0.0, 150.0)
+
+    def test_tuple_form_with_both_spirals(self):
+        result = subject.build_pi_radius_element(500.0, spiral_in=150.0, spiral_out=100.0)
+        assert result == (500.0, 150.0, 100.0)
+
+    def test_dict_form_with_join_next_and_no_spirals(self):
+        result = subject.build_pi_radius_element(500.0, join_next=True)
+        assert result == {"radius": 500.0, "lin": 0.0, "lout": 0.0, "join_next": True}
+
+    def test_dict_form_with_join_next_and_an_entry_spiral(self):
+        result = subject.build_pi_radius_element(500.0, spiral_in=150.0, join_next=True)
+        assert result == {"radius": 500.0, "lin": 150.0, "lout": 0.0, "join_next": True}
+
+    def test_join_next_takes_precedence_over_tuple_form(self):
+        """Even with both spiral lengths at 0, join_next=True must produce
+        the dict form -- the solver only accepts join_next as a dict key."""
+        result = subject.build_pi_radius_element(300.0, join_next=True)
+        assert isinstance(result, dict)
+
+
+class TestSpiralCurveGeometryAtPi(NewFile):
+    """PI-table display geometry — a pure-math mirror of
+    solve_horizontal_alignment_by_pi_method's own spiral composition,
+    cross-checked against the golden worked example in
+    test_solve_spiral_worked_example.py (R=500, Ls=150, Delta=60deg)."""
+
+    R = 500.0
+    LS = 150.0
+
+    def _pi_points(self):
+        import math
+
+        d = 1200.0
+        pi0 = (0.0, 0.0)
+        pi1 = (d, 0.0)
+        pi2 = (d + d * math.cos(math.radians(-60.0)), d * math.sin(math.radians(-60.0)))
+        return pi0, pi1, pi2
+
+    def test_no_curve_returns_zeros(self):
+        p1, p2, p3 = self._pi_points()
+        geom = subject.spiral_curve_geometry_at_pi(p1, p2, p3, 0.0)
+        assert geom == {"deflection": 0.0, "tangent_in": 0.0, "tangent_out": 0.0, "arc_length": 0.0}
+
+    def test_no_spirals_matches_plain_arc_formulas(self):
+        p1, p2, p3 = self._pi_points()
+        geom = subject.spiral_curve_geometry_at_pi(p1, p2, p3, self.R)
+        expected_tangent = subject.tangent_length_at_pi(p1, p2, p3, self.R)
+        expected_arc = subject.arc_length_at_pi(p1, p2, p3, self.R)
+        assert_close(geom["tangent_in"], expected_tangent, tol=1e-6)
+        assert_close(geom["tangent_out"], expected_tangent, tol=1e-6)
+        assert_close(geom["arc_length"], expected_arc, tol=1e-6)
+
+    def test_symmetric_spiral_curve_spiral_matches_worked_example(self):
+        """Ts (PI-to-TS tangent distance) = 364.70058220066517, arc length =
+        373.5987755982988 — from the docstring derivation in
+        test_solve_spiral_worked_example.py."""
+        p1, p2, p3 = self._pi_points()
+        geom = subject.spiral_curve_geometry_at_pi(p1, p2, p3, self.R, spiral_in=self.LS, spiral_out=self.LS)
+        assert_close(geom["tangent_in"], 364.70058220066517, tol=1e-6)
+        assert_close(geom["tangent_out"], 364.70058220066517, tol=1e-6)
+        assert_close(geom["arc_length"], 373.5987755982988, tol=1e-6)
+
+    def test_spiral_spiral_consumes_full_deflection_reports_zero_arc(self):
+        """Two 150-length spirals over a 60deg deflection at R=500 leave
+        theta_c = Delta - 2*theta_s = pi/3 - 2*0.15 = 0.747... > 0, so this
+        is still spiral-curve-spiral. Push the spiral lengths up until
+        theta1 + theta2 >= |delta| to hit the pure spiral-spiral case."""
+        import math
+
+        p1, p2, p3 = self._pi_points()
+        delta = math.pi / 3.0
+        # theta = L / (2R); choose L so 2*theta == delta exactly (Δc = 0).
+        spiral_length = delta * self.R
+        geom = subject.spiral_curve_geometry_at_pi(
+            p1, p2, p3, self.R, spiral_in=spiral_length, spiral_out=spiral_length
+        )
+        assert_close(geom["arc_length"], 0.0, tol=1e-6)
+
+
+class TestJunctionType(NewFile):
+    """PCC (same-direction curves) vs PRC (opposite-direction curves) —
+    spec 1.6."""
+
+    def test_same_direction_turns_are_pcc(self):
+        # Two consecutive right turns.
+        p_prev = (0.0, 0.0)
+        p_this = (100.0, 0.0)
+        p_next = (150.0, -50.0)
+        p_next2 = (150.0, -150.0)
+        assert subject.junction_type(p_prev, p_this, p_next, p_next2) == "PCC"
+
+    def test_opposite_direction_turns_are_prc(self):
+        # A right turn followed by a left turn.
+        p_prev = (0.0, 0.0)
+        p_this = (100.0, 0.0)
+        p_next = (150.0, -50.0)
+        p_next2 = (150.0, 50.0)
+        assert subject.junction_type(p_prev, p_this, p_next, p_next2) == "PRC"
+
+
+class TestJoinNextSolverRefusalPropagatesVerbatim(NewFile):
+    """Tool-layer, ungated: build_pi_radius_element(join_next=True) feeds
+    directly into the pure solve function (no geometry engine, no IFC file)
+    -- a geometrically infeasible join (the two curves' tangent claims on
+    the shared leg can't sum to the PI-to-PI distance) surfaces the
+    solver's explanatory ValueError verbatim (spec 1.6: "refused with an
+    explanation"). The full commit-to-IFC path (civil.join_curves via
+    bpy.ops) is exercised separately, geometry-gated, in
+    test/bim/module/alignment/test_alignment_operators.py.
+    """
+
+    def test_join_next_refusal_message_propagates(self):
+        # PI1 (500 radius, 90deg turn) claims 500 units of tangent on the
+        # PI1-PI2 leg alone -- but that leg is only 10 units long, so the
+        # join closure check must fail regardless of PI2's own curve.
+        hpoints = [(0.0, 0.0), (1000.0, 0.0), (1000.0, 10.0), (1010.0, 1010.0)]
+        radii = [
+            subject.build_pi_radius_element(500.0, join_next=True),
+            subject.build_pi_radius_element(300.0),
+        ]
+        with pytest.raises(ValueError, match="cannot close"):
+            align_api.solve_horizontal_alignment_by_pi_method(hpoints, radii)
+
+
+# ---------------------------------------------------------------------------
 # is_zero_length_segment
 # ---------------------------------------------------------------------------
 
@@ -2650,6 +2822,17 @@ def _arc_dp(ifc_file, start_xy, start_direction, radius, length):
     )
 
 
+def _clothoid_dp(ifc_file, start_xy, start_direction, start_radius, end_radius, length):
+    return ifc_file.createIfcAlignmentHorizontalSegment(
+        StartPoint=ifc_file.createIfcCartesianPoint(start_xy),
+        StartDirection=start_direction,
+        StartRadiusOfCurvature=start_radius,
+        EndRadiusOfCurvature=end_radius,
+        SegmentLength=length,
+        PredefinedType="CLOTHOID",
+    )
+
+
 def _nest_semantic_cant_segments(alignment, design_params_list):
     """Directly nest real IfcAlignmentSegments onto the cant layout via their
     DesignParameters, bypassing create_layout_segment (geometry-engine
@@ -2808,6 +2991,188 @@ class TestRadiusAtStation(NewIfc4X3):
         radius_at_mid = subject.radius_at_station(alignment, 25.0)
         expected_curvature = 0.5 * (1.0 / 100.0)
         assert_close(1.0 / radius_at_mid, expected_curvature, tol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# back_calculate_pis_from_alignment — spirals & ambiguity (spec 1.5, 1.6)
+# ---------------------------------------------------------------------------
+# Unlike TestBackCalculatePisFromAlignment above (which builds its fixtures
+# via the geometry-engine-dependent create_layout_segment / PI-method write
+# path and is gated by @requires_geometry_engine), these tests nest
+# semantic IfcAlignmentSegments directly via DesignParameters -- the same
+# pattern TestRadiusAtStation uses just above -- so back_calculate_pis_
+# from_alignment's own DesignParameters-only reconstruction (spec 1.5)
+# needs no geometry engine at all and these run ungated.
+
+
+class TestBackCalculatePisFromAlignmentSpirals(NewIfc4X3):
+    """Reconstructs a spiral-curve-spiral PI from a semantically-built
+    LINE-CLOTHOID-ARC-CLOTHOID-LINE layout, using the golden worked example
+    from test_solve_spiral_worked_example.py (R=500, Ls=150, Delta=60deg,
+    D=L=1200) as the source of truth for both the PI positions and the
+    segment parameters -- the segments are produced by the SAME pure
+    solver (ifcopenshell.api.alignment.solve_horizontal_alignment_by_pi_method,
+    no geometry engine involved) the real write path uses, so this is a
+    genuine round trip: solve -> nest semantically -> back-calculate ->
+    compare to the original PI/radius/spiral lengths.
+    """
+
+    R = 500.0
+    LS = 150.0
+    D = 1200.0
+    L = 1200.0
+
+    def _pi_points(self):
+        pi0 = (0.0, 0.0)
+        pi1 = (self.D, 0.0)
+        pi2 = (self.D + self.L * math.cos(math.radians(-60.0)), self.L * math.sin(math.radians(-60.0)))
+        return [pi0, pi1, pi2]
+
+    def _nest_spiral_curve_spiral(self, name="SpiralWorkedExample"):
+        hpoints = self._pi_points()
+        segments = align_api.solve_horizontal_alignment_by_pi_method(hpoints, [(self.R, self.LS, self.LS)])
+        assert [s.predefined_type for s in segments] == ["LINE", "CLOTHOID", "CIRCULARARC", "CLOTHOID", "LINE"]
+
+        ifc_file = tool.Ifc.get()
+        design_params = [
+            ifc_file.createIfcAlignmentHorizontalSegment(
+                StartPoint=ifc_file.createIfcCartesianPoint(s.start_point),
+                StartDirection=s.start_direction,
+                StartRadiusOfCurvature=s.start_radius_of_curvature,
+                EndRadiusOfCurvature=s.end_radius_of_curvature,
+                SegmentLength=s.segment_length,
+                PredefinedType=s.predefined_type,
+            )
+            for s in segments
+        ]
+        alignment = align_api.create(ifc_file, name=name)
+        _nest_semantic_horizontal_segments(alignment, design_params)
+        return alignment, hpoints
+
+    def test_recovers_three_pis_with_correct_types(self):
+        alignment, hpoints = self._nest_spiral_curve_spiral()
+        pis = subject.back_calculate_pis_from_alignment(alignment)
+        assert len(pis) == 3
+        assert [p["pi_type"] for p in pis] == ["ENDPOINT", "CURVE", "ENDPOINT"]
+
+    def test_recovers_endpoint_positions(self):
+        alignment, hpoints = self._nest_spiral_curve_spiral()
+        pis = subject.back_calculate_pis_from_alignment(alignment)
+        assert_close(pis[0]["e"], hpoints[0][0], tol=1e-6)
+        assert_close(pis[0]["n"], hpoints[0][1], tol=1e-6)
+        assert_close(pis[2]["e"], hpoints[2][0], tol=1e-6)
+        assert_close(pis[2]["n"], hpoints[2][1], tol=1e-6)
+
+    def test_recovers_interior_pi_position(self):
+        alignment, hpoints = self._nest_spiral_curve_spiral()
+        pis = subject.back_calculate_pis_from_alignment(alignment)
+        assert_close(pis[1]["e"], hpoints[1][0], tol=1e-6)
+        assert_close(pis[1]["n"], hpoints[1][1], tol=1e-6)
+
+    def test_recovers_radius_and_spiral_lengths(self):
+        alignment, hpoints = self._nest_spiral_curve_spiral()
+        pis = subject.back_calculate_pis_from_alignment(alignment)
+        assert_close(pis[1]["radius"], self.R, tol=1e-6)
+        assert_close(pis[1]["spiral_in"], self.LS, tol=1e-6)
+        assert_close(pis[1]["spiral_out"], self.LS, tol=1e-6)
+
+    def test_recovers_entry_spiral_only(self):
+        """Same worked example, but Lout=0 -- entry spiral only, no exit spiral."""
+        hpoints = self._pi_points()
+        segments = align_api.solve_horizontal_alignment_by_pi_method(hpoints, [(self.R, self.LS, 0.0)])
+        assert [s.predefined_type for s in segments] == ["LINE", "CLOTHOID", "CIRCULARARC", "LINE"]
+
+        ifc_file = tool.Ifc.get()
+        design_params = [
+            ifc_file.createIfcAlignmentHorizontalSegment(
+                StartPoint=ifc_file.createIfcCartesianPoint(s.start_point),
+                StartDirection=s.start_direction,
+                StartRadiusOfCurvature=s.start_radius_of_curvature,
+                EndRadiusOfCurvature=s.end_radius_of_curvature,
+                SegmentLength=s.segment_length,
+                PredefinedType=s.predefined_type,
+            )
+            for s in segments
+        ]
+        alignment = align_api.create(ifc_file, name="EntrySpiralOnly")
+        _nest_semantic_horizontal_segments(alignment, design_params)
+
+        pis = subject.back_calculate_pis_from_alignment(alignment)
+        assert_close(pis[1]["radius"], self.R, tol=1e-6)
+        assert_close(pis[1]["spiral_in"], self.LS, tol=1e-6)
+        assert_close(pis[1]["spiral_out"], 0.0, tol=1e-6)
+
+    def test_recovers_spiral_spiral_with_no_arc(self):
+        """Spiral lengths chosen so theta1 + theta2 == |delta| exactly ->
+        Δc = 0 -> spiral-spiral, no circular arc segment at all."""
+        hpoints = self._pi_points()
+        delta = math.pi / 3.0
+        spiral_length = delta * self.R  # theta = L/(2R); 2*theta == delta
+        segments = align_api.solve_horizontal_alignment_by_pi_method(hpoints, [(self.R, spiral_length, spiral_length)])
+        assert [s.predefined_type for s in segments] == ["LINE", "CLOTHOID", "CLOTHOID", "LINE"]
+
+        ifc_file = tool.Ifc.get()
+        design_params = [
+            ifc_file.createIfcAlignmentHorizontalSegment(
+                StartPoint=ifc_file.createIfcCartesianPoint(s.start_point),
+                StartDirection=s.start_direction,
+                StartRadiusOfCurvature=s.start_radius_of_curvature,
+                EndRadiusOfCurvature=s.end_radius_of_curvature,
+                SegmentLength=s.segment_length,
+                PredefinedType=s.predefined_type,
+            )
+            for s in segments
+        ]
+        alignment = align_api.create(ifc_file, name="SpiralSpiral")
+        _nest_semantic_horizontal_segments(alignment, design_params)
+
+        pis = subject.back_calculate_pis_from_alignment(alignment)
+        assert len(pis) == 3
+        assert pis[1]["pi_type"] == "CURVE"
+        assert_close(pis[1]["radius"], self.R, tol=1e-6)
+        assert_close(pis[1]["spiral_in"], spiral_length, tol=1e-6)
+        assert_close(pis[1]["spiral_out"], spiral_length, tol=1e-6)
+
+
+class TestBackCalculatePisFromAlignmentAmbiguity(NewIfc4X3):
+    """Refusal path (spec 1.2: "Where derivation is ambiguous the
+    alignment is edited by segment instead") -- two CIRCULARARC segments
+    meeting with no separating LINE is the signature IFC leaves for a
+    join_next compound/reverse curve junction (spec 1.6), which cannot be
+    reduced to a single PI's (radius, spiral_in, spiral_out)."""
+
+    def test_refuses_two_circular_arcs_with_no_separating_line(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="CompoundCurve")
+        _nest_semantic_horizontal_segments(
+            alignment,
+            [
+                _line_dp(ifc_file, (0.0, 0.0), 0.0, 100.0),
+                _arc_dp(ifc_file, (100.0, 0.0), 0.0, 200.0, 50.0),
+                _arc_dp(ifc_file, (140.0, 40.0), 1.0, 150.0, 50.0),
+                _line_dp(ifc_file, (180.0, 80.0), 1.3, 100.0),
+            ],
+        )
+        with pytest.raises(ValueError, match="ambiguous"):
+            subject.back_calculate_pis_from_alignment(alignment)
+
+    def test_refuses_three_spirals_in_a_row(self):
+        """A CLOTHOID-CLOTHOID-CLOTHOID run doesn't match any of the five
+        whitelisted single-PI patterns."""
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="TripleSpiral")
+        _nest_semantic_horizontal_segments(
+            alignment,
+            [
+                _line_dp(ifc_file, (0.0, 0.0), 0.0, 100.0),
+                _clothoid_dp(ifc_file, (100.0, 0.0), 0.0, None, 100.0, 50.0),
+                _clothoid_dp(ifc_file, (150.0, 12.5), 0.5, 100.0, 100.0, 50.0),
+                _clothoid_dp(ifc_file, (200.0, 30.0), 1.0, 100.0, None, 50.0),
+                _line_dp(ifc_file, (240.0, 60.0), 1.3, 100.0),
+            ],
+        )
+        with pytest.raises(ValueError, match="ambiguous"):
+            subject.back_calculate_pis_from_alignment(alignment)
 
 
 class TestCantRotationReferencePset(NewIfc4X3):

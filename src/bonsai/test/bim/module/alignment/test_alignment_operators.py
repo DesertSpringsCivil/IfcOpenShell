@@ -30,6 +30,8 @@ Operators skipped (modal / viewport / file browser):
     pick_pi_from_viewport, enter_pi_edit_mode, enter_pvi_edit_mode, import_alignment_csv
 """
 
+import math
+
 import pytest
 
 import bpy
@@ -698,6 +700,240 @@ class TestSetPiCurveRadius(NewIfc4X3):
         props.is_pi_edit_mode = False
         with pytest.raises(RuntimeError):
             bpy.ops.civil.set_pi_curve_radius("EXEC_DEFAULT", alignment_id=1, pi_index=0, radius=50.0)
+
+
+# ===========================================================================
+# Spiral Transitions & Compound/Reverse Curves (spec 1.5, 1.6)
+# ===========================================================================
+
+
+def _select_pi_row(props, pi_index):
+    """Force _resolve_selected_interior_pi_index's active_pi_index fallback
+    (mirrors TestRemovePi's pattern) so a test can select a PI without
+    needing display_rows populated with the exact row it wants."""
+    props.active_pi_index = pi_index
+    props.display_rows.clear()
+
+
+class TestSetPiSpiral(NewIfc4X3):
+    """Tests for CIVIL_OT_set_pi_spiral (civil.set_pi_spiral) — spec 1.5.
+
+    Writes props.pis only (no IFC write, no geometry engine) — exactly like
+    the inline radius edit flow it extends — so these run ungated.
+    """
+
+    def _three_pis(self):
+        add_pis_to_props([(0.0, 0.0, 0.0), (500.0, 0.0, 0.0), (500.0, 500.0, 0.0)])
+
+    def test_writes_spiral_lengths_in_length_mode(self):
+        create_empty_alignment()
+        props = get_alignment_props()
+        self._three_pis()
+        _select_pi_row(props, 1)
+
+        result = bpy.ops.civil.set_pi_spiral(
+            "EXEC_DEFAULT",
+            pi_index=1,
+            radius=500.0,
+            spiral_mode="LENGTH",
+            spiral_in_length=150.0,
+            spiral_out_length=150.0,
+        )
+
+        assert result == {"FINISHED"}
+        assert props.pis[1].radius == pytest.approx(500.0)
+        assert props.pis[1].spiral_mode == "LENGTH"
+        assert props.pis[1].spiral_in_length == pytest.approx(150.0)
+        assert props.pis[1].spiral_out_length == pytest.approx(150.0)
+
+    def test_writes_spiral_lengths_derived_from_a_value(self):
+        create_empty_alignment()
+        props = get_alignment_props()
+        self._three_pis()
+        _select_pi_row(props, 1)
+
+        # A=300, R=500 -> L=180 (golden worked example).
+        result = bpy.ops.civil.set_pi_spiral(
+            "EXEC_DEFAULT", pi_index=1, radius=500.0, spiral_mode="A_VALUE", spiral_a_in=300.0, spiral_a_out=300.0
+        )
+
+        assert result == {"FINISHED"}
+        assert props.pis[1].spiral_mode == "A_VALUE"
+        assert props.pis[1].spiral_in_length == pytest.approx(180.0)
+        assert props.pis[1].spiral_out_length == pytest.approx(180.0)
+
+    def test_rebuild_shows_spiral_and_curve_rows(self):
+        create_empty_alignment()
+        props = get_alignment_props()
+        self._three_pis()
+        _select_pi_row(props, 1)
+
+        bpy.ops.civil.set_pi_spiral(
+            "EXEC_DEFAULT",
+            pi_index=1,
+            radius=500.0,
+            spiral_mode="LENGTH",
+            spiral_in_length=150.0,
+            spiral_out_length=150.0,
+        )
+
+        spiral_rows = [r for r in props.display_rows if r.display_type == "Spiral"]
+        curve_rows = [r for r in props.display_rows if r.display_type == "Curve"]
+        assert len(spiral_rows) == 2
+        assert len(curve_rows) == 1
+
+    def test_no_ifc_write(self):
+        """props-level only — no real IFC segments are authored."""
+        alignment, alignment_obj = create_empty_alignment()
+        props = get_alignment_props()
+        self._three_pis()
+        _select_pi_row(props, 1)
+
+        bpy.ops.civil.set_pi_spiral(
+            "EXEC_DEFAULT",
+            pi_index=1,
+            radius=500.0,
+            spiral_mode="LENGTH",
+            spiral_in_length=150.0,
+            spiral_out_length=150.0,
+        )
+
+        h_layout = align_api.get_horizontal_layout(alignment)
+        segments = align_api.get_layout_segments(h_layout)
+        assert all(tool.Alignment.is_zero_length_segment(s) for s in segments)
+
+    def test_poll_fails_without_interior_pi_selected(self):
+        create_empty_alignment()
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.set_pi_spiral("EXEC_DEFAULT")
+
+
+class TestJoinCurvesUnjoinCurvesPoll(NewIfc4X3):
+    """Poll-only tests for civil.join_curves / civil.unjoin_curves — no IFC
+    write, so these run ungated."""
+
+    def test_join_poll_fails_without_curve_at_selected_pi(self):
+        create_empty_alignment()
+        props = get_alignment_props()
+        add_pis_to_props([(0.0, 0.0, 0.0), (500.0, 0.0, 0.0), (1000.0, 500.0, 0.0)])
+        _select_pi_row(props, 1)
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.join_curves()
+
+    def test_join_poll_fails_when_next_pi_has_no_curve(self):
+        create_empty_alignment()
+        props = get_alignment_props()
+        add_pis_to_props([(0.0, 0.0, 0.0), (500.0, 0.0, 300.0), (1000.0, 500.0, 0.0), (1500.0, 500.0, 0.0)])
+        _select_pi_row(props, 1)
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.join_curves()
+
+    def test_join_poll_fails_when_already_joined(self):
+        create_empty_alignment()
+        props = get_alignment_props()
+        add_pis_to_props([(0.0, 0.0, 0.0), (500.0, 0.0, 300.0), (1000.0, 500.0, 300.0), (1500.0, 500.0, 0.0)])
+        props.pis[1].join_next = True
+        _select_pi_row(props, 1)
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.join_curves()
+
+    def test_unjoin_poll_fails_when_not_joined(self):
+        create_empty_alignment()
+        props = get_alignment_props()
+        add_pis_to_props([(0.0, 0.0, 0.0), (500.0, 0.0, 300.0), (1000.0, 500.0, 300.0), (1500.0, 500.0, 0.0)])
+        _select_pi_row(props, 1)
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.unjoin_curves()
+
+
+@requires_geometry_engine
+class TestJoinCurvesUnjoinCurves(NewIfc4X3):
+    """End-to-end tests for CIVIL_OT_join_curves / CIVIL_OT_unjoin_curves —
+    spec 1.6. Geometry-gated: the write path goes through
+    _build_alignment_from_active_pis -> align_api.
+    layout_horizontal_alignment_by_pi_method -> create_layout_segment,
+    which needs the geometry engine (ENV LIMIT #9301). The pure
+    solver-level refusal (no IFC, no geometry engine) is covered ungated in
+    test/tool/test_alignment.py::TestJoinNextSolverRefusalPropagatesVerbatim,
+    and poll-only behavior above in TestJoinCurvesUnjoinCurvesPoll.
+    """
+
+    def _symmetric_reverse_curve_pis(self, radius=300.0, deflection_deg=60.0):
+        """A symmetric S-curve (reverse curve): PI1 turns left, PI2 turns
+        right by the same angle, with the PI1-PI2 leg length chosen so both
+        curves' (equal, symmetric) tangent claims sum EXACTLY to that leg —
+        join_next should succeed with no intermediate tangent run."""
+        delta = math.radians(deflection_deg)
+        tangent = radius * math.tan(delta / 2.0)
+        shared_leg = 2.0 * tangent
+
+        pob = (0.0, 0.0, 0.0)
+        pi1 = (1000.0, 0.0, radius)
+        pi2_x = pi1[0] + shared_leg * math.cos(delta)
+        pi2_y = pi1[1] + shared_leg * math.sin(delta)
+        pi2 = (pi2_x, pi2_y, radius)
+        poe = (pi2_x + 500.0, pi2_y, 0.0)
+        return [pob, pi1, pi2, poe]
+
+    def test_join_curves_succeeds_flag_and_junction_row(self):
+        create_empty_alignment()
+        props = get_alignment_props()
+        add_pis_to_props(self._symmetric_reverse_curve_pis())
+        bpy.ops.civil.recalculate_pis()
+
+        _select_pi_row(props, 1)
+        result = bpy.ops.civil.join_curves("EXEC_DEFAULT")
+
+        assert result == {"FINISHED"}
+        assert props.pis[1].join_next is True
+        junction_rows = [r for r in props.display_rows if r.display_type in {"PCC", "PRC"}]
+        assert len(junction_rows) == 1
+        # PI1 turns left, PI2 turns right by the same angle -- opposite
+        # directions -- a point of reverse curvature.
+        assert junction_rows[0].display_type == "PRC"
+
+    def test_join_curves_reverts_flag_on_solver_refusal(self):
+        """PI2 far too close to PI1 for the requested radius -- the tangent
+        closure check must fail, and join_next revert so the table matches
+        what's actually in IFC."""
+        alignment, alignment_obj = create_empty_alignment()
+        ifc_file = tool.Ifc.get()
+        props = get_alignment_props()
+        pob, pi1, pi2, poe = self._symmetric_reverse_curve_pis()
+        pi2_too_close = (pi1[0] + 5.0, pi1[1] + 5.0, pi2[2])
+        add_pis_to_props([pob, pi1, pi2_too_close, poe])
+        bpy.ops.civil.recalculate_pis()
+
+        def _real_segment_count():
+            return len(
+                [s for s in ifc_file.by_type("IfcAlignmentSegment") if not tool.Alignment.is_zero_length_segment(s)]
+            )
+
+        count_before = _real_segment_count()
+
+        _select_pi_row(props, 1)
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.join_curves("EXEC_DEFAULT")
+
+        assert props.pis[1].join_next is False
+        assert _real_segment_count() == count_before
+
+    def test_unjoin_curves_clears_flag_and_junction_row(self):
+        create_empty_alignment()
+        props = get_alignment_props()
+        add_pis_to_props(self._symmetric_reverse_curve_pis())
+        bpy.ops.civil.recalculate_pis()
+        _select_pi_row(props, 1)
+        bpy.ops.civil.join_curves("EXEC_DEFAULT")
+        assert props.pis[1].join_next is True
+
+        _select_pi_row(props, 1)
+        result = bpy.ops.civil.unjoin_curves("EXEC_DEFAULT")
+
+        assert result == {"FINISHED"}
+        assert props.pis[1].join_next is False
+        junction_rows = [r for r in props.display_rows if r.display_type in {"PCC", "PRC"}]
+        assert len(junction_rows) == 0
 
 
 # ===========================================================================
