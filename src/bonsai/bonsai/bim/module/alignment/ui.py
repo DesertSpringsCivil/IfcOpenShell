@@ -424,6 +424,7 @@ class CIVIL_PT_profile_view(Panel):
         col.prop(props, "profile_terrain", text="Terrain")
         col.prop(props, "profile_view_interval", text="Interval")
         col.prop(props, "profile_view_height", text="Height (px)")
+        col.prop(props, "profile_exaggeration", text="Vert. Exaggeration")
 
         layout.separator()
 

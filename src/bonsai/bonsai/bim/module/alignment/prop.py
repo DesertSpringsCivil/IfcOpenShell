@@ -58,6 +58,21 @@ def _terrain_object_poll(self, obj):
     return obj.type == "MESH"
 
 
+def _on_profile_exaggeration_update(self, context):
+    """Push a changed exaggeration onto a live profile view immediately.
+
+    Lazy import to avoid circular imports (prop.py loads before decorator.py).
+    """
+    from . import decorator as alignment_decorator
+
+    profile_view = alignment_decorator.ProfileViewDecorator
+    if profile_view.is_installed:
+        profile_view.vertical_exaggeration = self.profile_exaggeration
+        import bonsai.tool as tool
+
+        tool.Blender.update_viewport()
+
+
 class AlignmentPI(PropertyGroup):
     """Property group for a single PI (Point of Intersection)
 
@@ -358,4 +373,17 @@ class CivilAlignmentProperties(PropertyGroup):
         default=260,
         min=120,
         max=900,
+    )
+
+    profile_exaggeration: FloatProperty(
+        name="Vertical Exaggeration",
+        description=(
+            "Vertical scale of the profile view relative to its horizontal "
+            "scale, like a profile sheet's exaggeration. 0 = auto-fit the "
+            "elevation range to the panel"
+        ),
+        default=0.0,
+        min=0.0,
+        soft_max=20.0,
+        update=_on_profile_exaggeration_update,
     )

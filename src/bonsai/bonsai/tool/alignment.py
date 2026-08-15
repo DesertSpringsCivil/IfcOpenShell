@@ -1830,25 +1830,49 @@ class Alignment:
         rect_width: float,
         rect_height: float,
         elevation_pad_fraction: float = 0.1,
+        vertical_exaggeration: float = 0.0,
     ) -> Optional[ProfileViewTransform]:
         """Build a ProfileViewTransform fitting the sampled profiles to a rect.
 
-        Station bounds come from the data; elevation bounds are padded by
-        ``elevation_pad_fraction`` of the elevation span so the polylines do not
-        touch the plot edges. Returns None if there is nothing to plot.
+        Station bounds come from the data. Elevation bounds depend on
+        ``vertical_exaggeration``:
+
+        - ``0`` (default): auto-fit — bounds hug the data, padded by
+          ``elevation_pad_fraction`` of the elevation span so polylines do not
+          touch the plot edges.
+        - ``> 0``: profile-sheet exaggeration — the vertical scale is locked to
+          ``vertical_exaggeration ×`` the horizontal scale (pixels per unit),
+          centered on the data's elevation midpoint. Data outside the resulting
+          window draws clipped; the axis labels stay true elevations either way.
+
+        Returns None if there is nothing to plot.
         """
         all_points = list(design_points) + list(terrain_points)
         if not all_points:
             return None
         stations = [p[0] for p in all_points]
         elevations = [p[1] for p in all_points]
-        elevation_span = (max(elevations) - min(elevations)) or 1.0
-        pad = elevation_span * elevation_pad_fraction
+        station_min, station_max = min(stations), max(stations)
+
+        if vertical_exaggeration > 0 and rect_width > 0:
+            station_span = (station_max - station_min) or 1.0
+            horizontal_scale = rect_width / station_span  # px per station unit
+            vertical_scale = horizontal_scale * vertical_exaggeration
+            displayed_span = rect_height / vertical_scale
+            elevation_mid = (max(elevations) + min(elevations)) / 2.0
+            elevation_min = elevation_mid - displayed_span / 2.0
+            elevation_max = elevation_mid + displayed_span / 2.0
+        else:
+            elevation_span = (max(elevations) - min(elevations)) or 1.0
+            pad = elevation_span * elevation_pad_fraction
+            elevation_min = min(elevations) - pad
+            elevation_max = max(elevations) + pad
+
         return ProfileViewTransform(
-            station_min=min(stations),
-            station_max=max(stations),
-            elevation_min=min(elevations) - pad,
-            elevation_max=max(elevations) + pad,
+            station_min=station_min,
+            station_max=station_max,
+            elevation_min=elevation_min,
+            elevation_max=elevation_max,
             rect_x=rect_x,
             rect_y=rect_y,
             rect_width=rect_width,

@@ -217,6 +217,8 @@ class ProfileViewDecorator:
     terrain_name = ""
     interval = 10.0
     panel_height = 260
+    # 0 = auto-fit; > 0 locks vertical scale to N× the horizontal scale.
+    vertical_exaggeration = 0.0
 
     # Cached sampled data (data space: lists of (station, elevation))
     design_points = []
@@ -252,13 +254,14 @@ class ProfileViewDecorator:
     COLOR_TEXT = (0.88, 0.88, 0.90, 1.0)
 
     @classmethod
-    def install(cls, context, alignment_id, terrain_obj, interval, panel_height):
+    def install(cls, context, alignment_id, terrain_obj, interval, panel_height, vertical_exaggeration=0.0):
         if cls.is_installed:
             cls.uninstall()
         cls.alignment_id = alignment_id
         cls.terrain_name = terrain_obj.name if terrain_obj else ""
         cls.interval = interval
         cls.panel_height = panel_height
+        cls.vertical_exaggeration = vertical_exaggeration
         cls.refresh()
         handler = cls()
         cls.handlers.append(
@@ -332,7 +335,13 @@ class ProfileViewDecorator:
             return
 
         transform = tool.Alignment.build_profile_view_transform(
-            cls.design_points, cls.terrain_points, rect_x, rect_y, rect_w, rect_h
+            cls.design_points,
+            cls.terrain_points,
+            rect_x,
+            rect_y,
+            rect_w,
+            rect_h,
+            vertical_exaggeration=cls.vertical_exaggeration,
         )
         cls.current_transform = transform
         if transform is None:

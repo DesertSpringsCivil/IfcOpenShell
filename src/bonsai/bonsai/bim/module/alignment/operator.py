@@ -1359,6 +1359,7 @@ class CIVIL_OT_toggle_profile_view(Operator):
                 props.profile_terrain,
                 props.profile_view_interval,
                 props.profile_view_height,
+                vertical_exaggeration=props.profile_exaggeration,
             )
             props.show_profile_view = True
         tool.Blender.update_viewport()
@@ -1389,6 +1390,7 @@ class CIVIL_OT_refresh_profile_view(Operator):
         decorator.terrain_name = props.profile_terrain.name if props.profile_terrain else ""
         decorator.interval = props.profile_view_interval
         decorator.panel_height = props.profile_view_height
+        decorator.vertical_exaggeration = props.profile_exaggeration
         decorator.refresh()
         tool.Blender.update_viewport()
         return {"FINISHED"}

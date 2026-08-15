@@ -1643,6 +1643,25 @@ class TestBuildProfileViewTransform(NewFile):
         assert (transform.rect_x, transform.rect_y) == (10.0, 20.0)
         assert (transform.rect_width, transform.rect_height) == (300.0, 150.0)
 
+    def test_exaggeration_locks_vertical_scale_to_horizontal(self):
+        design = [(0.0, 100.0), (1000.0, 110.0)]
+        transform = subject.build_profile_view_transform(
+            design, [], 0.0, 0.0, 500.0, 200.0, vertical_exaggeration=10.0
+        )
+        # Horizontal scale: 500 px / 1000 units = 0.5 px/unit; ×10 exaggeration
+        # gives 5 px/unit vertically → 200 px shows 40 units, centered on 105.
+        assert_close(transform.elevation_min, 85.0)
+        assert_close(transform.elevation_max, 125.0)
+
+    def test_zero_exaggeration_keeps_auto_fit_with_padding(self):
+        design = [(0.0, 100.0), (1000.0, 110.0)]
+        transform = subject.build_profile_view_transform(
+            design, [], 0.0, 0.0, 500.0, 200.0, vertical_exaggeration=0.0
+        )
+        # Auto-fit pads the raw [100, 110] range by 10% of the span each side.
+        assert_close(transform.elevation_min, 99.0)
+        assert_close(transform.elevation_max, 111.0)
+
 
 # ---------------------------------------------------------------------------
 # sample_design_profile / sample_terrain_profile  (D2 profile sampling)
@@ -1769,6 +1788,7 @@ class TestProfileAndD3Registration(NewFile):
         assert hasattr(props, "show_profile_view")
         assert hasattr(props, "profile_view_interval")
         assert hasattr(props, "profile_view_height")
+        assert hasattr(props, "profile_exaggeration")
 
 
 # ---------------------------------------------------------------------------
