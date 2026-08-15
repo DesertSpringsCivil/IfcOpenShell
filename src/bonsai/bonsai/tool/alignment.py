@@ -457,27 +457,19 @@ class Alignment:
         import ifcopenshell.util.element
 
         ifc_file = tool.Ifc.get()
-        existing = ifcopenshell.util.element.get_pset(
-            alignment, "Pset_SaikeiDesignCriteria", should_inherit=False
-        )
+        existing = ifcopenshell.util.element.get_pset(alignment, "Pset_SaikeiDesignCriteria", should_inherit=False)
         if existing:
             pset_entity = ifc_file.by_id(existing["id"])
         else:
-            pset_entity = ifcopenshell.api.pset.add_pset(
-                ifc_file, product=alignment, name="Pset_SaikeiDesignCriteria"
-            )
-        ifcopenshell.api.pset.edit_pset(
-            ifc_file, pset=pset_entity, properties={"DesignSpeed": float(design_speed)}
-        )
+            pset_entity = ifcopenshell.api.pset.add_pset(ifc_file, product=alignment, name="Pset_SaikeiDesignCriteria")
+        ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset_entity, properties={"DesignSpeed": float(design_speed)})
 
     @classmethod
     def get_design_criteria(cls, alignment: "ifcopenshell.entity_instance") -> Optional[float]:
         """Return the persisted design speed, or None when never set."""
         import ifcopenshell.util.element
 
-        pset = ifcopenshell.util.element.get_pset(
-            alignment, "Pset_SaikeiDesignCriteria", should_inherit=False
-        )
+        pset = ifcopenshell.util.element.get_pset(alignment, "Pset_SaikeiDesignCriteria", should_inherit=False)
         if pset and pset.get("DesignSpeed") is not None:
             return float(pset["DesignSpeed"])
         return None
@@ -581,8 +573,13 @@ class Alignment:
 
         if num_pvis == 0:
             return PVIGeometryResult(
-                stations=[], elevations=[], grades=[], k_values=[],
-                bvc_stations=[], evc_stations=[], total_length=0.0,
+                stations=[],
+                elevations=[],
+                grades=[],
+                k_values=[],
+                bvc_stations=[],
+                evc_stations=[],
+                total_length=0.0,
             )
 
         stations = [float(pvi[0]) for pvi in pvis]
@@ -590,8 +587,13 @@ class Alignment:
 
         if num_pvis == 1:
             return PVIGeometryResult(
-                stations=stations, elevations=elevations, grades=[], k_values=[],
-                bvc_stations=[], evc_stations=[], total_length=0.0,
+                stations=stations,
+                elevations=elevations,
+                grades=[],
+                k_values=[],
+                bvc_stations=[],
+                evc_stations=[],
+                total_length=0.0,
             )
 
         # Calculate grades between consecutive PVIs (n-1 values)
@@ -614,7 +616,9 @@ class Alignment:
 
         for interior_index in range(num_interior_pvis):
             pvi_index = interior_index + 1  # Interior PVIs are at index 1..(n-2)
-            curve_length = interior_curve_lengths[interior_index] if interior_index < len(interior_curve_lengths) else 0.0
+            curve_length = (
+                interior_curve_lengths[interior_index] if interior_index < len(interior_curve_lengths) else 0.0
+            )
             grade_incoming = grades[interior_index]
             grade_outgoing = grades[interior_index + 1]
             grade_change = grade_outgoing - grade_incoming
@@ -707,11 +711,13 @@ class Alignment:
 
         # First PVI: start of first real segment
         first_dp = real_segments[0].DesignParameters
-        pvis.append({
-            "station": float(first_dp.StartDistAlong),
-            "elevation": float(first_dp.StartHeight),
-            "curve_length": 0.0,
-        })
+        pvis.append(
+            {
+                "station": float(first_dp.StartDistAlong),
+                "elevation": float(first_dp.StartHeight),
+                "curve_length": 0.0,
+            }
+        )
 
         # Interior PVIs: one per PARABOLICARC segment
         for seg in real_segments:
@@ -725,11 +731,13 @@ class Alignment:
             pvi_station = float(dp.StartDistAlong) + horizontal_length / 2.0
             # Elevation at PVI = BVC elevation extended by back tangent grade
             pvi_elevation = float(dp.StartHeight) + float(dp.StartGradient) * (horizontal_length / 2.0)
-            pvis.append({
-                "station": pvi_station,
-                "elevation": pvi_elevation,
-                "curve_length": horizontal_length,
-            })
+            pvis.append(
+                {
+                    "station": pvi_station,
+                    "elevation": pvi_elevation,
+                    "curve_length": horizontal_length,
+                }
+            )
 
         # Last PVI: end of last real segment
         last_dp = real_segments[-1].DesignParameters
@@ -739,11 +747,13 @@ class Alignment:
             (float(last_dp.StartGradient) + float(last_dp.EndGradient)) / 2.0 * float(last_dp.HorizontalLength)
         )
         if abs(last_station - pvis[-1]["station"]) > 1e-6:
-            pvis.append({
-                "station": last_station,
-                "elevation": last_elevation,
-                "curve_length": 0.0,
-            })
+            pvis.append(
+                {
+                    "station": last_station,
+                    "elevation": last_elevation,
+                    "curve_length": 0.0,
+                }
+            )
 
         return pvis
 
@@ -771,9 +781,7 @@ class Alignment:
             return []
 
         collection = (
-            alignment_obj.users_collection[0]
-            if alignment_obj.users_collection
-            else bpy.context.scene.collection
+            alignment_obj.users_collection[0] if alignment_obj.users_collection else bpy.context.scene.collection
         )
         alignment_id = alignment.id()
         empties = []
@@ -812,7 +820,8 @@ class Alignment:
             List of PVI EMPTY objects, sorted by pvi_index
         """
         empties = [
-            obj for obj in bpy.data.objects
+            obj
+            for obj in bpy.data.objects
             if obj.get("civil_is_pvi_empty") and obj.get("civil_alignment_id") == alignment_id
         ]
         empties.sort(key=lambda e: e.get("civil_pvi_index", 0))
@@ -834,9 +843,7 @@ class Alignment:
         return len(empties)
 
     @classmethod
-    def collect_pvis_from_empties_vertical(
-        cls, alignment_id: int
-    ) -> Tuple[List[Tuple[float, float]], List[float]]:
+    def collect_pvis_from_empties_vertical(cls, alignment_id: int) -> Tuple[List[Tuple[float, float]], List[float]]:
         """Gather current PVI positions from EMPTY objects.
 
         Reads the profile-space positions of PVI empties (X=station, Z=elevation)
@@ -859,7 +866,7 @@ class Alignment:
         lengths = []
 
         for i, empty in enumerate(empties):
-            station = empty.location.x   # Profile space: X = station
+            station = empty.location.x  # Profile space: X = station
             elevation = empty.location.z  # Profile space: Z = elevation
             vpoints.append((station, elevation))
 
@@ -1191,9 +1198,11 @@ class Alignment:
 
         ifc_file = tool.Ifc.get()
         # Station -> distance along the horizontal alignment (model units).
+        # None means the station falls inside a forward (gap) station equation
+        # (spec 4.3) -- there is no physical point on the alignment for it.
         distance_along = align_api.distance_along_from_station(ifc_file, alignment, station)
-        if distance_along < -1e-9:
-            return None  # station precedes the start of the alignment
+        if distance_along is None or distance_along < -1e-9:
+            return None  # station precedes the start of the alignment, or is an equation gap
 
         # Reject stations beyond the end (engine would silently extrapolate).
         total_length = cls.get_alignment_length(alignment)
@@ -1267,12 +1276,8 @@ class Alignment:
         ifc_file = tool.Ifc.get()
 
         # Create and nest the horizontal layout
-        h_layout = ifc_file.createIfcAlignmentHorizontal(
-            GlobalId=ifcopenshell.guid.new()
-        )
-        ifcopenshell.api.nest.assign_object(
-            ifc_file, related_objects=[h_layout], relating_object=alignment
-        )
+        h_layout = ifc_file.createIfcAlignmentHorizontal(GlobalId=ifcopenshell.guid.new())
+        ifcopenshell.api.nest.assign_object(ifc_file, related_objects=[h_layout], relating_object=alignment)
 
         # Create geometric representation (curves) for the alignment
         align_api._create_geometric_representation(ifc_file, alignment)
@@ -1280,9 +1285,7 @@ class Alignment:
         # Add stationing referent (required by segment creation API)
         start_station = 0.0
         station_name = ifcopenshell.util.alignment.station_as_string(ifc_file, start_station)
-        align_api.add_stationing_referent(
-            ifc_file, alignment, 0.0, start_station, station_name, alignment
-        )
+        align_api.add_stationing_referent(ifc_file, alignment, 0.0, start_station, station_name, alignment)
 
         # Add zero-length terminal segment
         _add_zero_length_segment(ifc_file, h_layout)
@@ -1296,9 +1299,7 @@ class Alignment:
             RepresentationType="Segment",
             Items=(curve.Segments[-1],),
         )
-        product = ifc_file.createIfcProductDefinitionShape(
-            Representations=(axis_representation,)
-        )
+        product = ifc_file.createIfcProductDefinitionShape(Representations=(axis_representation,))
         zero_length_segment = h_layout.IsNestedBy[0].RelatedObjects[-1]
         zero_length_segment.ObjectPlacement = alignment.ObjectPlacement
         zero_length_segment.Representation = product
@@ -1584,9 +1585,7 @@ class Alignment:
         ifc_file = tool.Ifc.get()
         alignment = align_api.create_from_csv(ifc_file, filepath)
         for site in ifc_file.by_type("IfcSite"):
-            ifcopenshell.api.spatial.reference_structure(
-                ifc_file, products=[alignment], relating_structure=site
-            )
+            ifcopenshell.api.spatial.reference_structure(ifc_file, products=[alignment], relating_structure=site)
         return alignment
 
     @classmethod
@@ -3630,3 +3629,449 @@ class Alignment:
                     break
 
         return result
+
+    # =========================================================================
+    # Stationing Referents (spec Section 4)
+    # =========================================================================
+    # Station equations and event referents below all key off the SAME
+    # distance_along <-> station conversion
+    # (align_api.distance_along_from_station / station_from_distance_along)
+    # that the alignment API's stationing nest already respects station
+    # equations for -- so once a referent exists here, every downstream
+    # reader (the referent list, format_station, the profile view,
+    # get_station_ticks, ...) sees the updated stationing automatically. No
+    # separate "equation table" is maintained anywhere.
+
+    # Pset used to remember which IfcRelNests a previous commit_layout_change
+    # / add_event_referent call created, so repeat calls regenerate/append IN
+    # PLACE instead of accumulating orphan nests with duplicate referents.
+    # ifcopenshell.api.alignment.update_key_point_referents deliberately has
+    # no such lookup of its own -- see its docstring -- callers are expected
+    # to track and pass the nest back in themselves.
+    _NEST_TRACKING_PSET = "Pset_SaikeiAlignment"
+    _KEY_POINT_NEST_PROP = "KeyPointNestId"
+    _EVENTS_NEST_PROP = "EventsNestId"
+
+    @classmethod
+    def _get_tracked_nest(
+        cls, entity: "ifcopenshell.entity_instance", prop_name: str
+    ) -> Optional["ifcopenshell.entity_instance"]:
+        """Return the IfcRelNests previously recorded on ``entity`` under
+        ``prop_name`` (Pset_SaikeiAlignment), or None if never set or stale
+        (e.g. deleted since it was recorded)."""
+        import ifcopenshell.util.element
+
+        pset = ifcopenshell.util.element.get_pset(entity, cls._NEST_TRACKING_PSET, should_inherit=False)
+        if not pset or pset.get(prop_name) is None:
+            return None
+        ifc_file = tool.Ifc.get()
+        try:
+            nest = ifc_file.by_id(int(pset[prop_name]))
+        except RuntimeError:
+            return None
+        return nest if nest.is_a("IfcRelNests") else None
+
+    @classmethod
+    def _set_tracked_nest(
+        cls, entity: "ifcopenshell.entity_instance", prop_name: str, nest: "ifcopenshell.entity_instance"
+    ) -> None:
+        """Persist ``nest``'s id on ``entity`` under ``prop_name`` for a
+        later ``_get_tracked_nest`` lookup (mirrors ``set_design_criteria`` /
+        ``set_cant_rotation_reference``'s pset-upsert pattern)."""
+        import ifcopenshell.api.pset
+        import ifcopenshell.util.element
+
+        ifc_file = tool.Ifc.get()
+        existing = ifcopenshell.util.element.get_pset(entity, cls._NEST_TRACKING_PSET, should_inherit=False)
+        if existing:
+            pset_entity = ifc_file.by_id(existing["id"])
+        else:
+            pset_entity = ifcopenshell.api.pset.add_pset(ifc_file, product=entity, name=cls._NEST_TRACKING_PSET)
+        ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset_entity, properties={prop_name: nest.id()})
+
+    @classmethod
+    def commit_layout_change(cls, alignment: "ifcopenshell.entity_instance") -> int:
+        """THE single post-write funnel every operation that (re)writes
+        horizontal, vertical, or cant layout segments should call once its
+        IFC write has succeeded (spec 4.2): core.exit_pi_edit_mode /
+        core.exit_pvi_edit_mode / core.update_cant_segments, and the two
+        operator-layer write paths that predate core routing for their
+        alignment_tool calls (CIVIL_OT_recalculate_pis's
+        ``_build_alignment_from_active_pis`` helper, and
+        CIVIL_OT_recalculate_pvis).
+
+        For each layout that exists on ``alignment`` (horizontal, vertical,
+        cant -- only those actually present are processed), regenerates
+        that layout's key-point referent nest via
+        ``update_key_point_referents(clear=True)``, reusing the SAME
+        IfcRelNests across calls (via ``_get_tracked_nest`` /
+        ``_set_tracked_nest``) so repeated commits regenerate in place
+        instead of accumulating orphan nests with duplicate referents.
+
+        A ``RuntimeError`` raised by the geometry engine (the win64
+        packaging gap, IfcOpenShell#9301 -- "No geometry mapping
+        registered") is caught NARROWLY per layout: that layout's
+        key-point referents are simply skipped this time, but the commit as
+        a whole -- and the caller's already-successful IFC write -- is
+        never failed because of it. Any other RuntimeError re-raises.
+
+        Also refreshes a live ``StationTickDecorator`` overlay (spec 4.1),
+        if one is currently installed, so station ticks stay in sync with
+        the segments that were just (re)written.
+
+        Returns:
+            Total count of key-point referents (re)created across all
+            layouts that were successfully processed (0 if none were, e.g.
+            no geometry engine available anywhere).
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        ifc_file = tool.Ifc.get()
+        total = 0
+
+        for get_layout in (cls.get_horizontal_layout, cls.get_vertical_layout, cls.get_cant_layout):
+            layout = get_layout(alignment)
+            if layout is None:
+                continue
+            existing_nest = cls._get_tracked_nest(layout, cls._KEY_POINT_NEST_PROP)
+            try:
+                nest = align_api.update_key_point_referents(ifc_file, layout, rel_nests=existing_nest, clear=True)
+            except RuntimeError as e:
+                if "geometry mapping" not in str(e).lower():
+                    raise
+                continue
+            cls._set_tracked_nest(layout, cls._KEY_POINT_NEST_PROP, nest)
+            total += len(nest.RelatedObjects)
+
+        from bonsai.bim.module.alignment import decorator as alignment_decorator
+
+        tick_decorator = alignment_decorator.StationTickDecorator
+        if tick_decorator.is_installed:
+            tick_decorator.refresh()
+
+        return total
+
+    @classmethod
+    def get_station_ticks(
+        cls, alignment: "ifcopenshell.entity_instance", interval: float
+    ) -> List[Tuple[Tuple[float, float, float], Tuple[float, float, float], float]]:
+        """Sample station-tick positions along ``alignment`` for the
+        viewport tick/label overlay (spec 4.1).
+
+        Ticks land at round STATION values (start_station, start_station +
+        interval, ...), matching civil-engineering drafting convention --
+        NOT at even distance-along spacing -- so ticks stay at round
+        station numbers even across a station equation (see
+        ``_station_samples``, shared with ``sample_design_profile``'s D2
+        sampling). Each tick is evaluated via
+        ``evaluate_alignment_at_station``, so this degrades gracefully:
+        - No geometry engine available (IfcOpenShell#9301) -> every station
+          evaluates to None -> [] is returned.
+        - A station inside a forward (gap) station equation -> that single
+          tick is skipped; the rest are unaffected.
+
+        Args:
+            alignment: The IfcAlignment entity.
+            interval: Spacing between ticks, in station units (project
+                length units).
+
+        Returns:
+            List of ``(position_xyz, direction_xyz, station)`` tuples, one
+            per tick that could be evaluated. ``position_xyz`` is scaled to
+            Blender viewport (BU) space -- the same convention
+            ``create_3d_alignment_object`` uses -- so callers
+            (``StationTickDecorator``) draw it directly with no further
+            unit conversion. ``direction_xyz`` is the (already unit-length,
+            scale-invariant) tangent vector.
+        """
+        import ifcopenshell.util.unit
+
+        length = cls.get_alignment_length(alignment)
+        if not length or length <= 0:
+            return []
+        start_station = cls.get_alignment_start_station(alignment)
+        unit_scale = ifcopenshell.util.unit.calculate_unit_scale(tool.Ifc.get())
+
+        ticks = []
+        for station in cls._station_samples(start_station, length, interval):
+            evaluated = cls.evaluate_alignment_at_station(alignment, station)
+            if evaluated is None:
+                continue
+            position = (
+                evaluated.position[0] * unit_scale,
+                evaluated.position[1] * unit_scale,
+                evaluated.position[2] * unit_scale,
+            )
+            ticks.append((position, evaluated.tangent, evaluated.station))
+        return ticks
+
+    @classmethod
+    def get_referents(cls, alignment: "ifcopenshell.entity_instance") -> List[dict]:
+        """Return every IfcReferent nested (directly, via any IfcRelNests)
+        on ``alignment`` -- spec 4.2's referent list: stationing referents
+        (STATION, from ``add_stationing_referent`` / the station-equation
+        wrapper below), key-point referents (POSITION, from
+        ``commit_layout_change`` -> ``update_key_point_referents``), and
+        event referents (SUPERELEVATIONEVENT / WIDTHEVENT, from
+        ``add_event_referent``) alike.
+
+        Referents positioned via ``ifcopenshell.api.alignment.
+        add_positioning_referent`` are NOT nested to the alignment at all
+        (that API links them to their ``positioned_product`` via
+        ``IfcRelPositions`` instead, by design -- see its docstring) so they
+        never appear here: this is the alignment's own referent list, not a
+        global referent index.
+
+        Args:
+            alignment: The IfcAlignment entity.
+
+        Returns:
+            Dicts sorted by station ascending (entries with no resolvable
+            Pset_Stationing.Station sort last): ``{"id", "name",
+            "predefined_type", "station", "is_equation",
+            "incoming_station"}``. ``station`` / ``incoming_station`` are
+            ``None`` when Pset_Stationing / its ``IncomingStation`` is
+            absent.
+        """
+        import ifcopenshell.util.element
+
+        seen_ids = set()
+        referents = []
+        for rel in alignment.IsNestedBy or []:
+            for obj in rel.RelatedObjects or []:
+                if not obj.is_a("IfcReferent") or obj.id() in seen_ids:
+                    continue
+                seen_ids.add(obj.id())
+
+                pset = ifcopenshell.util.element.get_pset(obj, "Pset_Stationing", should_inherit=False)
+                station = None
+                incoming_station = None
+                if pset:
+                    if pset.get("Station") is not None:
+                        station = float(pset["Station"])
+                    if pset.get("IncomingStation") is not None:
+                        incoming_station = float(pset["IncomingStation"])
+
+                referents.append(
+                    {
+                        "id": obj.id(),
+                        "name": obj.Name or "",
+                        "predefined_type": obj.PredefinedType,
+                        "station": station,
+                        "is_equation": incoming_station is not None,
+                        "incoming_station": incoming_station,
+                    }
+                )
+
+        referents.sort(key=lambda r: (r["station"] is None, r["station"] if r["station"] is not None else 0.0))
+        return referents
+
+    @classmethod
+    def distance_along_from_station(cls, alignment: "ifcopenshell.entity_instance", station: float) -> Optional[float]:
+        """Thin wrapper over ``align_api.distance_along_from_station`` (spec
+        4.3) -- resolves a station (respecting any existing station
+        equations) to a distance along the alignment, or None if the
+        station falls inside a forward (gap) equation."""
+        import ifcopenshell.api.alignment as align_api
+
+        return align_api.distance_along_from_station(tool.Ifc.get(), alignment, station)
+
+    @classmethod
+    def add_station_equation_referent(
+        cls,
+        alignment: "ifcopenshell.entity_instance",
+        distance_along: float,
+        back_station: float,
+        ahead_station: float,
+    ) -> "ifcopenshell.entity_instance":
+        """Author a station-equation STATION referent (spec 4.3): the point
+        at ``distance_along`` where stationing switches from
+        ``back_station`` (incoming, in the EXISTING sequence) to
+        ``ahead_station`` (outgoing) -- a gap (ahead > back) or an overlap
+        (ahead < back) are both legal surveying practice; only refusing an
+        equal back/ahead pair is ``core.add_station_equation``'s job, not
+        this thin authoring wrapper's.
+
+        A thin wrapper over ``align_api.add_stationing_referent``'s
+        ``incoming_station`` parameter -- the exact mechanism
+        ``distance_along_from_station`` / ``station_from_distance_along``
+        already key off of, so every downstream reader (the referent list,
+        ``format_station``, the profile view, ``get_station_ticks``, ...)
+        respects the equation automatically once this referent exists; no
+        separate "equation table" is maintained anywhere.
+
+        Returns:
+            The created IfcReferent (``PredefinedType="STATION"``).
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        ifc_file = tool.Ifc.get()
+        name = f"STA EQN {cls.format_station(back_station)}={cls.format_station(ahead_station)}"
+        return align_api.add_stationing_referent(
+            ifc_file,
+            name=name,
+            alignment=alignment,
+            distance_along=distance_along,
+            station=ahead_station,
+            incoming_station=back_station,
+        )
+
+    @classmethod
+    def add_event_referent(
+        cls,
+        alignment: "ifcopenshell.entity_instance",
+        event_type: str,
+        station: float,
+        name: str = "",
+        value: Optional[float] = None,
+    ) -> "ifcopenshell.entity_instance":
+        """Author an event referent (spec 4.4): a station-located marker
+        (``SUPERELEVATIONEVENT`` or ``WIDTHEVENT``) for a future
+        corridor-consuming event; carries no geometry consequence of its
+        own here (corridor generation, when it exists, is the eventual
+        consumer -- out of scope for this pass).
+
+        Mirrors ``align_api.add_stationing_referent``'s IfcReferent +
+        placement construction (basis-curve ``IfcLinearPlacement`` when the
+        alignment has a real composite curve, ``IfcLocalPlacement``
+        fallback otherwise) -- that function hardcodes
+        ``PredefinedType="STATION"`` so it cannot be reused directly for an
+        event referent. Nested into a DEDICATED events ``IfcRelNests``
+        (tracked via ``Pset_SaikeiAlignment.EventsNestId`` on the alignment,
+        alongside the per-layout key-point nest tracking above) -- not the
+        stationing nest (``get_stationing_nest`` filters to
+        ``PredefinedType=="STATION"`` only, so an event referent nested
+        there would never be found again by that lookup) and not a
+        key-point nest (those are wholly owned and periodically wiped by
+        ``commit_layout_change``).
+
+        Args:
+            alignment: The IfcAlignment entity.
+            event_type: ``"SUPERELEVATIONEVENT"`` or ``"WIDTHEVENT"``.
+            station: Station value for the event (project stationing;
+                station equations are NOT resolved to a precise
+                distance_along here -- if the station falls inside a gap,
+                the referent is still recorded at distance_along 0.0 rather
+                than silently dropped; corridor consumption, out of scope,
+                would need to handle that same ambiguity itself).
+            name: Referent name; auto-generated from the formatted station
+                and event type when blank.
+            value: Optional payload value (e.g. target superelevation or
+                width), recorded in ``Pset_SaikeiEvent.Value`` when given.
+
+        Returns:
+            The created IfcReferent.
+        """
+        import ifcopenshell.api.alignment as align_api
+        import ifcopenshell.api.pset
+        import ifcopenshell.guid
+
+        ifc_file = tool.Ifc.get()
+
+        distance_along = align_api.distance_along_from_station(ifc_file, alignment, station)
+        if distance_along is None:
+            distance_along = 0.0
+
+        curve = align_api.get_basis_curve(alignment)
+        if curve and curve.is_a("IfcCompositeCurve") and 0 < len(curve.Segments):
+            object_placement = ifc_file.createIfcLinearPlacement(
+                RelativePlacement=ifc_file.createIfcAxis2PlacementLinear(
+                    Location=ifc_file.createIfcPointByDistanceExpression(
+                        DistanceAlong=ifc_file.createIfcLengthMeasure(distance_along),
+                        OffsetLateral=None,
+                        OffsetVertical=None,
+                        OffsetLongitudinal=None,
+                        BasisCurve=curve,
+                    )
+                ),
+            )
+            # Deliberately NOT calling align_api.update_fallback_position
+            # here (unlike add_stationing_referent, which this otherwise
+            # mirrors): that helper's ENTIRE job is populating
+            # IfcLinearPlacement.CartesianPosition, an OPTIONAL fallback for
+            # consumers that cannot resolve parametric placements -- not
+            # required for a valid, complete semantic model, and computing
+            # it requires the geometry engine (ifcopenshell.util.placement.
+            # get_local_placement -> ifcopenshell.geom.create_shape). Event
+            # referents are a Saikei extension, not an upstream API
+            # behavior to mirror exactly, so this keeps add_event_referent
+            # fully semantic -- consistent with "semantic authoring works"
+            # even where geometry evaluation doesn't (IfcOpenShell#9301).
+        else:
+            object_placement = ifc_file.createIfcLocalPlacement(
+                PlacementRelTo=None,
+                RelativePlacement=ifc_file.createIfcAxis2Placement2D(
+                    Location=ifc_file.createIfcCartesianPoint(
+                        alignment.ObjectPlacement.RelativePlacement.Location.Coordinates
+                    )
+                ),
+            )
+
+        referent_name = name or f"{cls.format_station(station)} ({event_type.replace('EVENT', '').title()} Event)"
+
+        referent = ifc_file.createIfcReferent(
+            GlobalId=ifcopenshell.guid.new(),
+            OwnerHistory=None,
+            Name=referent_name,
+            Description=None,
+            ObjectType=None,
+            ObjectPlacement=object_placement,
+            Representation=None,
+            PredefinedType=event_type,
+        )
+
+        pset_stationing = ifcopenshell.api.pset.add_pset(ifc_file, product=referent, name="Pset_Stationing")
+        ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset_stationing, properties={"Station": float(station)})
+
+        if value is not None:
+            pset_event = ifcopenshell.api.pset.add_pset(ifc_file, product=referent, name="Pset_SaikeiEvent")
+            ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset_event, properties={"Value": float(value)})
+
+        nest = cls._get_tracked_nest(alignment, cls._EVENTS_NEST_PROP)
+        if nest is None:
+            nest = ifc_file.createIfcRelNests(
+                GlobalId=ifcopenshell.guid.new(), RelatingObject=alignment, RelatedObjects=(referent,)
+            )
+            cls._set_tracked_nest(alignment, cls._EVENTS_NEST_PROP, nest)
+        else:
+            nest.RelatedObjects = tuple(nest.RelatedObjects) + (referent,)
+
+        return referent
+
+    @classmethod
+    def remove_referent(cls, alignment: "ifcopenshell.entity_instance", referent_id: int) -> None:
+        """Delete a referent entity (spec 4.1, "Deletable"): its
+        Pset_Stationing / Pset_SaikeiEvent property sets, its
+        ObjectPlacement (if exclusively owned by it), and finally the
+        referent itself. Mirrors the alignment API's own (private,
+        non-exported) ``_remove_referent`` cleanup used internally by
+        ``update_key_point_referents(clear=True)``.
+
+        ``file.remove()`` also strips the referent out of any
+        IfcRelNests.RelatedObjects referencing it, so no separate nest
+        bookkeeping is needed here -- including the events / key-point
+        nests tracked above, which simply end up with one fewer entry.
+
+        Args:
+            alignment: The IfcAlignment entity (unused directly -- kept for
+                signature symmetry with the other referent methods, and in
+                case a future revision needs to validate ownership here
+                rather than in core).
+            referent_id: The IFC id of the referent to delete.
+        """
+        import ifcopenshell.api.pset
+        import ifcopenshell.util.element
+
+        ifc_file = tool.Ifc.get()
+        referent = ifc_file.by_id(referent_id)
+
+        for inverse in list(ifc_file.get_inverse(referent)):
+            if inverse.is_a("IfcRelDefinesByProperties"):
+                ifcopenshell.api.pset.remove_pset(ifc_file, product=referent, pset=inverse.RelatingPropertyDefinition)
+
+        object_placement = referent.ObjectPlacement
+        if object_placement and ifc_file.get_total_inverses(object_placement) == 1:
+            referent.ObjectPlacement = None
+            ifcopenshell.util.element.remove_deep2(ifc_file, object_placement)
+
+        ifc_file.remove(referent)

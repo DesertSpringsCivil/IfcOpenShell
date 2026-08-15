@@ -1336,6 +1336,14 @@ class Alignment:
     def remove_cant_layout(cls, alignment): pass
     def write_cant_segments(cls, alignment, points): pass
     def get_horizontal_extent_semantic(cls, alignment): pass
+    # Stationing referents (spec Section 4)
+    def commit_layout_change(cls, alignment): pass
+    def get_station_ticks(cls, alignment, interval): pass
+    def get_referents(cls, alignment): pass
+    def distance_along_from_station(cls, alignment, station): pass
+    def add_station_equation_referent(cls, alignment, distance_along, back_station, ahead_station): pass
+    def add_event_referent(cls, alignment, event_type, station, name="", value=None): pass
+    def remove_referent(cls, alignment, referent_id): pass
 
 
 @interface

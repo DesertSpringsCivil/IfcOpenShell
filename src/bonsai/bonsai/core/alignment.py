@@ -32,7 +32,7 @@ tool/alignment.py. This module only handles:
 """
 
 from __future__ import annotations
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     import ifcopenshell
@@ -343,6 +343,10 @@ def exit_pvi_edit_mode(
         if layout_obj:
             alignment_tool.create_objects_for_layout_segments(v_layout, layout_obj)
 
+        # Regenerate key-point referents for the new vertical segments, and
+        # refresh any live station-tick overlay (spec 4.2 commit funnel).
+        alignment_tool.commit_layout_change(alignment)
+
         return True
     else:
         alignment_tool.remove_pvi_edit_empties(alignment_id)
@@ -422,6 +426,10 @@ def exit_pi_edit_mode(
         layout_obj = ifc_tool.get_object(h_layout)
         if layout_obj:
             alignment_tool.create_objects_for_layout_segments(h_layout, layout_obj)
+
+        # Regenerate key-point referents for the new horizontal segments, and
+        # refresh any live station-tick overlay (spec 4.2 commit funnel).
+        alignment_tool.commit_layout_change(alignment)
 
         return True
     else:
@@ -737,6 +745,11 @@ def update_cant_segments(
         raise ValueError(f"Cant points must fall within the alignment's horizontal extent (0 to {extent:.3f})")
 
     alignment_tool.write_cant_segments(alignment, points)
+
+    # Regenerate key-point referents for the new cant segments, and refresh
+    # any live station-tick overlay (spec 4.2 commit funnel).
+    alignment_tool.commit_layout_change(alignment)
+
     return True
 
 
@@ -769,3 +782,135 @@ def delete_cant_layout(
         raise ValueError(f"Alignment '{alignment.Name}' has no cant layout")
     alignment_tool.remove_cant_layout(alignment)
     return True
+
+
+# =============================================================================
+# Stationing Referents (spec Section 4)
+# =============================================================================
+
+# IfcReferentTypeEnum members spec 4.4's event referents may use. Corridor
+# consumption of these is out of scope here — see tool.Alignment.add_event_referent.
+_VALID_EVENT_TYPES = {"SUPERELEVATIONEVENT", "WIDTHEVENT"}
+
+
+def add_station_equation(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+    back_station: float,
+    ahead_station: float,
+):
+    """Author a station equation (spec 4.3): the point where stationing
+    switches from ``back_station`` (incoming, in the EXISTING stationing
+    sequence) to ``ahead_station`` (outgoing) — a gap when ahead_station >
+    back_station without picking up where the incoming side left off, or an
+    overlap when ahead_station < back_station. Both are legal surveying
+    practice; only a no-op equation (equal back/ahead) is refused.
+
+    Business rules:
+    1. Alignment must exist and be an IfcAlignment.
+    2. back_station != ahead_station (a no-op equation is refused — gap
+       and overlap are both otherwise legal, per spec 4.3).
+    3. back_station must resolve to a distance along the alignment (via
+       alignment_tool.distance_along_from_station) — None means it falls
+       inside an existing equation's gap, which is refused with a specific
+       message rather than silently placing the new equation at distance
+       0.0.
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment
+        back_station: Station value immediately BEFORE the equation, in the
+            alignment's EXISTING stationing
+        ahead_station: Station value immediately AFTER the equation
+
+    Returns:
+        The created IfcReferent (PredefinedType="STATION").
+
+    Raises:
+        ValueError: If validation fails.
+    """
+    alignment = _resolve_alignment(ifc_tool, alignment_id)
+
+    if back_station == ahead_station:
+        raise ValueError("Back and ahead station must differ to define a station equation")
+
+    distance_along = alignment_tool.distance_along_from_station(alignment, back_station)
+    if distance_along is None:
+        raise ValueError(f"Back station {back_station} is not reachable (falls in an existing station equation gap?)")
+
+    return alignment_tool.add_station_equation_referent(alignment, distance_along, back_station, ahead_station)
+
+
+def add_event_referent(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+    event_type: str,
+    station: float,
+    name: str = "",
+    value: "Optional[float]" = None,
+):
+    """Author an event referent (spec 4.4): a station-located marker for a
+    future corridor-consuming event (superelevation or width change) that
+    carries no geometry consequence of its own here — corridor generation,
+    when it exists, is the eventual consumer (out of scope).
+
+    Business rules:
+    1. Alignment must exist and be an IfcAlignment.
+    2. event_type must be one of the supported IfcReferentTypeEnum event
+       kinds: SUPERELEVATIONEVENT, WIDTHEVENT.
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment
+        event_type: "SUPERELEVATIONEVENT" or "WIDTHEVENT"
+        station: Station value for the event
+        name: Optional referent name (auto-generated when blank)
+        value: Optional payload value (e.g. target superelevation/width)
+
+    Returns:
+        The created IfcReferent.
+
+    Raises:
+        ValueError: If validation fails.
+    """
+    alignment = _resolve_alignment(ifc_tool, alignment_id)
+
+    if event_type not in _VALID_EVENT_TYPES:
+        raise ValueError(f"Unknown event type '{event_type}' — expected one of {sorted(_VALID_EVENT_TYPES)}")
+
+    return alignment_tool.add_event_referent(alignment, event_type, station, name, value)
+
+
+def remove_referent(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+    referent_id: int,
+) -> None:
+    """Delete a referent from the alignment's referent list (spec 4.1,
+    "Deletable").
+
+    Business rules:
+    1. Alignment must exist and be an IfcAlignment.
+    2. The referent must actually be one of the alignment's own nested
+       referents (found via alignment_tool.get_referents) — refuses
+       deleting an arbitrary IfcReferent id unrelated to this alignment.
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment
+        referent_id: The IFC ID of the referent to delete
+
+    Raises:
+        ValueError: If validation fails.
+    """
+    alignment = _resolve_alignment(ifc_tool, alignment_id)
+    referents = alignment_tool.get_referents(alignment)
+    if not any(r["id"] == referent_id for r in referents):
+        raise ValueError(f"Referent #{referent_id} is not nested on alignment '{alignment.Name}'")
+    alignment_tool.remove_referent(alignment, referent_id)
