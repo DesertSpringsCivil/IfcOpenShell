@@ -106,6 +106,43 @@ def _on_cant_rotation_reference_update(self, context):
     tool.Alignment.set_cant_rotation_reference(cant_layout, self.cant_rotation_reference)
 
 
+def _on_show_station_labels_update(self, context):
+    """Install/uninstall the station-tick viewport decorator (spec 4.1).
+
+    Unlike the profile view (toggled by a dedicated ``civil.
+    toggle_profile_view`` operator), station ticks have no separate toggle
+    operator — this BoolProperty's ``update`` callback owns the
+    StationTickDecorator's install/uninstall lifecycle directly, per spec.
+    Lazy import to avoid circular imports (prop.py loads before
+    decorator.py).
+    """
+    import bonsai.tool as tool
+
+    from . import decorator as alignment_decorator
+
+    props = context.scene.CivilAlignmentProperties
+    tick_decorator = alignment_decorator.StationTickDecorator
+
+    if self.show_station_labels:
+        tick_decorator.install(context, props.active_alignment_id, props.station_interval)
+    elif tick_decorator.is_installed:
+        tick_decorator.uninstall()
+    tool.Blender.update_viewport()
+
+
+def _on_station_interval_update(self, context):
+    """Refresh a live station-tick overlay when the interval changes."""
+    import bonsai.tool as tool
+
+    from . import decorator as alignment_decorator
+
+    tick_decorator = alignment_decorator.StationTickDecorator
+    if tick_decorator.is_installed:
+        tick_decorator.interval = self.station_interval
+        tick_decorator.refresh()
+        tool.Blender.update_viewport()
+
+
 def _on_profile_exaggeration_update(self, context):
     """Push a changed exaggeration onto a live profile view immediately.
 
@@ -423,6 +460,32 @@ class CantDisplayRow(PropertyGroup):
     violations: StringProperty(name="Violations", default="")
 
 
+class CivilReferentItem(PropertyGroup):
+    """Read-only mirror of one IfcReferent nested on the active alignment
+    (spec 4.2) — populated by ``operator.refresh_referent_list()``, never
+    edited in-place; changes go through the Add/Remove referent operators
+    followed by a fresh sync.
+    """
+
+    referent_id: IntProperty(name="Referent ID", description="IFC entity id of the referent", default=0)
+    referent_name: StringProperty(name="Name", default="")
+    predefined_type: StringProperty(
+        name="Type",
+        description="IfcReferentTypeEnum value (STATION, POSITION, SUPERELEVATIONEVENT, WIDTHEVENT, ...)",
+        default="",
+    )
+    station: FloatProperty(name="Station", default=0.0, precision=2)
+    has_station: BoolProperty(
+        name="Has Station", description="Whether Pset_Stationing.Station could be resolved", default=False
+    )
+    is_equation: BoolProperty(
+        name="Is Station Equation", description="Whether Pset_Stationing.IncomingStation is set", default=False
+    )
+    incoming_station: FloatProperty(
+        name="Incoming Station", description="Meaningful only when is_equation is True", default=0.0, precision=2
+    )
+
+
 class CivilAlignmentProperties(PropertyGroup):
     """Properties for the alignment module"""
 
@@ -498,8 +561,13 @@ class CivilAlignmentProperties(PropertyGroup):
     # Display options
     show_station_labels: BoolProperty(
         name="Show Station Labels",
-        description="Show station labels along alignment",
+        description=(
+            "Show station tick marks and labels along the active alignment "
+            "(spec 4.1). Requires the geometry engine to place ticks — see "
+            "the warning in the Stationing panel if none appear"
+        ),
         default=True,
+        update=_on_show_station_labels_update,
     )
 
     station_interval: FloatProperty(
@@ -508,7 +576,12 @@ class CivilAlignmentProperties(PropertyGroup):
         default=100.0,
         min=1.0,
         unit="LENGTH",
+        update=_on_station_interval_update,
     )
+
+    # ---- Referents (spec Section 4.2) ----
+    referents: CollectionProperty(type=CivilReferentItem)
+    active_referent_index: IntProperty(name="Active Referent", default=0)
 
     # ---- Profile View (D2) ----
     profile_terrain: bpy.props.PointerProperty(

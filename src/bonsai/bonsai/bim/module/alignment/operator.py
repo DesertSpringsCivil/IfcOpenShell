@@ -31,7 +31,7 @@ import ifcopenshell.util.unit
 from bpy_extras.io_utils import ImportHelper
 from bpy_extras.view3d_utils import region_2d_to_origin_3d, region_2d_to_vector_3d, location_3d_to_region_2d
 from bpy.types import Operator
-from bpy.props import StringProperty, FloatProperty, IntProperty
+from bpy.props import StringProperty, FloatProperty, IntProperty, EnumProperty, BoolProperty
 from . import decorator as alignment_decorator
 from bonsai.bim.module.model.polyline import PolylineOperator
 from bonsai.bim.module.model.decorator import PolylineDecorator
@@ -61,6 +61,7 @@ class ImportAlignmentCSV(bpy.types.Operator, tool.Ifc.Operator, ImportHelper):
 
         props.active_alignment_name = alignment.Name or "Imported Alignment"
         props.active_alignment_id = alignment.id()
+        refresh_referent_list(props, alignment)
 
         self.report({"INFO"}, "Imported in %s seconds" % (time.time() - start))
 
@@ -165,6 +166,37 @@ def sync_pis_from_ifc(props):
     # Recalculate geometry and rebuild display
     recalculate_pi_geometry(props)
     return True
+
+
+def refresh_referent_list(props, alignment):
+    """Sync ``props.referents`` (CIVIL_UL_referents' backing collection)
+    from IFC (spec 4.2).
+
+    Called after any operator that adds or removes a referent, on
+    alignment activation (create/import/visualize — mirrors
+    ``sync_pis_from_ifc``'s role for the PI table, one level up: the
+    referent list is read-only, so there is no equivalent "extract from
+    segments" fallback path), and from the manual refresh button
+    (``civil.refresh_referent_list``).
+
+    Args:
+        props: CivilAlignmentProperties
+        alignment: The IfcAlignment entity, or None to just clear the list
+            (e.g. the active alignment was deleted).
+    """
+    props.referents.clear()
+    props.active_referent_index = 0
+    if alignment is None:
+        return
+    for entry in tool.Alignment.get_referents(alignment):
+        item = props.referents.add()
+        item.referent_id = entry["id"]
+        item.referent_name = entry["name"] or ""
+        item.predefined_type = entry["predefined_type"] or ""
+        item.has_station = entry["station"] is not None
+        item.station = entry["station"] if entry["station"] is not None else 0.0
+        item.is_equation = entry["is_equation"]
+        item.incoming_station = entry["incoming_station"] if entry["incoming_station"] is not None else 0.0
 
 
 def on_radius_changed(pi, context):
@@ -285,9 +317,7 @@ def rebuild_display_rows(props):
                     pi_coords[i], pi_coords[i + 1], pi_coords[i + 2], next_pi.radius
                 )
 
-            seg_row.length = tool.Alignment.tangent_segment_length(
-                pi_coords[i], pi_coords[i + 1], start_t, end_t
-            )
+            seg_row.length = tool.Alignment.tangent_segment_length(pi_coords[i], pi_coords[i + 1], start_t, end_t)
 
         i += 1
 
@@ -578,7 +608,9 @@ class CIVIL_OT_pick_pi_from_viewport(bpy.types.Operator, PolylineOperator, tool.
 
     bl_idname = "civil.pick_pi_from_viewport"
     bl_label = "Pick PI from Viewport"
-    bl_description = "Click in the viewport to add PI points with snapping and numeric input. RMB/Enter to finish, ESC to cancel."
+    bl_description = (
+        "Click in the viewport to add PI points with snapping and numeric input. RMB/Enter to finish, ESC to cancel."
+    )
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -804,6 +836,11 @@ def _build_alignment_from_active_pis(context):
     if layout_obj:
         tool.Alignment.create_objects_for_layout_segments(h_layout, layout_obj)
 
+    # Regenerate key-point referents and refresh any live station-tick
+    # overlay (spec 4.2 commit funnel), then resync the referent list UI.
+    tool.Alignment.commit_layout_change(alignment)
+    refresh_referent_list(props, alignment)
+
     tool.Blender.update_viewport()
     return True, f"Updated alignment '{alignment.Name}' with {len(hpoints)} PIs"
 
@@ -969,15 +1006,14 @@ class CIVIL_OT_create_alignment_by_pis(Operator, tool.Ifc.Operator):
 
         # Create full alignment via core → tool → API
         try:
-            alignment = core.create_alignment(
-                tool.Ifc, tool.Alignment, self.alignment_name
-            )
+            alignment = core.create_alignment(tool.Ifc, tool.Alignment, self.alignment_name)
         except ValueError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
 
         props.active_alignment_id = alignment.id()
         props.active_alignment_name = alignment.Name or self.alignment_name
+        refresh_referent_list(props, alignment)
 
         # Clear any existing PIs from previous work
         props.pis.clear()
@@ -1051,9 +1087,7 @@ class CIVIL_OT_create_alignment_by_pi(Operator, tool.Ifc.Operator):
             if h_layout_obj:
                 tool.Alignment.create_objects_for_layout_segments(h_layout, h_layout_obj)
 
-            self.report(
-                {"INFO"}, f"Added {len(hpoints)} PIs to existing alignment '{existing_alignment.Name}'"
-            )
+            self.report({"INFO"}, f"Added {len(hpoints)} PIs to existing alignment '{existing_alignment.Name}'")
 
 
 # CSV import lives on the single upstream operator id `bim.import_alignment_csv`
@@ -1127,19 +1161,15 @@ class CIVIL_OT_add_stationing_referent(Operator, tool.Ifc.Operator):
         # Auto-generate name if not provided
         name = self.name if self.name else tool.Alignment.format_station(self.station)
 
-        # Use the alignment itself as the positioned product
-        # (The referent marks a point on the alignment)
-        positioned_product = alignment
-
         ifcopenshell.api.alignment.add_stationing_referent(
             ifc,
             alignment=alignment,
             distance_along=distance_along,
             station=self.station,
             name=name,
-            positioned_product=positioned_product,
         )
 
+        refresh_referent_list(props, alignment)
         self.report({"INFO"}, f"Added referent '{name}' at station {self.station}")
 
 
@@ -1173,6 +1203,221 @@ class CIVIL_OT_name_segments(Operator, tool.Ifc.Operator):
         ifcopenshell.api.alignment.name_segments(ifc, alignment)
 
         self.report({"INFO"}, "Named alignment segments")
+
+
+class CIVIL_OT_add_station_equation(Operator, tool.Ifc.Operator):
+    """Add a station equation to the active alignment (spec 4.3)"""
+
+    bl_idname = "civil.add_station_equation"
+    bl_label = "Add Station Equation"
+    bl_description = (
+        "Insert a station equation: the point where stationing jumps from a back "
+        "station (in the existing sequence) to an ahead station -- a gap "
+        "(ahead > back) or an overlap (ahead < back) are both legal"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    back_station: FloatProperty(
+        name="Back Station",
+        description="Station immediately before the equation, in the EXISTING stationing",
+        default=0.0,
+    )
+    ahead_station: FloatProperty(
+        name="Ahead Station",
+        description="Station immediately after the equation",
+        default=0.0,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("Select an alignment first")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        props = context.scene.CivilAlignmentProperties
+        self.back_station = props.start_station
+        self.ahead_station = props.start_station
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "back_station")
+        layout.prop(self, "ahead_station")
+        layout.label(text=f"Back:  {tool.Alignment.format_station(self.back_station)}")
+        layout.label(text=f"Ahead: {tool.Alignment.format_station(self.ahead_station)}")
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        alignment = _resolve_active_alignment(context)
+        if alignment is None:
+            self.report({"ERROR"}, "Alignment no longer exists")
+            return {"CANCELLED"}
+
+        try:
+            core.add_station_equation(tool.Ifc, tool.Alignment, alignment.id(), self.back_station, self.ahead_station)
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        refresh_referent_list(props, alignment)
+        self.report(
+            {"INFO"},
+            f"Added station equation {tool.Alignment.format_station(self.back_station)} = "
+            f"{tool.Alignment.format_station(self.ahead_station)}",
+        )
+        return {"FINISHED"}
+
+
+class CIVIL_OT_add_event_referent(Operator, tool.Ifc.Operator):
+    """Add an event referent to the active alignment (spec 4.4)"""
+
+    bl_idname = "civil.add_event_referent"
+    bl_label = "Add Event Referent"
+    bl_description = (
+        "Add a station-located event referent (superelevation or width change) -- "
+        "a marker for future corridor consumption; carries no geometry consequence "
+        "on its own"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    event_type: EnumProperty(
+        name="Event Type",
+        items=[
+            ("SUPERELEVATIONEVENT", "Superelevation Event", "Marks a superelevation change"),
+            ("WIDTHEVENT", "Width Event", "Marks a width change"),
+        ],
+        default="SUPERELEVATIONEVENT",
+    )
+    station: FloatProperty(name="Station", description="Station value for the event", default=0.0)
+    name: StringProperty(name="Name", description="Leave blank to auto-generate", default="")
+    use_value: BoolProperty(name="Set Value", description="Record a payload value on the event", default=False)
+    value: FloatProperty(name="Value", description="Payload value (e.g. target superelevation or width)", default=0.0)
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("Select an alignment first")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        props = context.scene.CivilAlignmentProperties
+        self.station = props.start_station
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "event_type")
+        layout.prop(self, "station")
+        layout.label(text=f"Station notation: {tool.Alignment.format_station(self.station)}")
+        layout.prop(self, "name")
+        row = layout.row(align=True)
+        row.prop(self, "use_value")
+        sub = row.row()
+        sub.enabled = self.use_value
+        sub.prop(self, "value")
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        alignment = _resolve_active_alignment(context)
+        if alignment is None:
+            self.report({"ERROR"}, "Alignment no longer exists")
+            return {"CANCELLED"}
+
+        try:
+            core.add_event_referent(
+                tool.Ifc,
+                tool.Alignment,
+                alignment.id(),
+                self.event_type,
+                self.station,
+                self.name,
+                self.value if self.use_value else None,
+            )
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        refresh_referent_list(props, alignment)
+        self.report({"INFO"}, f"Added {self.event_type.title()} at {tool.Alignment.format_station(self.station)}")
+        return {"FINISHED"}
+
+
+class CIVIL_OT_remove_referent(Operator, tool.Ifc.Operator):
+    """Remove the selected referent from the alignment (spec 4.1, "Deletable")"""
+
+    bl_idname = "civil.remove_referent"
+    bl_label = "Remove Referent"
+    bl_description = "Delete the selected referent"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("Select an alignment first")
+            return False
+        if not (0 <= props.active_referent_index < len(props.referents)):
+            cls.poll_message_set("No referent selected")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        alignment = _resolve_active_alignment(context)
+        if alignment is None:
+            self.report({"ERROR"}, "Alignment no longer exists")
+            return {"CANCELLED"}
+
+        item = props.referents[props.active_referent_index]
+        try:
+            core.remove_referent(tool.Ifc, tool.Alignment, alignment.id(), item.referent_id)
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        refresh_referent_list(props, alignment)
+        self.report({"INFO"}, "Removed referent")
+        return {"FINISHED"}
+
+
+class CIVIL_OT_refresh_referent_list(Operator):
+    """Manually resync the referent list from IFC (spec 4.2)"""
+
+    bl_idname = "civil.refresh_referent_list"
+    bl_label = "Refresh Referents"
+    bl_description = "Reload the referent list from the current IFC state"
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("Select an alignment first")
+            return False
+        return True
+
+    def execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        alignment = _resolve_active_alignment(context)
+        refresh_referent_list(props, alignment)
+        self.report({"INFO"}, f"Loaded {len(props.referents)} referents")
+        return {"FINISHED"}
 
 
 # =============================================================================
@@ -1283,9 +1528,7 @@ class CIVIL_OT_enter_pi_edit_mode(Operator, tool.Ifc.Operator):
 
         # Enter edit mode via core layer (validates and creates empties)
         try:
-            empties = core.enter_pi_edit_mode(
-                tool.Ifc, tool.Alignment, self._alignment_id
-            )
+            empties = core.enter_pi_edit_mode(tool.Ifc, tool.Alignment, self._alignment_id)
         except ValueError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
@@ -1596,15 +1839,17 @@ class CIVIL_OT_enter_pi_edit_mode(Operator, tool.Ifc.Operator):
         try:
             if apply:
                 # Regenerate alignment from new PI positions
-                core.exit_pi_edit_mode(
-                    tool.Ifc, tool.Alignment, self._alignment_id, apply=True
-                )
+                core.exit_pi_edit_mode(tool.Ifc, tool.Alignment, self._alignment_id, apply=True)
+                # exit_pi_edit_mode already ran commit_layout_change — resync
+                # the referent list UI with whatever it (re)authored.
+                try:
+                    refresh_referent_list(props, tool.Ifc.get().by_id(self._alignment_id))
+                except RuntimeError:
+                    pass
                 self.report({"INFO"}, "PI changes applied - alignment updated")
             else:
                 # Just cleanup without regenerating
-                core.exit_pi_edit_mode(
-                    tool.Ifc, tool.Alignment, self._alignment_id, apply=False
-                )
+                core.exit_pi_edit_mode(tool.Ifc, tool.Alignment, self._alignment_id, apply=False)
                 self.report({"INFO"}, "PI Edit Mode cancelled")
         except ValueError as e:
             self.report({"ERROR"}, str(e))
@@ -1737,6 +1982,7 @@ class CIVIL_OT_visualize_3d_alignment(Operator, tool.Ifc.Operator):
         if obj is None:
             self.report({"WARNING"}, "Alignment has no geometry to visualize")
             return {"CANCELLED"}
+        refresh_referent_list(props, _resolve_active_alignment(context))
         self.report({"INFO"}, "3D centerline updated")
 
 
@@ -2120,6 +2366,11 @@ class CIVIL_OT_recalculate_pvis(Operator, tool.Ifc.Operator):
         if layout_obj:
             tool.Alignment.create_objects_for_layout_segments(v_layout, layout_obj)
 
+        # Regenerate key-point referents and refresh any live station-tick
+        # overlay (spec 4.2 commit funnel), then resync the referent list UI.
+        tool.Alignment.commit_layout_change(alignment)
+        refresh_referent_list(props, alignment)
+
         tool.Blender.update_viewport()
         self.report({"INFO"}, f"Updated vertical alignment '{alignment.Name}' with {len(vpoints)} PVIs")
 
@@ -2220,8 +2471,7 @@ class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
     bl_idname = "civil.enter_pvi_edit_mode"
     bl_label = "Edit PVIs"
     bl_description = (
-        "Enter PVI edit mode. Move PVI points with G key. "
-        "Press Enter to apply changes, Escape to cancel."
+        "Enter PVI edit mode. Move PVI points with G key. " "Press Enter to apply changes, Escape to cancel."
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -2334,6 +2584,12 @@ class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
         try:
             if apply:
                 core.exit_pvi_edit_mode(tool.Ifc, tool.Alignment, self._alignment_id, apply=True)
+                # exit_pvi_edit_mode already ran commit_layout_change — resync
+                # the referent list UI with whatever it (re)authored.
+                try:
+                    refresh_referent_list(props, tool.Ifc.get().by_id(self._alignment_id))
+                except RuntimeError:
+                    pass
                 self.report({"INFO"}, "PVI changes applied - vertical alignment updated")
             else:
                 core.exit_pvi_edit_mode(tool.Ifc, tool.Alignment, self._alignment_id, apply=False)
@@ -2609,6 +2865,10 @@ class CIVIL_OT_recalculate_cant(Operator, tool.Ifc.Operator):
         if layout_obj:
             tool.Alignment.create_objects_for_layout_segments(cant_layout, layout_obj)
 
+        # core.update_cant_segments already ran commit_layout_change — just
+        # resync the referent list UI with whatever it (re)authored.
+        refresh_referent_list(props, alignment)
+
         tool.Blender.update_viewport()
         self.report({"INFO"}, f"Updated cant layout with {len(points)} points")
 
@@ -2695,5 +2955,3 @@ class CIVIL_OT_delete_cant_layout(Operator, tool.Ifc.Operator):
         tool.Blender.update_viewport()
         self.report({"INFO"}, "Cant layout deleted")
         return {"FINISHED"}
-
-

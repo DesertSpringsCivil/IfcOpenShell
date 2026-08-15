@@ -28,6 +28,7 @@ import gpu
 import math
 import bonsai.tool as tool
 from bpy.types import SpaceView3D
+from bpy_extras.view3d_utils import location_3d_to_region_2d
 from gpu_extras.batch import batch_for_shader
 from bonsai.tool.alignment import ProfileViewTransform
 
@@ -83,9 +84,7 @@ class PIEditDecorator:
             SpaceView3D.draw_handler_add(handler.draw_tangent_lines_3d, (context,), "WINDOW", "POST_VIEW")
         )
         # POST_PIXEL for 2D screen-space drawing (HUD)
-        cls.handlers.append(
-            SpaceView3D.draw_handler_add(handler.draw_hud, (context,), "WINDOW", "POST_PIXEL")
-        )
+        cls.handlers.append(SpaceView3D.draw_handler_add(handler.draw_hud, (context,), "WINDOW", "POST_PIXEL"))
         cls.is_installed = True
 
     @classmethod
@@ -334,9 +333,7 @@ class ProfileViewDecorator:
         cls.cant_limit_max_applied = cant_limit_max_applied
         cls.refresh()
         handler = cls()
-        cls.handlers.append(
-            SpaceView3D.draw_handler_add(handler.draw_profile, (context,), "WINDOW", "POST_PIXEL")
-        )
+        cls.handlers.append(SpaceView3D.draw_handler_add(handler.draw_profile, (context,), "WINDOW", "POST_PIXEL"))
         cls.is_installed = True
 
     @classmethod
@@ -684,3 +681,158 @@ class ProfileViewDecorator:
     @staticmethod
     def _fmt(value):
         return f"{value:.0f}" if abs(value) >= 100 else f"{value:.1f}"
+
+
+class StationTickDecorator:
+    """Station tick + label overlay (spec 4.1): perpendicular tick marks and
+    station-notation labels drawn along the active alignment at
+    ``CivilAlignmentProperties.station_interval`` spacing, toggled by
+    ``show_station_labels``.
+
+    Viewport decoration only — never model data (mirrors ProfileViewDecorator's
+    framing docstring). Ticks are sampled from ``tool.Alignment.
+    get_station_ticks`` (which itself degrades to ``[]`` without the
+    geometry engine — spec 4.1's "Geometry-graceful" requirement) and
+    cached on the class; ``tool.Alignment.commit_layout_change`` calls
+    ``refresh()`` whenever this decorator is installed, so a live PI/PVI/
+    cant edit keeps ticks in sync with whatever segments actually landed on
+    IFC.
+
+    Simplification vs spec 4.1 ("toggled per alignment; any number may
+    display at once"): this first pass ties the toggle + cache to the
+    single ACTIVE alignment (``CivilAlignmentProperties.active_alignment_id``),
+    like every other Saikei viewport overlay (profile view, cant band).
+    Multi-alignment simultaneous display is a straightforward extension —
+    key the cache by alignment id instead of a single alignment_id/ticks
+    pair — deferred as out of scope for this pass. Likewise, switching the
+    active alignment while the overlay is on does not automatically
+    re-target it (the same limitation ProfileViewDecorator has); re-toggle
+    ``show_station_labels`` or trigger a commit to refresh onto the new
+    alignment.
+    """
+
+    is_installed = False
+    handlers = []
+
+    alignment_id = 0
+    interval = 100.0
+
+    # Cached ticks: [(position_xyz, direction_xyz, station), ...] — see
+    # tool.Alignment.get_station_ticks for the exact contract.
+    ticks = []
+
+    # Half-length of each tick mark, in Blender viewport units (metres).
+    TICK_HALF_LENGTH = 3.0
+
+    COLOR_TICK = (0.9, 0.9, 0.2, 1.0)
+    COLOR_LABEL = (0.95, 0.95, 0.95, 1.0)
+
+    @classmethod
+    def install(cls, context, alignment_id, interval):
+        if cls.is_installed:
+            cls.uninstall()
+        cls.alignment_id = alignment_id
+        cls.interval = interval
+        cls.refresh()
+        handler = cls()
+        cls.handlers.append(SpaceView3D.draw_handler_add(handler.draw_ticks_3d, (context,), "WINDOW", "POST_VIEW"))
+        cls.handlers.append(SpaceView3D.draw_handler_add(handler.draw_labels, (context,), "WINDOW", "POST_PIXEL"))
+        cls.is_installed = True
+
+    @classmethod
+    def uninstall(cls):
+        for handler in cls.handlers:
+            try:
+                SpaceView3D.draw_handler_remove(handler, "WINDOW")
+            except ValueError:
+                pass
+        cls.handlers = []
+        cls.is_installed = False
+        cls.ticks = []
+
+    @classmethod
+    def refresh(cls):
+        """Re-sample ticks from IFC for ``alignment_id`` at ``interval``.
+
+        Silently leaves ``ticks`` empty (never raises) when there is no IFC
+        file, no active alignment, the alignment no longer exists, or the
+        geometry engine is unavailable — ``tool.Alignment.get_station_ticks``
+        already degrades gracefully for all of those.
+        """
+        cls.ticks = []
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None or not cls.alignment_id:
+            return
+        try:
+            alignment = ifc_file.by_id(cls.alignment_id)
+        except RuntimeError:
+            return
+        if not alignment.is_a("IfcAlignment"):
+            return
+        cls.ticks = tool.Alignment.get_station_ticks(alignment, cls.interval)
+
+    def draw_ticks_3d(self, context):
+        cls = StationTickDecorator
+        if not cls.ticks:
+            return
+
+        verts = []
+        indices = []
+        for position, direction, _station in cls.ticks:
+            perp_x, perp_y = -direction[1], direction[0]
+            length = math.hypot(perp_x, perp_y)
+            if length < 1e-9:
+                # Vertical tangent (straight up/down) — no plan-view
+                # perpendicular to draw a tick along; skip it.
+                continue
+            perp_x, perp_y = perp_x / length, perp_y / length
+            half = cls.TICK_HALF_LENGTH
+            base = len(verts)
+            verts.append((position[0] - perp_x * half, position[1] - perp_y * half, position[2]))
+            verts.append((position[0] + perp_x * half, position[1] + perp_y * half, position[2]))
+            indices.append((base, base + 1))
+
+        if not tool.Blender.validate_shader_batch_data(verts, indices):
+            return
+
+        gpu.state.blend_set("ALPHA")
+        gpu.state.depth_test_set("LESS_EQUAL")
+        gpu.state.depth_mask_set(False)
+
+        shader = gpu.shader.from_builtin("POLYLINE_UNIFORM_COLOR")
+        shader.bind()
+        region = context.region
+        shader.uniform_float("viewportSize", (region.width, region.height))
+        shader.uniform_float("lineWidth", 1.5)
+        batch = batch_for_shader(shader, "LINES", {"pos": verts}, indices=indices)
+        shader.uniform_float("color", cls.COLOR_TICK)
+        batch.draw(shader)
+
+        gpu.state.blend_set("NONE")
+        gpu.state.depth_test_set("NONE")
+        gpu.state.depth_mask_set(True)
+
+    def draw_labels(self, context):
+        cls = StationTickDecorator
+        if not cls.ticks:
+            return
+        region = context.region
+        rv3d = context.region_data
+        if region is None or rv3d is None:
+            return
+
+        font_id = 0
+        blf.size(font_id, tool.Blender.scale_font_size(11))
+        blf.enable(font_id, blf.SHADOW)
+        blf.shadow(font_id, 5, 0, 0, 0, 1)
+        blf.color(font_id, *cls.COLOR_LABEL)
+
+        for position, _direction, station in cls.ticks:
+            screen = location_3d_to_region_2d(region, rv3d, position)
+            if screen is None:
+                continue  # behind the camera / off-screen
+            label = tool.Alignment.format_station(station)
+            blf.position(font_id, screen[0] + 4, screen[1] + 4, 0)
+            blf.draw(font_id, label)
+
+        blf.disable(font_id, blf.SHADOW)

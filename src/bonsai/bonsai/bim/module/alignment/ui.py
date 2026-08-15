@@ -232,6 +232,40 @@ class CIVIL_UL_cant_points(UIList):
             layout.label(text="", icon="DECORATE")
 
 
+class CIVIL_UL_referents(UIList):
+    """UIList for the alignment's referent list (spec 4.2): every
+    IfcReferent nested on the alignment — stationing, key-point, and event
+    referents alike. Read-only display; edits happen via the dedicated
+    Add/Remove referent operators, never inline, followed by a fresh
+    ``refresh_referent_list`` sync.
+    """
+
+    _TYPE_ICONS = {
+        "STATION": "EMPTY_AXIS",
+        "POSITION": "EMPTY_ARROWS",
+        "REFERENCEMARKER": "EMPTY_ARROWS",
+        "SUPERELEVATIONEVENT": "INFO",
+        "WIDTHEVENT": "INFO",
+    }
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {"DEFAULT", "COMPACT"}:
+            row = layout.row(align=True)
+            row.label(text="", icon=self._TYPE_ICONS.get(item.predefined_type, "DOT"))
+            row.label(text=item.referent_name or "(unnamed)")
+
+            station_text = tool.Alignment.format_station(item.station) if item.has_station else "—"
+            if item.is_equation:
+                incoming_text = tool.Alignment.format_station(item.incoming_station)
+                row.label(text=f"{incoming_text} -> {station_text}")
+            else:
+                row.label(text=station_text)
+
+        elif self.layout_type == "GRID":
+            layout.alignment = "CENTER"
+            layout.label(text="", icon="DECORATE")
+
+
 # =============================================================================
 # Creation Sub-Panel
 # =============================================================================
@@ -535,6 +569,8 @@ class CIVIL_PT_alignment_stationing(Panel):
         return tool.Blender.should_show_panel(context, "CIVIL", cls.bl_idname) and is_ifc4x3()
 
     def draw(self, context):
+        from . import decorator as alignment_decorator
+
         layout = self.layout
         props = context.scene.CivilAlignmentProperties
 
@@ -544,11 +580,35 @@ class CIVIL_PT_alignment_stationing(Panel):
         box.prop(props, "show_station_labels")
         box.prop(props, "station_interval")
 
+        tick_decorator = alignment_decorator.StationTickDecorator
+        if props.show_station_labels and tick_decorator.is_installed and not tick_decorator.ticks:
+            box.label(text="No ticks — geometry engine unavailable, or nothing to evaluate", icon="ERROR")
+
+        layout.separator()
+
+        # Referent list (spec 4.2)
+        layout.label(text="Referents:")
+        row = layout.row()
+        row.template_list(
+            "CIVIL_UL_referents",
+            "",
+            props,
+            "referents",
+            props,
+            "active_referent_index",
+            rows=6,
+        )
+        col = row.column(align=True)
+        col.operator("civil.refresh_referent_list", icon="FILE_REFRESH", text="")
+        col.operator("civil.remove_referent", icon="REMOVE", text="")
+
         layout.separator()
 
         # Stationing operators
         col = layout.column(align=True)
-        col.operator("civil.add_stationing_referent", icon="EMPTY_AXIS")
+        col.operator("civil.add_stationing_referent", icon="EMPTY_AXIS", text="Add Referent")
+        col.operator("civil.add_station_equation", icon="ARROW_LEFTRIGHT", text="Add Station Equation")
+        col.operator("civil.add_event_referent", icon="EMPTY_ARROWS", text="Add Event Referent")
         col.operator("civil.name_segments", icon="FONT_DATA")
 
 
