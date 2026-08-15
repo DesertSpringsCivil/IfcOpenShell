@@ -2116,7 +2116,7 @@ class TestRequiredKForDesignSpeed(NewFile):
 
 
 class TestDesignCriteriaPset(NewFile):
-    """Design speed persistence on the alignment (Pset_SaikeiDesignCriteria)."""
+    """Design speed persistence on the alignment (SaikeiCivil_DesignCriteria)."""
 
     def _make_alignment(self):
         import ifcopenshell.api.root
@@ -2139,7 +2139,7 @@ class TestDesignCriteriaPset(NewFile):
         subject.set_design_criteria(alignment, 45.0)
         assert subject.get_design_criteria(alignment) == pytest.approx(45.0)
         ifc = tool.Ifc.get()
-        assert len([p for p in ifc.by_type("IfcPropertySet") if p.Name == "Pset_SaikeiDesignCriteria"]) == 1
+        assert len([p for p in ifc.by_type("IfcPropertySet") if p.Name == "SaikeiCivil_DesignCriteria"]) == 1
 
     def test_returns_none_when_never_set(self):
         alignment = self._make_alignment()
@@ -3551,7 +3551,7 @@ class TestAddEventReferent(NewIfc4X3):
         referent = subject.add_event_referent(alignment, "WIDTHEVENT", 300.0, name="Widen", value=3.6)
 
         assert referent.Name == "Widen"
-        pset = ifcopenshell.util.element.get_pset(referent, "Pset_SaikeiEvent", should_inherit=False)
+        pset = ifcopenshell.util.element.get_pset(referent, "SaikeiCivil_Event", should_inherit=False)
         assert_close(pset["Value"], 3.6)
 
     def test_omits_saikei_event_pset_when_no_value_given(self):
@@ -3562,7 +3562,7 @@ class TestAddEventReferent(NewIfc4X3):
 
         referent = subject.add_event_referent(alignment, "SUPERELEVATIONEVENT", 250.0)
 
-        pset = ifcopenshell.util.element.get_pset(referent, "Pset_SaikeiEvent", should_inherit=False)
+        pset = ifcopenshell.util.element.get_pset(referent, "SaikeiCivil_Event", should_inherit=False)
         assert pset is None
 
     def test_nests_events_separately_from_the_stationing_nest_and_reuses_it(self):
@@ -3955,7 +3955,7 @@ class TestBuildOffsetPoints(NewIfc4X3):
 
 class TestOffsetPsetRoundTrip(NewIfc4X3):
     """Tests for Alignment._write_offset_pset() / get_offset_spec() —
-    Pset_SaikeiOffset round-trip (spec 1.7)."""
+    SaikeiCivil_Offset round-trip (spec 1.7)."""
 
     def _make_alignments(self):
         ifc_file = tool.Ifc.get()
@@ -3994,7 +3994,7 @@ class TestOffsetPsetRoundTrip(NewIfc4X3):
         result = subject.get_offset_spec(offset_alignment)
         assert_close(result["offset"], 9.0)
         ifc_file = tool.Ifc.get()
-        psets = [p for p in ifc_file.by_type("IfcPropertySet") if p.Name == "Pset_SaikeiOffset"]
+        psets = [p for p in ifc_file.by_type("IfcPropertySet") if p.Name == "SaikeiCivil_Offset"]
         assert len(psets) == 1
 
 

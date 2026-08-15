@@ -126,7 +126,7 @@ def _on_cant_rotation_reference_update(self, context):
     "Recorded, not assumed": there is no Recalculate-button gate for this
     value (unlike the cant point table) since it has no geometry consequence
     to defer — it is a pure design-intent record, so it is written to
-    Pset_SaikeiCant as soon as the dropdown changes.
+    SaikeiCivil_Cant as soon as the dropdown changes.
     """
     import bonsai.tool as tool
 
@@ -870,7 +870,7 @@ class CivilAlignmentProperties(PropertyGroup):
         name="Rotation Reference",
         description=(
             "Which rail the cant rotation is measured about — recorded for design intent "
-            "and save/reopen round-trip (Pset_SaikeiCant.RotationReference); no geometry "
+            "and save/reopen round-trip (SaikeiCivil_Cant.RotationReference); no geometry "
             "consequence yet, the geometric representation always applies cant per "
             "RailHeadDistance exactly as authored"
         ),
