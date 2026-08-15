@@ -76,7 +76,7 @@ def segment_vertices(file: ifcopenshell.file, segment: entity_instance):
     settings = ifcopenshell.geom.settings()
 
     # get parameters at start of start_segment_curve
-    segment_fn = ifcopenshell_wrapper.map_shape(settings, start_segment_curve.wrapped_data)
+    segment_fn = ifcopenshell_wrapper.map_shape(settings, start_segment_curve)
     segment_evaluator = ifcopenshell_wrapper.function_item_evaluator(settings, segment_fn)
 
     s = segment_evaluator.evaluate(segment_fn.start())
@@ -87,7 +87,7 @@ def segment_vertices(file: ifcopenshell.file, segment: entity_instance):
     sdy = float(start[1, 0])
 
     # get parameters at end of end_segment_curve
-    segment_fn = ifcopenshell_wrapper.map_shape(settings, end_segment_curve.wrapped_data)
+    segment_fn = ifcopenshell_wrapper.map_shape(settings, end_segment_curve)
     segment_evaluator = ifcopenshell_wrapper.function_item_evaluator(settings, segment_fn)
 
     e = segment_evaluator.evaluate(segment_fn.end())

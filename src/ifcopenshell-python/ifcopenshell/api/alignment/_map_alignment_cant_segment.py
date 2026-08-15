@@ -99,7 +99,11 @@ def _map_linear_transition(
     start_point = file.createIfcCartesianPoint(
         (dist_along, math.pow(length, 2.0 / 1.0) / A0 if A0 != 0.0 else 0.0, 0.0)
     )
-    start_direction = math.atan(A1 * math.pow(length, 2.0 / 1.0) / math.fabs(math.pow(A1, 3.0 / 1.0)))
+    # A1 == 0 when the cant does not change over the segment (a flat "transition",
+    # legal per schema); the expression's limit as a1 -> 0 is 0.
+    start_direction = (
+        math.atan(A1 * math.pow(length, 2.0 / 1.0) / math.fabs(math.pow(A1, 3.0 / 1.0))) if A1 != 0.0 else 0.0
+    )
 
     curve_segment = file.createIfcCurveSegment(
         Transition=transition,

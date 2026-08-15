@@ -3585,6 +3585,15 @@ class CIVIL_OT_add_cant_point(Operator):
 
         props.active_cant_point_index = new_index
         rebuild_cant_display_rows(props)
+        # Move the display-row selection to the point just added: the
+        # insert-after resolution above reads active_cant_display_row_index,
+        # so leaving it on the old row makes every subsequent Add insert
+        # after the ORIGINAL point (as midpoints) instead of after the one
+        # just created.
+        for row_index, row in enumerate(props.cant_display_rows):
+            if row.row_type == "POINT" and row.point_index == new_index:
+                props.active_cant_display_row_index = row_index
+                break
         return {"FINISHED"}
 
 

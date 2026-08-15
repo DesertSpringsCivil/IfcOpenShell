@@ -220,7 +220,7 @@ def test_author_transition_curve_alignment():
     curve = ifcopenshell.api.alignment.get_layout_curve(horizontal_layout)
     settings = ifcopenshell.geom.settings()
     for segment, next_segment in zip(curve.Segments[:-1], curve.Segments[1:]):
-        fn = ifcopenshell_wrapper.map_shape(settings, segment.wrapped_data)
+        fn = ifcopenshell_wrapper.map_shape(settings, segment)
         evaluator = ifcopenshell_wrapper.function_item_evaluator(settings, fn)
         end = np.array(evaluator.evaluate(fn.end()))
         end_position = end[0:2, 3]
