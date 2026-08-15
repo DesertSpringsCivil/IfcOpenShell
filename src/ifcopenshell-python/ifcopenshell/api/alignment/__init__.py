@@ -50,6 +50,7 @@ Future versions of this API may support:
 """
 
 from ._get_segment_start_point_label import register_referent_name_callback
+from .add_cant_layout import add_cant_layout
 from .add_positioning_referent import add_positioning_referent
 from .add_stationing_referent import add_stationing_referent
 from .add_vertical_layout import add_vertical_layout
@@ -109,6 +110,7 @@ from .util import *
 
 __all__ = [
     "HorizontalSegmentDefinition",
+    "add_cant_layout",
     "add_positioning_referent",
     "add_stationing_referent",
     "add_vertical_layout",
