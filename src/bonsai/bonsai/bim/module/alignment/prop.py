@@ -47,10 +47,50 @@ def _on_radius_update(self, context):
 
     This dynamically imports the operator module to call on_radius_changed,
     avoiding circular imports since prop.py is imported before operator.py.
+    on_radius_changed also re-derives spiral lengths from the (unchanged)
+    A-values when spiral_mode is A_VALUE (spec 1.5: "radius changes
+    re-derive length from A when mode is A_VALUE").
     """
     from . import operator as ops
 
     ops.on_radius_changed(self, context)
+
+
+def _on_spiral_length_update(self, context):
+    """Callback when spiral_in_length/spiral_out_length changes (spec 1.5).
+
+    The length fields are authoritative in LENGTH mode, so this only
+    recalculates PI geometry / rebuilds the display table -- it never
+    writes back to spiral_a_in/spiral_a_out (the table derives the
+    A-value shown on Spiral rows on the fly, from length + radius).
+    """
+    from . import operator as ops
+
+    ops.on_spiral_length_changed(self, context)
+
+
+def _on_spiral_a_value_update(self, context):
+    """Callback when spiral_a_in/spiral_a_out changes (spec 1.5 A-value mode).
+
+    Only re-derives the matching spiral length (using the current radius)
+    when spiral_mode is A_VALUE -- "editing A updates length using current
+    radius".
+    """
+    from . import operator as ops
+
+    ops.on_spiral_a_value_changed(self, context)
+
+
+def _on_spiral_mode_update(self, context):
+    """Callback when spiral_mode toggles between LENGTH and A_VALUE.
+
+    Reconciles the pair once, in the direction the newly-active mode
+    requires, so whichever field the user edits next is already coherent
+    with the other.
+    """
+    from . import operator as ops
+
+    ops.on_spiral_mode_changed(self, context)
 
 
 def _terrain_object_poll(self, obj):
@@ -195,6 +235,87 @@ class AlignmentPI(PropertyGroup):
         update=_on_radius_update,
     )
 
+    # ---- Spiral transitions (spec 1.5) ----
+    # Spiral-curve-spiral (radius > 0 with either length > 0) and
+    # spiral-spiral (both lengths > 0, consuming the PI's full deflection —
+    # the solver decides this, not the UI) are both covered by these two
+    # length fields; CIVIL_OT_set_pi_spiral is the one operation that covers
+    # both cases per spec 1.5 ("spiral-curve-spiral and spiral-spiral as one
+    # operation").
+    spiral_mode: EnumProperty(
+        name="Spiral Mode",
+        description=(
+            "Whether spiral transition lengths are entered directly, or via the clothoid A-value "
+            "(A^2 = R * L, the classic spiral design parameter)"
+        ),
+        items=[
+            ("LENGTH", "Length", "Enter spiral transition lengths directly"),
+            ("A_VALUE", "A-Value", "Enter the clothoid A-value; length is derived as L = A^2 / R"),
+        ],
+        default="LENGTH",
+        update=_on_spiral_mode_update,
+    )
+
+    spiral_in_length: FloatProperty(
+        name="Entry Spiral (Lin)",
+        description="Entry spiral transition length ahead of the curve (0 = no entry spiral)",
+        default=0.0,
+        min=0.0,
+        precision=3,
+        unit="LENGTH",
+        update=_on_spiral_length_update,
+    )
+
+    spiral_out_length: FloatProperty(
+        name="Exit Spiral (Lout)",
+        description="Exit spiral transition length following the curve (0 = no exit spiral)",
+        default=0.0,
+        min=0.0,
+        precision=3,
+        unit="LENGTH",
+        update=_on_spiral_length_update,
+    )
+
+    spiral_a_in: FloatProperty(
+        name="Entry A",
+        description=(
+            "Clothoid A-value for the entry spiral (A^2 = R * L). Used when Spiral Mode is "
+            "A-Value; editing it re-derives the entry spiral length from the current radius, and "
+            "editing the radius while in A-Value mode re-derives the length from this A-value"
+        ),
+        default=0.0,
+        min=0.0,
+        precision=3,
+        unit="LENGTH",
+        update=_on_spiral_a_value_update,
+    )
+
+    spiral_a_out: FloatProperty(
+        name="Exit A",
+        description=(
+            "Clothoid A-value for the exit spiral (A^2 = R * L). Used when Spiral Mode is "
+            "A-Value; editing it re-derives the exit spiral length from the current radius, and "
+            "editing the radius while in A-Value mode re-derives the length from this A-value"
+        ),
+        default=0.0,
+        min=0.0,
+        precision=3,
+        unit="LENGTH",
+        update=_on_spiral_a_value_update,
+    )
+
+    # ---- Compound / reverse curves (spec 1.6) ----
+    join_next: BoolProperty(
+        name="Join Next",
+        description=(
+            "Join this PI's curve directly to the NEXT PI's curve at a shared tangency point, with "
+            "no intermediate tangent run -- a PCC (point of compound curvature) when the two curves "
+            "curve the same way, a PRC (point of reverse curvature) when they curve opposite ways. "
+            "Set via civil.join_curves, which validates and reverts on solver refusal"
+        ),
+        default=False,
+    )
+
     # Computed/display values (updated by recalculate operator)
     length_to_next: FloatProperty(
         name="Length",
@@ -333,17 +454,30 @@ class AlignmentDisplayRow(PropertyGroup):
     # For SEGMENT rows: the starting PI index of this segment
     pi_index: IntProperty(name="PI Index", default=0)
 
-    # Display type string (End, Tan, Curve for points; Tan, Curve for segments)
+    # Display type string: End, Mid, Tan, Curve for the original rows; plus,
+    # per spec 1.5/1.6, "Spiral" (a TS-Spiral/CS-Spiral row -- length column
+    # is the spiral length, radius column shows the A-value) and "PCC"/"PRC"
+    # (a join_next junction marker row replacing the intermediate Tan row).
     display_type: StringProperty(name="Type", default="")
 
     # Point coordinates (only for POINT rows)
     e: StringProperty(name="E", default="0.0")
     n: StringProperty(name="N", default="0.0")
 
-    # Segment properties (only for SEGMENT rows)
+    # Segment properties (only for SEGMENT rows). On a "Spiral" row, radius
+    # holds the A-value (not the PI's curve radius); on a "PCC"/"PRC" row
+    # length/radius are unused (0.0).
     length: FloatProperty(name="Length", default=0.0, precision=2, unit="LENGTH")
     radius: FloatProperty(name="Radius", default=0.0, precision=2, unit="LENGTH")
     arc_length: FloatProperty(name="Arc Length", default=0.0, precision=2, unit="LENGTH")
+
+    # Key-point station (spec 1.5): the station of the TS/SC/CS/ST/PCC/PRC
+    # point this row starts at, matched post-commit from the alignment's
+    # POSITION referents (civil.refresh_referent_list / get_referents).
+    # has_station is False pre-commit (or if the referent could not be
+    # matched), in which case the row simply shows no station.
+    station: FloatProperty(name="Station", default=0.0, precision=2)
+    has_station: BoolProperty(name="Has Station", default=False)
 
 
 CANT_TRANSITION_TYPE_ITEMS = [

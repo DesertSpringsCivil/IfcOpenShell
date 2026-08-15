@@ -147,6 +147,10 @@ classes = (
     operator.CIVIL_OT_recalculate_pis,
     operator.CIVIL_OT_clear_pis,
     operator.CIVIL_OT_delete_alignment,
+    # Operators - Spiral Transitions & Compound/Reverse Curves (spec 1.5, 1.6)
+    operator.CIVIL_OT_set_pi_spiral,
+    operator.CIVIL_OT_join_curves,
+    operator.CIVIL_OT_unjoin_curves,
     # Operators - Creation
     operator.CIVIL_OT_create_alignment_by_pis,
     operator.CIVIL_OT_create_alignment_by_pi,

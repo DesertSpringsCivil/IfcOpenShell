@@ -43,10 +43,23 @@ class CIVIL_UL_alignment_pis(UIList):
 
     Row types:
     - POINT rows: End (endpoint), Mid (interior PI without curve)
-    - SEGMENT rows: Tan (tangent line), Curve (circular arc)
+    - SEGMENT rows: Tan (tangent line), Curve (circular arc), Spiral (spec
+      1.5 TS-Spiral/CS-Spiral — length column is the spiral length, radius
+      column shows the A-value), PCC/PRC (spec 1.6 join_next junction
+      marker, replacing the intermediate Tan row)
 
-    When a Mid point has radius > 0, it becomes a Curve segment row.
+    When a Mid point has radius > 0, it becomes a Curve segment row (plus
+    Spiral rows either side of it, when spiral_in_length/spiral_out_length
+    are set).
     """
+
+    def _type_label(self, item):
+        """Type text, with a "@ station" suffix when a key-point station
+        was matched post-commit (spec 1.5's "TS/SC/CS/ST rows read from the
+        key-point referents" — pre-commit rows just show the bare type)."""
+        if item.has_station:
+            return f"{item.display_type} @ {tool.Alignment.format_station(item.station)}"
+        return item.display_type
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         if self.layout_type in {"DEFAULT", "COMPACT"}:
@@ -83,7 +96,7 @@ class CIVIL_UL_alignment_pis(UIList):
                 if item.display_type == "Curve":
                     # Curve segment row: No., Type (arc icon), X, Y, Arc Length, Radius
                     row.label(text=f"{item.segment_number}")
-                    row.label(text="Curve", icon="SPHERECURVE")
+                    row.label(text=self._type_label(item), icon="SPHERECURVE")
 
                     # Show PI coordinates on curve row
                     row.label(text=f"{float(item.e):.2f}")
@@ -98,10 +111,30 @@ class CIVIL_UL_alignment_pis(UIList):
                         row.prop(pi, "radius", text="")
                     else:
                         row.label(text=f"{item.radius:.2f}")
+
+                elif item.display_type == "Spiral":
+                    # Spiral (TS/CS) row: No., Type, -, -, spiral Length, A-value
+                    row.label(text=f"{item.segment_number}")
+                    row.label(text=self._type_label(item), icon="SPHERECURVE")
+                    row.label(text="")
+                    row.label(text="")
+                    row.label(text=f"{item.length:.2f}")
+                    row.label(text=f"A={item.radius:.2f}")
+
+                elif item.display_type in {"PCC", "PRC"}:
+                    # Junction marker row (spec 1.6): replaces the Tan row
+                    # between two directly-joined curves.
+                    row.label(text=f"{item.segment_number}")
+                    row.label(text=self._type_label(item), icon="LINKED")
+                    row.label(text="")
+                    row.label(text="")
+                    row.label(text="")
+                    row.label(text="")
+
                 else:
                     # Tangent segment row: No., Type (line icon), -, -, Length, -
                     row.label(text=f"{item.segment_number}")
-                    row.label(text="Tan", icon="IPO_LINEAR")
+                    row.label(text=self._type_label(item), icon="IPO_LINEAR")
 
                     # No X, Y for tangent segments
                     row.label(text="")
@@ -375,6 +408,14 @@ class CIVIL_PT_pi_editor(Panel):
         col.operator("civil.remove_pi", icon="REMOVE", text="")
         col.separator()
         col.operator("civil.pick_pi_from_viewport", icon="EYEDROPPER", text="")
+        col.separator()
+        # Spiral transitions (spec 1.5) and compound/reverse curve
+        # join/unjoin (spec 1.6) — act on the selected Curve/Spiral/PCC/PRC
+        # row (or Mid point row) via the same selection resolution as the
+        # radius flow.
+        col.operator("civil.set_pi_spiral", icon="MOD_SIMPLEDEFORM", text="")
+        col.operator("civil.join_curves", icon="LINKED", text="")
+        col.operator("civil.unjoin_curves", icon="UNLINKED", text="")
 
         # Bottom actions
         layout.separator()

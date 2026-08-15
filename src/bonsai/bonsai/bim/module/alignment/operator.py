@@ -204,15 +204,69 @@ def on_radius_changed(pi, context):
 
     This is called from the AlignmentPI.radius property's update callback.
     When a radius is entered on a Mid point, this triggers:
-    1. Recalculation of PI geometry (lengths, stations)
-    2. Rebuild of display_rows (Mid point becomes Curve segment)
-    3. If an active alignment exists, regeneration of IFC entities
+    1. Spec 1.5: if spiral_mode is A_VALUE, re-derive spiral_in_length /
+       spiral_out_length from the (unchanged) A-values and the NEW radius --
+       "radius changes re-derive length from A when mode is A_VALUE".
+    2. Recalculation of PI geometry (lengths, stations)
+    3. Rebuild of display_rows (Mid point becomes Curve segment)
+    4. If an active alignment exists, regeneration of IFC entities
     """
+    if pi.spiral_mode == "A_VALUE":
+        pi.spiral_in_length = tool.Alignment.spiral_length_from_a_value(pi.spiral_a_in, pi.radius)
+        pi.spiral_out_length = tool.Alignment.spiral_length_from_a_value(pi.spiral_a_out, pi.radius)
+
     props = context.scene.CivilAlignmentProperties
     recalculate_pi_geometry(props)
 
     # If there's an active alignment, trigger IFC regeneration
     # This is handled by recalculate_pi_geometry when active_alignment_id is set
+
+
+def on_spiral_length_changed(pi, context):
+    """Callback when spiral_in_length/spiral_out_length changes (spec 1.5).
+
+    LENGTH mode is authoritative for these fields, so this only recalculates
+    PI geometry / rebuilds the display table -- it never writes back to
+    spiral_a_in/spiral_a_out (rebuild_display_rows derives the A-value shown
+    on Spiral rows on the fly, from length + radius).
+    """
+    props = context.scene.CivilAlignmentProperties
+    recalculate_pi_geometry(props)
+
+
+def on_spiral_a_value_changed(pi, context):
+    """Callback when spiral_a_in/spiral_a_out changes (spec 1.5 A-value mode).
+
+    Only re-derives the matching spiral length (using the current radius)
+    when spiral_mode is A_VALUE -- "editing A updates length using current
+    radius". In LENGTH mode the A-value fields are inert until spiral_mode
+    switches back.
+    """
+    if pi.spiral_mode == "A_VALUE":
+        pi.spiral_in_length = tool.Alignment.spiral_length_from_a_value(pi.spiral_a_in, pi.radius)
+        pi.spiral_out_length = tool.Alignment.spiral_length_from_a_value(pi.spiral_a_out, pi.radius)
+
+    props = context.scene.CivilAlignmentProperties
+    recalculate_pi_geometry(props)
+
+
+def on_spiral_mode_changed(pi, context):
+    """Callback when spiral_mode toggles between LENGTH and A_VALUE.
+
+    Reconciles the pair once, in the direction the newly-active mode
+    requires, so whichever field the user edits next is already coherent
+    with the other:
+    - switching TO A_VALUE derives spiral_a_in/spiral_a_out from the
+      current (authoritative) lengths and radius.
+    - switching TO LENGTH leaves the lengths untouched -- they were already
+      authoritative and are unaffected by the mode switch.
+    """
+    if pi.spiral_mode == "A_VALUE":
+        pi.spiral_a_in = tool.Alignment.a_value_from_spiral_length(pi.spiral_in_length, pi.radius)
+        pi.spiral_a_out = tool.Alignment.a_value_from_spiral_length(pi.spiral_out_length, pi.radius)
+
+    props = context.scene.CivilAlignmentProperties
+    recalculate_pi_geometry(props)
 
 
 def recalculate_pi_geometry(props):
@@ -247,6 +301,27 @@ def rebuild_display_rows(props):
 
     When a Mid point has a curve (radius > 0), it becomes a Curve segment row
     instead of a point row, showing PI coordinates + arc length + radius.
+
+    Spec 1.5 (spirals): when the PI also has entry/exit spiral lengths, the
+    single Curve row is replaced by up to three rows in curve order --
+    "Spiral" (TS-Spiral, length = Lin, radius column = A-value), "Curve"
+    (the circular portion, omitted entirely for a pure spiral-spiral
+    transition where the spirals consume the full deflection), "Spiral"
+    (CS-Spiral, length = Lout, radius column = A-value).
+
+    Spec 1.6 (compound/reverse curves): when a PI's ``join_next`` is set and
+    the next PI also has a curve, the intermediate "Tan" row between them is
+    replaced by a single junction row -- display_type "PCC" or "PRC"
+    (``tool.Alignment.junction_type``, a same/opposite deflection-sign
+    comparison) -- since the two curves are directly tangent with no
+    tangent run between them.
+
+    Post-commit, rows that start at a named key point (TS/SC/CS/ST/PC/PT/
+    PCC) look up their station from ``props.referents`` (POSITION referents,
+    populated by ``refresh_referent_list`` from
+    ``tool.Alignment.get_referents``), matched in station order to the same
+    order these rows are generated in. Pre-commit -- or if a match can't be
+    found -- a row simply shows no station (``has_station`` stays False).
     """
     props.display_rows.clear()
 
@@ -260,25 +335,95 @@ def rebuild_display_rows(props):
     # Pre-compute coordinate tuples for tool method calls
     pi_coords = [(float(pi.e), float(pi.n)) for pi in pis]
 
+    # POSITION (key-point) referents, station-ascending -- the same order
+    # commit_layout_change's update_key_point_referents creates them in, so
+    # consuming them in lockstep with the rows generated below lines them up.
+    referent_queue = [r for r in props.referents if r.predefined_type == "POSITION"]
+
+    def pop_station(label):
+        if not referent_queue:
+            return None
+        candidate = referent_queue[0]
+        if candidate.referent_name.rstrip().endswith(f"({label})"):
+            referent_queue.pop(0)
+            return candidate.station
+        return None
+
+    def apply_station(row, label):
+        station = pop_station(label)
+        if station is not None:
+            row.station = station
+            row.has_station = True
+
     while i < len(pis):
         pi = pis[i]
         is_interior = i > 0 and i < len(pis) - 1
         has_curve = is_interior and pi.radius > 0
+        has_spiral = has_curve and (pi.spiral_in_length > 0 or pi.spiral_out_length > 0)
+        geom = None
+        joined_to_next = False
 
         if has_curve:
-            # Interior PI with curve: becomes a CURVE SEGMENT row
-            segment_num += 1
-            curve_row = props.display_rows.add()
-            curve_row.row_type = "SEGMENT"
-            curve_row.segment_number = segment_num
-            curve_row.pi_index = i
-            curve_row.display_type = "Curve"
-            curve_row.e = pi.e
-            curve_row.n = pi.n
-            curve_row.radius = pi.radius
-            curve_row.arc_length = tool.Alignment.arc_length_at_pi(
-                pi_coords[i - 1], pi_coords[i], pi_coords[i + 1], pi.radius
+            geom = tool.Alignment.spiral_curve_geometry_at_pi(
+                pi_coords[i - 1], pi_coords[i], pi_coords[i + 1], pi.radius, pi.spiral_in_length, pi.spiral_out_length
             )
+            next_is_interior = (i + 1 > 0) and (i + 1 < len(pis) - 1)
+            next_pi_has_curve = next_is_interior and pis[i + 1].radius > 0
+            joined_to_next = bool(pi.join_next) and next_pi_has_curve and i + 2 < len(pis)
+
+            if has_spiral:
+                # TS-Spiral: only when there's an entry spiral.
+                if pi.spiral_in_length > 0:
+                    segment_num += 1
+                    spiral_row = props.display_rows.add()
+                    spiral_row.row_type = "SEGMENT"
+                    spiral_row.segment_number = segment_num
+                    spiral_row.pi_index = i
+                    spiral_row.display_type = "Spiral"
+                    spiral_row.length = pi.spiral_in_length
+                    spiral_row.radius = tool.Alignment.a_value_from_spiral_length(pi.spiral_in_length, pi.radius)
+                    apply_station(spiral_row, "T.S.")
+
+                # Curve: the circular portion, omitted for a pure
+                # spiral-spiral transition (the spirals consume Δ entirely).
+                if geom["arc_length"] > 1e-6:
+                    segment_num += 1
+                    curve_row = props.display_rows.add()
+                    curve_row.row_type = "SEGMENT"
+                    curve_row.segment_number = segment_num
+                    curve_row.pi_index = i
+                    curve_row.display_type = "Curve"
+                    curve_row.e = pi.e
+                    curve_row.n = pi.n
+                    curve_row.radius = pi.radius
+                    curve_row.arc_length = geom["arc_length"]
+                    apply_station(curve_row, "S.C." if pi.spiral_in_length > 0 else "P.C.")
+
+                # CS-Spiral: only when there's an exit spiral.
+                if pi.spiral_out_length > 0:
+                    segment_num += 1
+                    spiral_row = props.display_rows.add()
+                    spiral_row.row_type = "SEGMENT"
+                    spiral_row.segment_number = segment_num
+                    spiral_row.pi_index = i
+                    spiral_row.display_type = "Spiral"
+                    spiral_row.length = pi.spiral_out_length
+                    spiral_row.radius = tool.Alignment.a_value_from_spiral_length(pi.spiral_out_length, pi.radius)
+                    no_arc = geom["arc_length"] <= 1e-6
+                    apply_station(spiral_row, "S.S." if (no_arc and pi.spiral_in_length > 0) else "C.S.")
+            else:
+                # Plain circular curve, no spirals — unchanged from before.
+                segment_num += 1
+                curve_row = props.display_rows.add()
+                curve_row.row_type = "SEGMENT"
+                curve_row.segment_number = segment_num
+                curve_row.pi_index = i
+                curve_row.display_type = "Curve"
+                curve_row.e = pi.e
+                curve_row.n = pi.n
+                curve_row.radius = pi.radius
+                curve_row.arc_length = geom["arc_length"]
+                apply_station(curve_row, "P.C.")
         else:
             # Regular point row (End or Mid without curve)
             point_row = props.display_rows.add()
@@ -293,6 +438,21 @@ def rebuild_display_rows(props):
             point_row.e = pi.e
             point_row.n = pi.n
 
+        # Junction row (spec 1.6): replaces the intermediate Tan row when
+        # this PI's curve is joined directly to the next PI's curve.
+        if joined_to_next:
+            segment_num += 1
+            junction_row = props.display_rows.add()
+            junction_row.row_type = "SEGMENT"
+            junction_row.segment_number = segment_num
+            junction_row.pi_index = i
+            junction_row.display_type = tool.Alignment.junction_type(
+                pi_coords[i - 1], pi_coords[i], pi_coords[i + 1], pi_coords[i + 2]
+            )
+            apply_station(junction_row, "P.C.C.")
+            i += 1
+            continue
+
         # Add tangent segment row after this point/curve (except after last PI)
         if i < len(pis) - 1:
             segment_num += 1
@@ -306,16 +466,22 @@ def rebuild_display_rows(props):
             start_t = 0.0
             end_t = 0.0
             if has_curve:
-                start_t = tool.Alignment.tangent_length_at_pi(
-                    pi_coords[i - 1], pi_coords[i], pi_coords[i + 1], pi.radius
-                )
+                start_t = geom["tangent_out"]
+                apply_station(seg_row, "S.T." if pi.spiral_out_length > 0 else "P.T.")
+
             next_pi = pis[i + 1]
             next_is_interior = (i + 1 > 0) and (i + 1 < len(pis) - 1)
             next_has_curve = next_is_interior and next_pi.radius > 0
             if next_has_curve:
-                end_t = tool.Alignment.tangent_length_at_pi(
-                    pi_coords[i], pi_coords[i + 1], pi_coords[i + 2], next_pi.radius
+                next_geom = tool.Alignment.spiral_curve_geometry_at_pi(
+                    pi_coords[i],
+                    pi_coords[i + 1],
+                    pi_coords[i + 2],
+                    next_pi.radius,
+                    next_pi.spiral_in_length,
+                    next_pi.spiral_out_length,
                 )
+                end_t = next_geom["tangent_in"]
 
             seg_row.length = tool.Alignment.tangent_segment_length(pi_coords[i], pi_coords[i + 1], start_t, end_t)
 
@@ -603,6 +769,265 @@ class CIVIL_OT_remove_pi(Operator):
         return {"FINISHED"}
 
 
+def _resolve_selected_interior_pi_index(props):
+    """Resolve which interior PI the selected PI-table row refers to (spec
+    1.5/1.6). Mirrors ``CIVIL_OT_remove_pi``'s row-based resolution, but
+    accepts POINT rows and SEGMENT rows alike -- a Curve/Spiral/PCC/PRC
+    row's ``pi_index`` already points at its owning PI -- since the spiral
+    and join operators act on curve rows, not just point rows. Falls back
+    to ``active_pi_index`` when ``display_rows`` isn't populated.
+
+    Returns the PI index, or None if it doesn't resolve to an INTERIOR PI
+    (index 0 and the last index are endpoints, which can never hold a curve).
+    """
+    pi_index = -1
+    if props.display_rows:
+        idx = props.active_display_row_index
+        if 0 <= idx < len(props.display_rows):
+            pi_index = props.display_rows[idx].pi_index
+    if pi_index < 0:
+        pi_index = props.active_pi_index
+    if 0 < pi_index < len(props.pis) - 1:
+        return pi_index
+    return None
+
+
+class CIVIL_OT_set_pi_spiral(Operator):
+    """Set entry/exit spiral transition lengths (or A-values) at a PI (spec 1.5)
+
+    One operation covers both spiral-curve-spiral (radius > 0 with either
+    length > 0) and spiral-spiral (the solver consumes the full deflection
+    when the spiral lengths demand it — this operator just writes the PI's
+    props; the solver decides which shape results). Like the existing
+    radius flow, this writes props.pis only — the actual IFC write is
+    deferred to the explicit Recalculate button, matching the PI table's
+    established idiom.
+    """
+
+    bl_idname = "civil.set_pi_spiral"
+    bl_label = "Set PI Spiral"
+    bl_description = (
+        "Set (or change) entry/exit spiral transition lengths at the selected PI, in length or "
+        "A-value form. Covers spiral-curve-spiral and spiral-spiral in one operation"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    pi_index: IntProperty(default=-1)
+    radius: FloatProperty(name="Radius", description="Curve radius", default=100.0, min=0.0, unit="LENGTH")
+    spiral_mode: EnumProperty(
+        name="Mode",
+        items=[
+            ("LENGTH", "Length", "Enter spiral transition lengths directly"),
+            ("A_VALUE", "A-Value", "Enter the clothoid A-value; length is derived as L = A^2 / R"),
+        ],
+        default="LENGTH",
+    )
+    spiral_in_length: FloatProperty(
+        name="Entry Length (Lin)",
+        description="Entry spiral length ahead of the curve",
+        default=0.0,
+        min=0.0,
+        unit="LENGTH",
+    )
+    spiral_out_length: FloatProperty(
+        name="Exit Length (Lout)",
+        description="Exit spiral length following the curve",
+        default=0.0,
+        min=0.0,
+        unit="LENGTH",
+    )
+    spiral_a_in: FloatProperty(name="Entry A", description="Entry spiral A-value", default=0.0, min=0.0, unit="LENGTH")
+    spiral_a_out: FloatProperty(name="Exit A", description="Exit spiral A-value", default=0.0, min=0.0, unit="LENGTH")
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if _resolve_selected_interior_pi_index(props) is None:
+            cls.poll_message_set("Select an interior PI (a Curve/Spiral row, or a Mid point row) first")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        props = context.scene.CivilAlignmentProperties
+        self.pi_index = _resolve_selected_interior_pi_index(props)
+        pi = props.pis[self.pi_index]
+        self.radius = pi.radius
+        self.spiral_mode = pi.spiral_mode
+        self.spiral_in_length = pi.spiral_in_length
+        self.spiral_out_length = pi.spiral_out_length
+        self.spiral_a_in = pi.spiral_a_in
+        self.spiral_a_out = pi.spiral_a_out
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "radius")
+        layout.prop(self, "spiral_mode", expand=True)
+        if self.spiral_mode == "LENGTH":
+            layout.prop(self, "spiral_in_length")
+            layout.prop(self, "spiral_out_length")
+        else:
+            layout.prop(self, "spiral_a_in")
+            layout.prop(self, "spiral_a_out")
+
+    def execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        if not (0 <= self.pi_index < len(props.pis)):
+            self.report({"ERROR"}, "PI not found")
+            return {"CANCELLED"}
+
+        pi = props.pis[self.pi_index]
+        pi.spiral_mode = self.spiral_mode
+        pi.radius = self.radius
+
+        if self.spiral_mode == "A_VALUE":
+            pi.spiral_a_in = self.spiral_a_in
+            pi.spiral_a_out = self.spiral_a_out
+            pi.spiral_in_length = tool.Alignment.spiral_length_from_a_value(self.spiral_a_in, self.radius)
+            pi.spiral_out_length = tool.Alignment.spiral_length_from_a_value(self.spiral_a_out, self.radius)
+        else:
+            pi.spiral_in_length = self.spiral_in_length
+            pi.spiral_out_length = self.spiral_out_length
+            pi.spiral_a_in = tool.Alignment.a_value_from_spiral_length(self.spiral_in_length, self.radius)
+            pi.spiral_a_out = tool.Alignment.a_value_from_spiral_length(self.spiral_out_length, self.radius)
+
+        recalculate_pi_geometry(props)
+        self.report({"INFO"}, f"Spiral set on PI {self.pi_index + 1}")
+        return {"FINISHED"}
+
+
+def _try_recalculate_or_revert(context, revert_fn):
+    """Attempt ``_build_alignment_from_active_pis``; on a solver refusal
+    (ValueError -- e.g. join_next's tangent-closure check), call
+    ``revert_fn()`` to restore props.pis to its last-known-good state and
+    retry ONCE so the IFC segments (already cleared by the failed attempt --
+    ``layout_horizontal_alignment_by_pi_method`` clears before it re-adds,
+    and Bonsai does not auto-rollback IFC mutations from a caught exception,
+    see ``IfcStore.execute_ifc_operator``) end up rebuilt from that reverted
+    state rather than left segment-less. The retry is expected to succeed
+    (it's the same configuration that worked before the failed edit); if it
+    somehow doesn't, the ORIGINAL failure is still what gets reported.
+
+    Returns (ok, message) from the first (attempted) build -- ``message``
+    is the solver's explanatory text verbatim on failure (spec 1.6:
+    "refused with an explanation").
+    """
+    try:
+        ok, message = _build_alignment_from_active_pis(context)
+    except ValueError as e:
+        ok, message = False, str(e)
+
+    if ok:
+        return True, message
+
+    revert_fn()
+    try:
+        _build_alignment_from_active_pis(context)
+    except ValueError:
+        pass  # best effort -- the original failure above is still reported
+
+    return False, message
+
+
+class CIVIL_OT_join_curves(Operator, tool.Ifc.Operator):
+    """Join the selected PI's curve directly to the next PI's curve (spec 1.6)
+
+    Sets join_next, then attempts the IFC write immediately (unlike the
+    other PI-table edits, which defer to the Recalculate button) so a
+    solver refusal — the two curves' tangent runs cannot close onto a
+    shared tangency point — can be caught and reported, and join_next
+    reverted so the table matches what's actually in IFC.
+    """
+
+    bl_idname = "civil.join_curves"
+    bl_label = "Join Curves"
+    bl_description = (
+        "Join this PI's curve directly to the NEXT PI's curve at a shared tangency point (a PCC or "
+        "PRC), with no intermediate tangent run"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        pi_index = _resolve_selected_interior_pi_index(props)
+        if pi_index is None:
+            cls.poll_message_set("Select an interior PI with a curve first")
+            return False
+        pi = props.pis[pi_index]
+        if pi.radius <= 0:
+            cls.poll_message_set("Selected PI has no curve to join")
+            return False
+        if pi.join_next:
+            cls.poll_message_set("Already joined to the next curve")
+            return False
+        if pi_index + 1 >= len(props.pis) - 1 or props.pis[pi_index + 1].radius <= 0:
+            cls.poll_message_set("The next PI must also have a curve")
+            return False
+        return True
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        pi_index = _resolve_selected_interior_pi_index(props)
+        if pi_index is None:
+            self.report({"ERROR"}, "Select an interior PI with a curve first")
+            return {"CANCELLED"}
+
+        pi = props.pis[pi_index]
+        pi.join_next = True
+
+        ok, message = _try_recalculate_or_revert(context, lambda: setattr(pi, "join_next", False))
+        if not ok:
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
+class CIVIL_OT_unjoin_curves(Operator, tool.Ifc.Operator):
+    """Restore the intermediate tangent between the selected PI's curve and
+    the next PI's curve (spec 1.6, the inverse of CIVIL_OT_join_curves)."""
+
+    bl_idname = "civil.unjoin_curves"
+    bl_label = "Unjoin Curves"
+    bl_description = "Restore the tangent run between this PI's curve and the next PI's curve"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        pi_index = _resolve_selected_interior_pi_index(props)
+        if pi_index is None or not props.pis[pi_index].join_next:
+            cls.poll_message_set("Selected PI is not joined to the next curve")
+            return False
+        return True
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        pi_index = _resolve_selected_interior_pi_index(props)
+        if pi_index is None:
+            self.report({"ERROR"}, "PI not found")
+            return {"CANCELLED"}
+
+        pi = props.pis[pi_index]
+        pi.join_next = False
+
+        ok, message = _try_recalculate_or_revert(context, lambda: setattr(pi, "join_next", True))
+        if not ok:
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
 class CIVIL_OT_pick_pi_from_viewport(bpy.types.Operator, PolylineOperator, tool.Ifc.Operator):
     """Add PI points by clicking in the 3D viewport using polyline tools"""
 
@@ -821,10 +1246,20 @@ def _build_alignment_from_active_pis(context):
         [float(o) for o in ifcopenshell.util.geolocation.auto_enh2xyz(ifc, float(pi.e), float(pi.n), 0.0)[:2]]
         for pi in props.pis
     ]
-    # pi.radius is a Blender LENGTH property (stored in metres); the API expects
-    # project units, so convert back via unit_scale — same as the coordinates.
+    # pi.radius/spiral_in_length/spiral_out_length are Blender LENGTH properties
+    # (stored in metres); the API expects project units, so convert back via
+    # unit_scale — same as the coordinates. Spec 1.5/1.6: build_pi_radius_element
+    # shapes each PI's radii entry as plain R / (R, Lin, Lout) / a join_next dict.
     unit_scale = ifcopenshell.util.unit.calculate_unit_scale(ifc)
-    radii = [pi.radius / unit_scale for pi in props.pis[1:-1]]
+    radii = [
+        tool.Alignment.build_pi_radius_element(
+            pi.radius / unit_scale,
+            pi.spiral_in_length / unit_scale,
+            pi.spiral_out_length / unit_scale,
+            pi.join_next,
+        )
+        for pi in props.pis[1:-1]
+    ]
 
     tool.Alignment.remove_layout_segment_objects(h_layout)
     tool.Alignment.clear_layout_segments(h_layout)
@@ -1061,7 +1496,10 @@ class CIVIL_OT_create_alignment_by_pi(Operator, tool.Ifc.Operator):
             ]
             for pi in props.pis
         ]
-        radii = [pi.radius for pi in props.pis[1:-1]]
+        radii = [
+            tool.Alignment.build_pi_radius_element(pi.radius, pi.spiral_in_length, pi.spiral_out_length, pi.join_next)
+            for pi in props.pis[1:-1]
+        ]
 
         existing_alignment = tool.Alignment.get_active_alignment()
         if not (h_layout := ifcopenshell.api.alignment.get_horizontal_layout(existing_alignment)):
