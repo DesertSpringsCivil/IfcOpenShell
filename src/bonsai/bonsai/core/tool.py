@@ -1302,6 +1302,9 @@ class Alignment:
     def layout_has_real_segments(cls, h_layout): pass
     def remove_layout_segment_objects(cls, h_layout): pass
     def remove_pi_edit_empties(cls, alignment_id): pass
+    # PI edit mode - in-mode editing (spec 1.3)
+    def get_pi_edit_empties(cls, alignment_id): pass
+    def delete_pi_edit_empty(cls, alignment_id, index): pass
     # Vertical PVI edit mode
     def add_vertical_layout(cls, alignment): pass
     def back_calculate_pvis_from_vertical(cls, alignment): pass
@@ -1310,12 +1313,16 @@ class Alignment:
     def get_vertical_layout(cls, alignment): pass
     def layout_vertical_by_pvi_method(cls, layout, vpoints, lengths): pass
     def remove_pvi_edit_empties(cls, alignment_id): pass
+    def remove_vertical_layout(cls, alignment): pass
     # Alignment evaluation & 3D combination (D3)
     def create_3d_alignment_object(cls, alignment, distance_interval=5.0): pass
     def evaluate_alignment_at_station(cls, alignment, station): pass
     def get_alignment_curve(cls, alignment): pass
     def get_alignment_length(cls, alignment): pass
     def remove_3d_alignment_object(cls, alignment): pass
+    # Alignment deletion (spec 1.4)
+    def remove_alignment_hierarchy(cls, alignment): pass
+    def remove_alignment_entity(cls, alignment): pass
     # Stationing
     def format_station(cls, station): pass
     # CSV import

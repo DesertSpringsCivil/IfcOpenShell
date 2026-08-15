@@ -2415,6 +2415,448 @@ class Alignment:
                     if obj:
                         obj.hide_select = not selectable
 
+    # =========================================================================
+    # PI Edit Mode — In-Mode Editing (spec 1.3)
+    # =========================================================================
+    # Pure-math helpers first (no bpy — unit-testable with plain coordinates),
+    # then the Blender/empty-touching methods that use them.
+
+    @staticmethod
+    def compute_curve_tangent_length(
+        p_prev: Optional[Tuple[float, float]],
+        p_pi: Tuple[float, float],
+        p_next: Optional[Tuple[float, float]],
+        radius: float,
+    ) -> float:
+        """Tangent length T = R * tan(delta/2) a curve at ``p_pi`` claims on
+        each adjacent tangent (the PC/PT setback distance).
+
+        ``delta`` is the deflection angle between the incoming tangent
+        (``p_prev`` -> ``p_pi``) and the outgoing tangent (``p_pi`` ->
+        ``p_next``). Returns 0.0 if there is no curve (radius <= 0) or a
+        neighbor is missing (endpoint PIs never carry a curve).
+        """
+        if radius is None or radius <= 0 or p_prev is None or p_next is None:
+            return 0.0
+        v_in = (p_pi[0] - p_prev[0], p_pi[1] - p_prev[1])
+        v_out = (p_next[0] - p_pi[0], p_next[1] - p_pi[1])
+        len_in = math.hypot(*v_in)
+        len_out = math.hypot(*v_out)
+        if len_in < 1e-9 or len_out < 1e-9:
+            return 0.0
+        dot = (v_in[0] * v_out[0] + v_in[1] * v_out[1]) / (len_in * len_out)
+        dot = max(-1.0, min(1.0, dot))
+        delta = math.acos(dot)
+        return radius * math.tan(delta / 2.0)
+
+    @staticmethod
+    def project_point_onto_segment_2d(
+        point: Tuple[float, float], a: Tuple[float, float], b: Tuple[float, float]
+    ) -> Tuple[float, Tuple[float, float], float]:
+        """Project ``point`` onto the segment ``a``->``b``.
+
+        Returns (t, closest_point, perpendicular_distance):
+        - ``t``: the clamped [0, 1] parametric position of the closest point.
+        - ``closest_point``: the clamped closest point on the segment.
+        - ``perpendicular_distance``: distance from ``point`` to the closest
+          point — used to rank candidate segments by nearness.
+        """
+        ax, ay = a
+        bx, by = b
+        px, py = point
+        dx, dy = bx - ax, by - ay
+        length_sq = dx * dx + dy * dy
+        if length_sq < 1e-12:
+            return 0.0, (ax, ay), math.hypot(px - ax, py - ay)
+        t_raw = ((px - ax) * dx + (py - ay) * dy) / length_sq
+        t = max(0.0, min(1.0, t_raw))
+        closest = (ax + t * dx, ay + t * dy)
+        perpendicular = math.hypot(px - closest[0], py - closest[1])
+        return t, closest, perpendicular
+
+    @staticmethod
+    def line_intersection_2d(
+        p1: Tuple[float, float],
+        d1: Tuple[float, float],
+        p2: Tuple[float, float],
+        d2: Tuple[float, float],
+    ) -> Optional[Tuple[float, float]]:
+        """Intersect line ``p1 + t*d1`` with line ``p2 + s*d2``.
+
+        Returns the intersection point, or None if the lines are parallel
+        (or nearly so).
+        """
+        x1, y1 = p1
+        dx1, dy1 = d1
+        x2, y2 = p2
+        dx2, dy2 = d2
+        denom = dx1 * dy2 - dy1 * dx2
+        if abs(denom) < 1e-9:
+            return None
+        t = ((x2 - x1) * dy2 - (y2 - y1) * dx2) / denom
+        return (x1 + t * dx1, y1 + t * dy1)
+
+    @classmethod
+    def find_tangent_insertion_point(
+        cls,
+        points: List[Tuple[float, float]],
+        radii: List[float],
+        position: Tuple[float, float],
+    ) -> dict:
+        """Locate where ``position`` projects onto the PI polyline for PI
+        insertion (spec 1.3, ``I`` key).
+
+        ``points``/``radii`` are the ordered PI (x, y) positions and their
+        matching curve radii (0.0 = no curve). Finds the tangent segment
+        nearest to ``position`` and refuses the insertion if the projected
+        point falls inside either endpoint's curve tangent-claim — that
+        portion of the segment is actually swept by a circular arc in the
+        PI-method construction, not a straight tangent.
+
+        Returns:
+            {"ok": True, "segment_index": i, "point": (x, y)} on success, or
+            {"ok": False, "reason": "..."} on refusal.
+        """
+        if len(points) < 2:
+            return {"ok": False, "reason": "Need at least 2 PIs"}
+
+        candidates = []
+        for i in range(len(points) - 1):
+            a, b = points[i], points[i + 1]
+            t, closest, perpendicular = cls.project_point_onto_segment_2d(position, a, b)
+            length = math.hypot(b[0] - a[0], b[1] - a[1])
+            candidates.append((perpendicular, i, t, closest, length))
+        candidates.sort(key=lambda c: c[0])
+        _, segment_index, t, closest, length = candidates[0]
+
+        a = points[segment_index]
+        b = points[segment_index + 1]
+        prev_point = points[segment_index - 1] if segment_index - 1 >= 0 else None
+        next_point = points[segment_index + 2] if segment_index + 2 < len(points) else None
+
+        claim_a = cls.compute_curve_tangent_length(prev_point, a, b, radii[segment_index])
+        claim_b = cls.compute_curve_tangent_length(a, b, next_point, radii[segment_index + 1])
+
+        distance_along = t * length
+        min_allowed = claim_a
+        max_allowed = length - claim_b
+
+        if min_allowed > max_allowed + 1e-9:
+            return {"ok": False, "reason": "Adjacent curves leave no straight tangent to insert onto"}
+        if distance_along < min_allowed - 1e-6 or distance_along > max_allowed + 1e-6:
+            return {"ok": False, "reason": "Insertion point falls inside a curve's tangent extents"}
+
+        return {"ok": True, "segment_index": segment_index, "point": closest}
+
+    @classmethod
+    def validate_curve_fit_geometry(
+        cls,
+        points: List[Tuple[float, float]],
+        radii: List[float],
+        index: int,
+        new_radius: float,
+    ) -> Tuple[bool, Optional[str]]:
+        """Pure math: would a curve of ``new_radius`` at PI ``index`` fit
+        within its two adjacent tangent segments, net of the tangent already
+        claimed there by neighboring curves?
+
+        ``points``/``radii`` are the full ordered PI lists — ``radii[index]``
+        is ignored (it is the *current* radius; ``new_radius`` is the
+        candidate being validated). Endpoints (index 0 or len-1) can never
+        hold a curve.
+
+        Returns (ok, reason) — reason is None when ok is True.
+        """
+        n = len(points)
+        if index <= 0 or index >= n - 1:
+            return False, "Curves can only be added to interior PIs"
+        if new_radius <= 0:
+            return False, "Radius must be greater than zero"
+
+        prev_point = points[index - 1]
+        this_point = points[index]
+        next_point = points[index + 1]
+
+        claim_here = cls.compute_curve_tangent_length(prev_point, this_point, next_point, new_radius)
+
+        # Tangent segment on the PREV side: [prev_point, this_point].
+        prev_prev = points[index - 2] if index - 2 >= 0 else None
+        claim_prev_far = cls.compute_curve_tangent_length(prev_prev, prev_point, this_point, radii[index - 1])
+        length_prev = math.hypot(this_point[0] - prev_point[0], this_point[1] - prev_point[1])
+        if claim_here + claim_prev_far > length_prev + 1e-6:
+            return False, (
+                f"Radius {new_radius:.2f} is too large — the tangent back to the "
+                f"previous PI is only {length_prev:.2f} long"
+            )
+
+        # Tangent segment on the NEXT side: [this_point, next_point].
+        next_next = points[index + 2] if index + 2 < n else None
+        claim_next_far = cls.compute_curve_tangent_length(this_point, next_point, next_next, radii[index + 1])
+        length_next = math.hypot(next_point[0] - this_point[0], next_point[1] - this_point[1])
+        if claim_here + claim_next_far > length_next + 1e-6:
+            return (
+                False,
+                f"Radius {new_radius:.2f} is too large — the tangent to the next PI is only {length_next:.2f} long",
+            )
+
+        return True, None
+
+    @classmethod
+    def validate_curve_fit(
+        cls, empties: List[bpy.types.Object], index: int, radius: float
+    ) -> Tuple[bool, Optional[str]]:
+        """Blender-facing wrapper for ``validate_curve_fit_geometry``.
+
+        Extracts (x, y) positions and current radii from PI edit empties,
+        then delegates to the pure-math check.
+        """
+        # Uses .location, not matrix_world — create_pi_edit_empties parents
+        # these to an identity-transform alignment object and sets .location
+        # to the already-world coordinate, so .location is immediately
+        # correct without waiting on a depsgraph/view-layer update (which
+        # matrix_world would need after any location change this frame).
+        points = [(float(e.location.x), float(e.location.y)) for e in empties]
+        radii = [float(e.get("civil_pi_radius", 0.0)) for e in empties]
+        return cls.validate_curve_fit_geometry(points, radii, index, radius)
+
+    @staticmethod
+    def slide_tangent(
+        p_prev: Optional[Tuple[float, float]],
+        p_a: Tuple[float, float],
+        p_b: Tuple[float, float],
+        p_next: Optional[Tuple[float, float]],
+        delta: Tuple[float, float],
+    ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        """Slide the tangent line through ``p_a``->``p_b`` parallel to itself
+        (bearing-constant slide, spec 1.3 ``T`` key).
+
+        Only the component of ``delta`` perpendicular to the tangent
+        direction is applied — sliding along the tangent's own bearing would
+        not be a "slide". The two PI positions move to where the translated
+        line intersects their OTHER adjacent tangent (the one not being
+        slid), keeping every other tangent's bearing unchanged:
+        - ``new_p_a`` = intersection of the slid line with (p_prev -> p_a).
+        - ``new_p_b`` = intersection of the slid line with (p_b -> p_next).
+
+        ``p_prev``/``p_next`` may be None when ``p_a``/``p_b`` is an
+        alignment endpoint with no "other" tangent — in that case the
+        endpoint is simply translated by the perpendicular delta.
+
+        Returns (new_p_a, new_p_b).
+        """
+        dx = p_b[0] - p_a[0]
+        dy = p_b[1] - p_a[1]
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            return p_a, p_b
+        direction = (dx / length, dy / length)
+        normal = (-direction[1], direction[0])
+        perp_mag = delta[0] * normal[0] + delta[1] * normal[1]
+        perp_delta = (normal[0] * perp_mag, normal[1] * perp_mag)
+
+        shifted_a = (p_a[0] + perp_delta[0], p_a[1] + perp_delta[1])
+        shifted_b = (p_b[0] + perp_delta[0], p_b[1] + perp_delta[1])
+
+        new_p_a = shifted_a
+        if p_prev is not None:
+            other_dir_a = (p_a[0] - p_prev[0], p_a[1] - p_prev[1])
+            if math.hypot(*other_dir_a) > 1e-9:
+                intersection = tool.Alignment.line_intersection_2d(p_prev, other_dir_a, shifted_a, direction)
+                if intersection is not None:
+                    new_p_a = intersection
+
+        new_p_b = shifted_b
+        if p_next is not None:
+            other_dir_b = (p_next[0] - p_b[0], p_next[1] - p_b[1])
+            if math.hypot(*other_dir_b) > 1e-9:
+                intersection = tool.Alignment.line_intersection_2d(p_b, other_dir_b, shifted_a, direction)
+                if intersection is not None:
+                    new_p_b = intersection
+
+        return new_p_a, new_p_b
+
+    @classmethod
+    def insert_pi_on_tangent(
+        cls, alignment_id: int, position: Tuple[float, float]
+    ) -> Tuple[Optional[bpy.types.Object], Optional[str]]:
+        """Insert a new PI empty onto the nearest tangent segment (spec 1.3,
+        ``I`` key).
+
+        ``position`` is an (x, y) point in the same Blender world-space
+        convention used by the PI empties (see ``collect_pis_from_empties``).
+        Renumbers ``civil_pi_index`` on the new empty and every empty after
+        it so indices stay contiguous.
+
+        Returns (new_empty, None) on success, or (None, reason) if there are
+        fewer than 2 PIs, or the projection falls inside a curve's tangent
+        extents (find_tangent_insertion_point refusal).
+        """
+        empties = cls.get_pi_edit_empties(alignment_id)
+        if len(empties) < 2:
+            return None, "Need at least 2 PIs to insert onto a tangent"
+
+        # .location, not matrix_world — see the comment in validate_curve_fit.
+        points = [(float(e.location.x), float(e.location.y)) for e in empties]
+        radii = [float(e.get("civil_pi_radius", 0.0)) for e in empties]
+
+        result = cls.find_tangent_insertion_point(points, radii, position)
+        if not result["ok"]:
+            return None, result["reason"]
+
+        segment_index = result["segment_index"]
+        x, y = result["point"]
+
+        reference = empties[segment_index]
+        alignment_obj = reference.parent
+        collection = reference.users_collection[0] if reference.users_collection else bpy.context.scene.collection
+
+        new_empty = bpy.data.objects.new(f"PI.{segment_index + 2:03d}", None)
+        new_empty.empty_display_type = "SPHERE"
+        new_empty.empty_display_size = 2.0
+        new_empty.location = (x, y, reference.location.z)
+
+        new_empty["civil_is_pi_empty"] = True
+        new_empty["civil_pi_index"] = segment_index + 1
+        new_empty["civil_pi_radius"] = 0.0
+        new_empty["civil_alignment_id"] = alignment_id
+        new_empty["civil_pi_type"] = "TANGENT"
+
+        if alignment_obj is not None:
+            new_empty.parent = alignment_obj
+        collection.objects.link(new_empty)
+
+        # Renumber every empty after the insertion point to make room.
+        for empty in empties[segment_index + 1 :]:
+            empty["civil_pi_index"] = empty.get("civil_pi_index", 0) + 1
+
+        return new_empty, None
+
+    @classmethod
+    def delete_pi_edit_empty(cls, alignment_id: int, index: int) -> bool:
+        """Delete the PI empty at ``index`` and renumber the rest.
+
+        The core-level rule about how many PIs must remain (spec 1.3, ``X``
+        key) lives in ``core.alignment.delete_pi_in_edit_mode`` — this is the
+        unconditional tool-layer primitive it calls after the guard passes.
+
+        Returns True if an empty was removed, False if ``index`` was invalid.
+        """
+        empties = cls.get_pi_edit_empties(alignment_id)
+        if not (0 <= index < len(empties)):
+            return False
+        bpy.data.objects.remove(empties[index], do_unlink=True)
+        for new_index, empty in enumerate(cls.get_pi_edit_empties(alignment_id)):
+            empty["civil_pi_index"] = new_index
+        return True
+
+    @classmethod
+    def set_pi_radius(cls, empties: List[bpy.types.Object], index: int, radius: float) -> None:
+        """Set the curve radius on the PI empty at ``index`` (spec 1.3, ``C``
+        key — called by ``civil.set_pi_curve_radius`` after
+        ``validate_curve_fit`` passes)."""
+        empty = empties[index]
+        empty["civil_pi_radius"] = float(radius)
+        empty["civil_pi_type"] = "CURVE" if radius > 0 else "TANGENT"
+
+    @classmethod
+    def clear_pi_radius(cls, alignment_id: int, index: int) -> None:
+        """Clear the curve radius on the PI empty at ``index`` (spec 1.3,
+        ``Alt+C`` key) — the curve is removed, the PI becomes a pass-through
+        tangent point."""
+        empties = cls.get_pi_edit_empties(alignment_id)
+        if 0 <= index < len(empties):
+            empties[index]["civil_pi_radius"] = 0.0
+            empties[index]["civil_pi_type"] = "TANGENT"
+
+    # =========================================================================
+    # Alignment / Vertical Deletion (spec 1.4, 2.6)
+    # =========================================================================
+
+    @classmethod
+    def remove_alignment_entity(cls, alignment: "ifcopenshell.entity_instance") -> None:
+        """Remove the IfcAlignment entity itself (IFC layer only).
+
+        Isolated from ``core.alignment.delete_alignment`` so core stays free
+        of direct ``ifcopenshell.api`` calls. Mirrors what the standalone
+        ``root.remove_product`` call in the old ``CIVIL_OT_clear_pis``
+        operator did: relationships (placement, representation, the
+        alignment's own IfcRelNests membership) are cleaned up, but nested
+        layout/segment entities are not cascade-removed — they become
+        unreferenced. This is an existing, pre-Saikei limitation of
+        ``root.remove_product`` for decomposition trees, not new behavior.
+        """
+        import ifcopenshell.api.root
+
+        ifc_file = tool.Ifc.get()
+        ifcopenshell.api.root.remove_product(ifc_file, product=alignment)
+
+    @classmethod
+    def remove_vertical_layout(cls, alignment: "ifcopenshell.entity_instance") -> None:
+        """Remove the vertical layout and revert the alignment to
+        horizontal-only (spec 2.6).
+
+        Mirrors ``add_vertical_layout`` in reverse for the single-vertical
+        case Saikei supports (``core.add_vertical_to_alignment`` blocks a
+        second vertical, so when present the vertical layout is always
+        nested directly under the alignment per IFC CT 4.1.4.4.1.1 — never
+        split onto a child alignment via CT 4.1.4.4.1.2).
+
+        Removes, in order:
+        1. The vertical layout's real segments (both halves — geometric
+           curve segments and semantic IfcAlignmentSegments).
+        2. Blender objects for those segments and the layout's own object.
+        3. The terminator's semantic IfcAlignmentSegment (its geometric half
+           is removed in step 5, with the rest of the gradient curve).
+        4. The IfcAlignmentVertical entity itself.
+        5. The "Axis"/Curve3D IfcGradientCurve representation that
+           ``add_vertical_layout`` assigned to the alignment — reverting the
+           "FootPrint"/Curve2D representation it renamed back to
+           "Axis"/Curve2D so the alignment reads as horizontal-only again.
+        6. Any stale 3D-centerline helper object (it drove off the vertical).
+
+        Does nothing if the alignment has no vertical layout.
+        """
+        import ifcopenshell.api.alignment as align_api
+        import ifcopenshell.api.geometry
+        import ifcopenshell.api.root
+        import ifcopenshell.util.representation
+
+        ifc_file = tool.Ifc.get()
+
+        v_layout = align_api.get_vertical_layout(alignment)
+        if v_layout is None:
+            return
+
+        # 1-2) Real segments (geometric + semantic) and their Blender objects.
+        cls.clear_layout_segments(v_layout)
+        cls.remove_layout_segment_objects(v_layout)
+        layout_obj = tool.Ifc.get_object(v_layout)
+        if layout_obj:
+            cls._remove_blender_object(layout_obj)
+
+        # 3) The terminator's semantic IfcAlignmentSegment.
+        for rel in getattr(v_layout, "IsNestedBy", []) or []:
+            for segment in list(rel.RelatedObjects or []):
+                if segment.is_a("IfcAlignmentSegment"):
+                    ifcopenshell.api.root.remove_product(ifc_file, product=segment)
+
+        # 4) The layout entity itself (unnests it from the alignment).
+        ifcopenshell.api.root.remove_product(ifc_file, product=v_layout)
+
+        # 5) Revert the geometric representation add_vertical_layout created.
+        for representation in list(ifcopenshell.util.representation.get_representations_iter(alignment)):
+            if representation.RepresentationIdentifier == "Axis" and representation.RepresentationType == "Curve3D":
+                ifcopenshell.api.geometry.unassign_representation(ifc_file, alignment, representation)
+                ifcopenshell.api.geometry.remove_representation(ifc_file, representation=representation)
+            elif (
+                representation.RepresentationIdentifier == "FootPrint"
+                and representation.RepresentationType == "Curve2D"
+            ):
+                representation.RepresentationIdentifier = "Axis"
+
+        # 6) Stale 3D centerline helper (it was draped over the vertical).
+        cls.remove_3d_alignment_object(alignment)
+
     @classmethod
     def get_active_alignment(cls) -> ifcopenshell.entity_instance | None:
         if obj := tool.Blender.get_active_object():
