@@ -327,6 +327,163 @@ class Alignment:
         return max(0.0, full_length - start_tangent - end_tangent)
 
     # =========================================================================
+    # Spiral Transitions & Compound/Reverse Curves (spec 1.5, 1.6)
+    # =========================================================================
+    # Pure-math helpers: A-value <-> length conversion, radii-element
+    # construction for the PI-method solver, and PI-table display geometry
+    # (arc length / tangent lengths with spirals, PCC/PRC classification).
+    # The semantic (DesignParameters-only) PI reconstruction that spec 1.5's
+    # edit-mode round-trip depends on lives further down, next to
+    # back_calculate_pis_from_alignment (its only caller).
+
+    @staticmethod
+    def spiral_length_from_a_value(a_value: float, radius: float) -> float:
+        """Clothoid spiral length from its A-value: L = A^2 / R (spec 1.5
+        A-value mode). Returns 0.0 if radius <= 0 (an A-value is meaningless
+        without a curve to transition into)."""
+        if radius <= 0 or a_value <= 0:
+            return 0.0
+        return (a_value * a_value) / radius
+
+    @staticmethod
+    def a_value_from_spiral_length(length: float, radius: float) -> float:
+        """Clothoid A-value from its length: A = sqrt(R * L) -- the inverse
+        of ``spiral_length_from_a_value``. Returns 0.0 if radius <= 0 or
+        length <= 0."""
+        if radius <= 0 or length <= 0:
+            return 0.0
+        return math.sqrt(radius * length)
+
+    @classmethod
+    def build_pi_radius_element(
+        cls,
+        radius: float,
+        spiral_in: float = 0.0,
+        spiral_out: float = 0.0,
+        join_next: bool = False,
+    ):
+        """Build one element of the ``radii`` sequence that
+        ``ifcopenshell.api.alignment.layout_horizontal_alignment_by_pi_method``
+        (and its pure-geometry sibling ``solve_horizontal_alignment_by_pi_method``)
+        expects for a single PI, per spec 1.5/1.6:
+
+        - plain ``radius`` (float) when there are no spirals and no
+          join_next -- the original, pre-spiral behavior: a bare circular
+          curve, or, at radius 0.0, a pass-through tangent PI.
+        - ``(radius, spiral_in, spiral_out)`` when either spiral length is
+          > 0 -- spiral-curve-spiral, or spiral-spiral when the two spirals
+          consume the PI's full deflection (the solver decides which; this
+          function only shapes the element).
+        - ``{"radius": ..., "lin": ..., "lout": ..., "join_next": True}``
+          when ``join_next`` is set (spec 1.6 compound/reverse curves) --
+          the dict form is used even when both spiral lengths are 0.0,
+          since join_next is only accepted by the solver in dict form.
+        """
+        if join_next:
+            return {"radius": float(radius), "lin": float(spiral_in), "lout": float(spiral_out), "join_next": True}
+        if spiral_in > 0.0 or spiral_out > 0.0:
+            return (float(radius), float(spiral_in), float(spiral_out))
+        return float(radius)
+
+    @classmethod
+    def spiral_curve_geometry_at_pi(
+        cls,
+        p1: Tuple[float, float],
+        p2: Tuple[float, float],
+        p3: Tuple[float, float],
+        radius: float,
+        spiral_in: float = 0.0,
+        spiral_out: float = 0.0,
+    ) -> dict:
+        """Pure-math PI-table display geometry (spec 1.5) for a curve at a
+        PI, with or without spiral transitions -- a direct port of
+        ``solve_horizontal_alignment_by_pi_method``'s own spiral composition
+        (the same ``theta = L / (2R)`` spiral angle, the same
+        ``ifcopenshell.api.alignment.compute_clothoid_end`` quadrature) so
+        the table's Tan / Spiral / Curve row lengths agree with what the
+        solver actually writes to IFC, without needing to run the solver
+        (or the geometry engine) just to redraw the table.
+
+        Returns a dict:
+            "deflection": signed delta at the PI, radians (0.0 if no curve)
+            "tangent_in": distance from the PI back to TS (or PC if there is
+                no entry spiral)
+            "tangent_out": distance from the PI forward to ST (or PT if
+                there is no exit spiral)
+            "arc_length": length of the CIRCULAR portion only -- 0.0 for a
+                pure spiral-spiral transition, where the spirals consume the
+                whole deflection
+
+        radius <= 0 (no curve at this PI) returns all zeros.
+        """
+        if radius <= 0:
+            return {"deflection": 0.0, "tangent_in": 0.0, "tangent_out": 0.0, "arc_length": 0.0}
+
+        delta = cls.deflection_angle_from_points(p1, p2, p3)
+
+        if spiral_in <= 0.0 and spiral_out <= 0.0:
+            tangent = cls.calculate_tangent_length(radius, abs(delta))
+            arc_length = cls.calculate_arc_length(radius, abs(delta))
+            return {"deflection": delta, "tangent_in": tangent, "tangent_out": tangent, "arc_length": arc_length}
+
+        import ifcopenshell.api.alignment as align_api
+
+        R = float(radius)
+        theta1 = spiral_in / (2.0 * R)
+        theta2 = spiral_out / (2.0 * R)
+        theta_c = max(abs(delta) - theta1 - theta2, 0.0)
+        arc_length = R * theta_c
+
+        # Composition mirrors the solver exactly: pieces are built for a
+        # curve turning left (unsigned R, theta_c) and mirrored into world
+        # space by s -- see solve_horizontal_alignment_by_pi_method's own
+        # comment on this same composition.
+        s = 1.0 if 0.0 < delta else -1.0
+        pieces = []
+        if spiral_in > 0.0:
+            pieces.append(align_api.compute_clothoid_end(spiral_in, 0.0, 1.0 / R))
+        pieces.append((R * math.sin(theta_c), R * (1.0 - math.cos(theta_c)), theta_c))
+        if spiral_out > 0.0:
+            pieces.append(align_api.compute_clothoid_end(spiral_out, 1.0 / R, 0.0))
+
+        x = y = direction = 0.0
+        for dx_, dy_, dtheta_ in pieces:
+            x += dx_ * math.cos(direction) - s * dy_ * math.sin(direction)
+            y += dx_ * math.sin(direction) + s * dy_ * math.cos(direction)
+            direction += s * dtheta_
+
+        if abs(math.sin(delta)) < 1e-12:
+            return {"deflection": delta, "tangent_in": 0.0, "tangent_out": 0.0, "arc_length": arc_length}
+
+        tangent_in = x - y / math.tan(delta)
+        tangent_out = y / math.sin(delta)
+        return {"deflection": delta, "tangent_in": tangent_in, "tangent_out": tangent_out, "arc_length": arc_length}
+
+    @classmethod
+    def junction_type(
+        cls,
+        p_prev: Tuple[float, float],
+        p_this: Tuple[float, float],
+        p_next: Tuple[float, float],
+        p_next2: Tuple[float, float],
+    ) -> str:
+        """Classify a join_next compound/reverse curve junction (spec 1.6)
+        between the curve at PI ``p_this`` and the curve at PI ``p_next`` by
+        comparing their deflection signs: a PCC (point of compound
+        curvature) when the two curves turn the SAME direction, a PRC
+        (point of reverse curvature) when they turn OPPOSITE directions.
+
+        Uses the PI polygon's own turn direction at each PI (well-defined
+        from three consecutive PI points regardless of whether a real
+        tangent run separates the two curves), so this works for a
+        join_next junction exactly as it would for two independently
+        tangent-connected curves.
+        """
+        delta1 = cls.deflection_angle_from_points(p_prev, p_this, p_next)
+        delta2 = cls.deflection_angle_from_points(p_this, p_next, p_next2)
+        return "PCC" if (delta1 >= 0.0) == (delta2 >= 0.0) else "PRC"
+
+    # =========================================================================
     # Vertical Alignment Geometry Methods
     # =========================================================================
 
@@ -2159,12 +2316,197 @@ class Alignment:
     # 4. Collect new positions and regenerate alignment segments
 
     @classmethod
-    def back_calculate_pis_from_alignment(cls, alignment: "ifcopenshell.entity_instance") -> List[dict]:
-        """Reverse-engineer PI positions from IFC alignment segments.
+    def reconstruct_pis_from_horizontal_segments(cls, segment_records: List[dict]) -> List[dict]:
+        """Pure-math reconstruction of PI positions -- and, per spec 1.5,
+        curve radius plus entry/exit spiral lengths -- from an ORDERED list
+        of horizontal segment records. No IFC entities, no geometry engine:
+        each record is a plain dict ``{"predefined_type", "start_point"
+        (x, y), "start_direction" (radians), "start_radius" (float or
+        None), "end_radius" (float or None), "length"}`` -- exactly the
+        fields stored directly on ``IfcAlignmentHorizontalSegment``
+        (StartPoint, StartDirection, Start/EndRadiusOfCurvature,
+        SegmentLength), so ``back_calculate_pis_from_alignment`` can supply
+        them straight from DesignParameters attribute reads.
 
-        Uses ifcopenshell.api.alignment.segment_vertices() to extract
-        the tangent intersection (TI) point for each segment — the TI
-        IS the PI for curve segments.
+        This mirrors ``solve_horizontal_alignment_by_pi_method`` in reverse:
+
+        - Two consecutive LINE segments meeting with nothing between them
+          recover a TANGENT PI at their shared point (no curve).
+        - A maximal RUN of non-LINE segments, bounded by LINE segments (or
+          the ends of the whole alignment), recovers ONE curve PI. The PI
+          point is the intersection of the run's own first segment's
+          (start_point, start_direction) -- already colinear with the
+          incoming tangent -- and the run's own last segment's END point/
+          direction (via ``ifcopenshell.api.alignment.
+          compute_horizontal_segment_end``, colinear with the outgoing
+          tangent). The run's TYPE SEQUENCE is pattern-matched to recover
+          (radius, spiral_in, spiral_out):
+
+              (CIRCULARARC,)                            plain curve
+              (CLOTHOID, CIRCULARARC)                    entry spiral only
+              (CIRCULARARC, CLOTHOID)                    exit spiral only
+              (CLOTHOID, CIRCULARARC, CLOTHOID)          spiral-curve-spiral
+              (CLOTHOID, CLOTHOID)                       spiral-spiral (no arc)
+
+        Any other run shape -- most notably TWO OR MORE CIRCULARARC segments
+        meeting with no separating LINE, the signature IFC leaves for a
+        join_next compound/reverse curve junction (spec 1.6) -- cannot be
+        reduced to a single PI's (radius, spiral_in, spiral_out) and raises
+        ValueError, per spec 1.2: "Where derivation is ambiguous the
+        alignment is edited by segment instead." PI edit mode does not
+        round-trip join_next; spec 1.6 curves are joined/unjoined directly
+        against the PI table instead (CIVIL_OT_join_curves / _unjoin_curves).
+
+        Returns a list of PI dicts, alignment order, endpoints included:
+        ``{"e", "n", "radius", "pi_type", "spiral_in", "spiral_out"}``.
+
+        Raises:
+            ValueError: on an irreducible run (see above), or if the
+                incoming/outgoing tangents at a curve group do not intersect
+                (degenerate geometry).
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        if not segment_records:
+            return []
+
+        def as_hsd(rec: dict):
+            return align_api.HorizontalSegmentDefinition(
+                start_point=rec["start_point"],
+                start_direction=rec["start_direction"],
+                start_radius_of_curvature=rec["start_radius"] or 0.0,
+                end_radius_of_curvature=rec["end_radius"] or 0.0,
+                segment_length=rec["length"],
+                predefined_type=rec["predefined_type"],
+            )
+
+        def segment_end(rec: dict):
+            """(x, y, direction_radians) at the end of ``rec``, computed
+            purely from its own parameters -- no geometry engine."""
+            return align_api.compute_horizontal_segment_end(as_hsd(rec))
+
+        def ambiguous_run(types: tuple) -> ValueError:
+            return ValueError(
+                f"Segment sequence {types} at this PI is ambiguous and cannot be reduced to a "
+                "single PI's curve parameters (likely a compound or reverse curve junction); "
+                "the alignment is edited by segment instead"
+            )
+
+        n = len(segment_records)
+        pis: List[dict] = []
+        start_pt = segment_records[0]["start_point"]
+        pis.append(
+            {
+                "e": start_pt[0],
+                "n": start_pt[1],
+                "radius": 0.0,
+                "pi_type": "ENDPOINT",
+                "spiral_in": 0.0,
+                "spiral_out": 0.0,
+            }
+        )
+
+        i = 0
+        while i < n:
+            rec = segment_records[i]
+            if rec["predefined_type"] == "LINE":
+                if i + 1 < n and segment_records[i + 1]["predefined_type"] == "LINE":
+                    bx, by, _ = segment_end(rec)
+                    pis.append(
+                        {"e": bx, "n": by, "radius": 0.0, "pi_type": "TANGENT", "spiral_in": 0.0, "spiral_out": 0.0}
+                    )
+                i += 1
+                continue
+
+            j = i
+            while j < n and segment_records[j]["predefined_type"] != "LINE":
+                j += 1
+            group = segment_records[i:j]
+            types = tuple(g["predefined_type"] for g in group)
+
+            first, last = group[0], group[-1]
+            in_point = first["start_point"]
+            in_direction = (math.cos(first["start_direction"]), math.sin(first["start_direction"]))
+            out_x, out_y, out_dir_radians = segment_end(last)
+            out_direction = (math.cos(out_dir_radians), math.sin(out_dir_radians))
+
+            pi_point = cls.line_intersection_2d(in_point, in_direction, (out_x, out_y), out_direction)
+            if pi_point is None:
+                raise ValueError(
+                    "Could not locate a PI point for this curve -- the incoming and outgoing "
+                    "tangents do not intersect; the alignment is edited by segment instead"
+                )
+
+            if types == ("CIRCULARARC",):
+                (arc,) = group
+                radius = abs(arc["start_radius"] or arc["end_radius"] or 0.0)
+                spiral_in, spiral_out = 0.0, 0.0
+            elif types == ("CLOTHOID", "CIRCULARARC"):
+                entry, arc = group
+                radius = abs(arc["start_radius"] or arc["end_radius"] or 0.0)
+                spiral_in, spiral_out = entry["length"], 0.0
+            elif types == ("CIRCULARARC", "CLOTHOID"):
+                arc, exitc = group
+                radius = abs(arc["start_radius"] or arc["end_radius"] or 0.0)
+                spiral_in, spiral_out = 0.0, exitc["length"]
+            elif types == ("CLOTHOID", "CIRCULARARC", "CLOTHOID"):
+                entry, arc, exitc = group
+                radius = abs(arc["start_radius"] or arc["end_radius"] or 0.0)
+                spiral_in, spiral_out = entry["length"], exitc["length"]
+            elif types == ("CLOTHOID", "CLOTHOID"):
+                entry, exitc = group
+                radius = abs(entry["end_radius"] or exitc["start_radius"] or 0.0)
+                spiral_in, spiral_out = entry["length"], exitc["length"]
+            else:
+                raise ambiguous_run(types)
+
+            pis.append(
+                {
+                    "e": pi_point[0],
+                    "n": pi_point[1],
+                    "radius": radius,
+                    "pi_type": "CURVE",
+                    "spiral_in": spiral_in,
+                    "spiral_out": spiral_out,
+                }
+            )
+            i = j
+
+        final_x, final_y, _ = segment_end(segment_records[-1])
+        last_pi = pis[-1]
+        dist = math.hypot(final_x - last_pi["e"], final_y - last_pi["n"])
+        if dist > 0.001:
+            pis.append(
+                {
+                    "e": final_x,
+                    "n": final_y,
+                    "radius": 0.0,
+                    "pi_type": "ENDPOINT",
+                    "spiral_in": 0.0,
+                    "spiral_out": 0.0,
+                }
+            )
+        else:
+            last_pi["pi_type"] = "ENDPOINT"
+
+        return pis
+
+    @classmethod
+    def back_calculate_pis_from_alignment(cls, alignment: "ifcopenshell.entity_instance") -> List[dict]:
+        """Reverse-engineer PI positions -- and, per spec 1.5, curve radius
+        plus entry/exit spiral lengths -- from IFC alignment segments.
+
+        Reads ``IfcAlignmentHorizontalSegment.DesignParameters`` (StartPoint,
+        StartDirection, Start/EndRadiusOfCurvature, SegmentLength) directly
+        and delegates to ``reconstruct_pis_from_horizontal_segments`` for the
+        pure-math reconstruction -- NO geometry engine evaluation (unlike the
+        pre-spec-1.5 implementation, which used
+        ``ifcopenshell.api.alignment.segment_vertices()``; that TI-based
+        approach cannot correctly locate a PI whose curve has spiral
+        transitions, since a spiral's own tangent-at-end is tangent to the
+        circular arc, not to the outgoing PI leg). Mirrors
+        ``radius_at_station`` / ``back_calculate_cant_points_from_layout``'s
+        semantic-only reading pattern.
 
         Args:
             alignment: The IfcAlignment entity
@@ -2175,11 +2517,19 @@ class Alignment:
             - "n": float - Northing coordinate in IFC space
             - "radius": float - Curve radius (0 for endpoints/tangent PIs)
             - "pi_type": str - "ENDPOINT", "CURVE", or "TANGENT"
+            - "spiral_in": float - entry spiral length (0.0 if none)
+            - "spiral_out": float - exit spiral length (0.0 if none)
 
         Raises:
-            ValueError: If alignment has no horizontal layout or segments
+            ValueError: If the alignment has no horizontal layout or
+                segments, or if a run of segments cannot be reduced to a
+                single PI's curve parameters (spec 1.2: "Where derivation is
+                ambiguous the alignment is edited by segment instead" --
+                the signature of a join_next compound/reverse curve
+                junction, spec 1.6, which PI edit mode does not round-trip).
         """
         import ifcopenshell.api.alignment as align_api
+        import ifcopenshell.util.unit
 
         ifc_file = tool.Ifc.get()
 
@@ -2198,49 +2548,27 @@ class Alignment:
         if not real_segments:
             raise ValueError(f"Alignment #{alignment.id()} has no real segments (only terminator)")
 
-        # Get vertices for all segments
-        seg_vertices = [cls._get_segment_vertices_in_model_units(ifc_file, seg) for seg in real_segments]
-
-        pis = []
-
-        # First PI: start of first segment
-        if seg_vertices[0] is not None:
-            start_pt = seg_vertices[0][0]
-            pis.append({"e": start_pt[0], "n": start_pt[1], "radius": 0.0, "pi_type": "ENDPOINT"})
-
-        # Process each segment for interior PIs
-        prev_is_line = True
-        for i, (seg, verts) in enumerate(zip(real_segments, seg_vertices)):
-            if verts is None:
-                prev_is_line = False
-                continue
-
-            start, end, ti, ni = verts
+        angle_unit_scale = ifcopenshell.util.unit.calculate_unit_scale(ifc_file, "PLANEANGLEUNIT")
+        segment_records = []
+        for seg in real_segments:
             dp = seg.DesignParameters
+            if dp is None or not dp.is_a("IfcAlignmentHorizontalSegment"):
+                raise ValueError(
+                    f"Alignment #{alignment.id()} segment #{seg.id()} has no horizontal design "
+                    "parameters; the alignment is edited by segment instead"
+                )
+            segment_records.append(
+                {
+                    "predefined_type": dp.PredefinedType,
+                    "start_point": tuple(dp.StartPoint.Coordinates[:2]),
+                    "start_direction": float(dp.StartDirection) * angle_unit_scale,
+                    "start_radius": float(dp.StartRadiusOfCurvature) if dp.StartRadiusOfCurvature is not None else None,
+                    "end_radius": float(dp.EndRadiusOfCurvature) if dp.EndRadiusOfCurvature is not None else None,
+                    "length": float(dp.SegmentLength),
+                }
+            )
 
-            if ti is not None:
-                # Curve segment: TI is the PI
-                radius = abs(float(dp.StartRadiusOfCurvature or dp.EndRadiusOfCurvature or 0))
-                pis.append({"e": ti[0], "n": ti[1], "radius": radius, "pi_type": "CURVE"})
-                prev_is_line = False
-            else:
-                # Line segment: if previous was also a line, connection = tangent PI
-                if i > 0 and prev_is_line:
-                    pis.append({"e": start[0], "n": start[1], "radius": 0.0, "pi_type": "TANGENT"})
-                prev_is_line = True
-
-        # Last PI: end of last segment
-        if seg_vertices[-1] is not None:
-            end_pt = seg_vertices[-1][1]
-            if pis:
-                last = pis[-1]
-                dist = ((end_pt[0] - last["e"]) ** 2 + (end_pt[1] - last["n"]) ** 2) ** 0.5
-                if dist > 0.001:
-                    pis.append({"e": end_pt[0], "n": end_pt[1], "radius": 0.0, "pi_type": "ENDPOINT"})
-            else:
-                pis.append({"e": end_pt[0], "n": end_pt[1], "radius": 0.0, "pi_type": "ENDPOINT"})
-
-        return pis
+        return cls.reconstruct_pis_from_horizontal_segments(segment_records)
 
     @classmethod
     def create_pi_edit_empties(
@@ -2302,6 +2630,15 @@ class Alignment:
             empty["civil_pi_radius"] = pi["radius"]
             empty["civil_alignment_id"] = alignment_id
             empty["civil_pi_type"] = pi["pi_type"]
+            # Spec 1.5 spiral transitions -- back_calculate_pis_from_alignment
+            # populates these from real segments; spec 1.6 join_next is never
+            # reconstructed into edit mode (an ambiguous run refuses entry
+            # instead -- see reconstruct_pis_from_horizontal_segments), so
+            # this is always False from that caller, but the key is still
+            # written for round-trip symmetry with collect_pis_from_empties.
+            empty["civil_pi_spiral_in"] = float(pi.get("spiral_in", 0.0))
+            empty["civil_pi_spiral_out"] = float(pi.get("spiral_out", 0.0))
+            empty["civil_pi_join_next"] = bool(pi.get("join_next", False))
 
             # Parent to alignment object
             empty.parent = alignment_obj
@@ -2357,7 +2694,7 @@ class Alignment:
         return removed_count
 
     @classmethod
-    def collect_pis_from_empties(cls, alignment_id: int) -> Tuple[List[Tuple[float, float]], List[float]]:
+    def collect_pis_from_empties(cls, alignment_id: int) -> Tuple[List[Tuple[float, float]], List]:
         """Gather current PI positions from EMPTY objects.
 
         Reads the current positions of PI empties and converts them
@@ -2369,7 +2706,9 @@ class Alignment:
         Returns:
             Tuple of:
             - hpoints: List of (x, y) tuples in IFC coordinates
-            - radii: List of radii for interior PIs only (not first/last)
+            - radii: List of radii-elements for interior PIs only (not
+              first/last) -- see ``build_pi_radius_element`` for the plain
+              float / (R, Lin, Lout) tuple / join_next dict forms.
         """
         empties = cls.get_pi_edit_empties(alignment_id)
 
@@ -2392,8 +2731,11 @@ class Alignment:
 
             # Collect radii for interior PIs only (not first or last)
             if 0 < i < len(empties) - 1:
-                radius = empty.get("civil_pi_radius", 0.0)
-                radii.append(radius)
+                radius = float(empty.get("civil_pi_radius", 0.0))
+                spiral_in = float(empty.get("civil_pi_spiral_in", 0.0))
+                spiral_out = float(empty.get("civil_pi_spiral_out", 0.0))
+                join_next = bool(empty.get("civil_pi_join_next", False))
+                radii.append(cls.build_pi_radius_element(radius, spiral_in, spiral_out, join_next))
 
         return (hpoints, radii)
 
