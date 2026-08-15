@@ -286,6 +286,51 @@ class TestClearPis(NewIfc4X3):
         assert props.active_alignment_name == ""
 
 
+class TestDeleteAlignment(NewIfc4X3):
+    """Tests for CIVIL_OT_delete_alignment (civil.delete_alignment).
+
+    Note: delete_alignment defines invoke() with invoke_confirm, but calling
+    via bpy.ops in Python uses EXEC_DEFAULT by default, skipping invoke.
+    """
+
+    def test_delete_alignment_removes_ifc_entity(self):
+        alignment, alignment_obj = create_empty_alignment()
+        ifc_file = tool.Ifc.get()
+
+        alignment_count_before = len(ifc_file.by_type("IfcAlignment"))
+        result = bpy.ops.civil.delete_alignment()
+
+        assert result == {"FINISHED"}
+        assert len(ifc_file.by_type("IfcAlignment")) < alignment_count_before
+
+    def test_delete_alignment_resets_active_alignment_props(self):
+        alignment, alignment_obj = create_empty_alignment()
+        props = get_alignment_props()
+
+        bpy.ops.civil.delete_alignment()
+
+        assert props.active_alignment_id == 0
+        assert props.active_alignment_name == ""
+
+    def test_delete_alignment_resets_pi_and_pvi_tables(self):
+        alignment, alignment_obj = create_empty_alignment()
+        props = get_alignment_props()
+        bpy.ops.civil.add_pi()
+        bpy.ops.civil.add_pi()
+        bpy.ops.civil.add_pvi()
+
+        bpy.ops.civil.delete_alignment()
+
+        assert len(props.pis) == 0
+        assert len(props.display_rows) == 0
+        assert len(props.vertical_pvis) == 0
+        assert len(props.vertical_display_rows) == 0
+
+    def test_poll_fails_when_no_active_alignment(self):
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.delete_alignment()
+
+
 class TestRecalculatePis(NewIfc4X3):
     """Tests for CIVIL_OT_recalculate_pis (civil.recalculate_pis)."""
 
@@ -548,6 +593,110 @@ class TestAddVerticalToAlignment(NewIfc4X3):
         # Second attempt should fail the poll and raise RuntimeError
         with pytest.raises(RuntimeError):
             bpy.ops.civil.add_vertical_to_alignment()
+
+
+class TestDeleteVerticalLayout(NewIfc4X3):
+    """Tests for CIVIL_OT_delete_vertical_layout (civil.delete_vertical_layout).
+
+    add_vertical_to_alignment does not require the geometry engine (see
+    TestAddVerticalToAlignment above, unmarked) — delete_vertical_layout
+    mirrors it in reverse and likewise needs no geometry evaluation.
+
+    Note: delete_vertical_layout defines invoke() with invoke_confirm, but
+    calling via bpy.ops in Python uses EXEC_DEFAULT by default, skipping invoke.
+    """
+
+    def test_poll_fails_without_alignment(self):
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.delete_vertical_layout()
+
+    def test_poll_fails_without_vertical_layout(self):
+        alignment, alignment_obj = create_empty_alignment()
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.delete_vertical_layout()
+
+    def test_delete_vertical_layout_removes_ifc_vertical(self):
+        alignment, alignment_obj = create_empty_alignment()
+        ifc_file = tool.Ifc.get()
+        bpy.ops.civil.add_vertical_to_alignment()
+        assert len(ifc_file.by_type("IfcAlignmentVertical")) == 1
+
+        result = bpy.ops.civil.delete_vertical_layout()
+
+        assert result == {"FINISHED"}
+        assert len(ifc_file.by_type("IfcAlignmentVertical")) == 0
+
+    def test_delete_vertical_layout_clears_pvi_table(self):
+        alignment, alignment_obj = create_empty_alignment()
+        bpy.ops.civil.add_vertical_to_alignment()
+        props = get_alignment_props()
+        bpy.ops.civil.add_pvi()
+        bpy.ops.civil.add_pvi()
+
+        bpy.ops.civil.delete_vertical_layout()
+
+        assert len(props.vertical_pvis) == 0
+        assert len(props.vertical_display_rows) == 0
+
+    def test_horizontal_alignment_survives(self):
+        alignment, alignment_obj = create_empty_alignment()
+        ifc_file = tool.Ifc.get()
+        bpy.ops.civil.add_vertical_to_alignment()
+
+        bpy.ops.civil.delete_vertical_layout()
+
+        assert len(ifc_file.by_type("IfcAlignment")) == 1
+        assert len(ifc_file.by_type("IfcAlignmentHorizontal")) == 1
+
+
+class TestSetPiCurveRadius(NewIfc4X3):
+    """Tests for CIVIL_OT_set_pi_curve_radius (civil.set_pi_curve_radius).
+
+    Bypasses full PI edit mode entry (which needs the geometry engine to
+    back-calculate PIs from real IFC segments) by building PI edit empties
+    directly and flipping is_pi_edit_mode — matching exactly what the
+    sub-operator itself reads (get_pi_edit_empties + props.is_pi_edit_mode).
+    """
+
+    def _bare_pi_empties(self, alignment):
+        pis = [
+            {"e": 0.0, "n": 0.0, "radius": 0.0, "pi_type": "ENDPOINT"},
+            {"e": 100.0, "n": 0.0, "radius": 0.0, "pi_type": "TANGENT"},
+            {"e": 100.0, "n": 100.0, "radius": 0.0, "pi_type": "ENDPOINT"},
+        ]
+        return tool.Alignment.create_pi_edit_empties(alignment, pis)
+
+    def test_sets_radius_and_marks_curve_type(self):
+        alignment, alignment_obj = create_empty_alignment()
+        self._bare_pi_empties(alignment)
+        props = get_alignment_props()
+        props.is_pi_edit_mode = True
+
+        result = bpy.ops.civil.set_pi_curve_radius("EXEC_DEFAULT", alignment_id=alignment.id(), pi_index=1, radius=50.0)
+
+        assert result == {"FINISHED"}
+        empties = tool.Alignment.get_pi_edit_empties(alignment.id())
+        assert empties[1].get("civil_pi_radius") == pytest.approx(50.0)
+        assert empties[1].get("civil_pi_type") == "CURVE"
+
+    def test_refuses_when_radius_too_large(self):
+        """A refused fit reports {"ERROR"}, which bpy.ops raises as RuntimeError."""
+        alignment, alignment_obj = create_empty_alignment()
+        self._bare_pi_empties(alignment)
+        props = get_alignment_props()
+        props.is_pi_edit_mode = True
+
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.set_pi_curve_radius("EXEC_DEFAULT", alignment_id=alignment.id(), pi_index=1, radius=500.0)
+
+        empties = tool.Alignment.get_pi_edit_empties(alignment.id())
+        assert empties[1].get("civil_pi_radius") == 0.0
+
+    def test_poll_fails_outside_pi_edit_mode(self):
+        props = get_alignment_props()
+        props.is_pi_edit_mode = False
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.set_pi_curve_radius("EXEC_DEFAULT", alignment_id=1, pi_index=0, radius=50.0)
 
 
 # ===========================================================================

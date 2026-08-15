@@ -2015,3 +2015,394 @@ class TestDesignCriteriaPset(NewFile):
     def test_returns_none_when_never_set(self):
         alignment = self._make_alignment()
         assert subject.get_design_criteria(alignment) is None
+
+
+# ===========================================================================
+# PI Edit Mode — In-Mode Editing (spec 1.3) — pure math, no Blender objects
+# ===========================================================================
+# compute_curve_tangent_length / project_point_onto_segment_2d /
+# line_intersection_2d / find_tangent_insertion_point /
+# validate_curve_fit_geometry / slide_tangent all take plain (x, y) tuples,
+# so they are unit-testable independent of Blender objects or the IFC file.
+
+
+class TestComputeCurveTangentLength(NewFile):
+    """Tests for Alignment.compute_curve_tangent_length()."""
+
+    def test_returns_zero_when_radius_is_zero(self):
+        t = subject.compute_curve_tangent_length((-100.0, 0.0), (0.0, 0.0), (0.0, 100.0), 0.0)
+        assert t == 0.0
+
+    def test_returns_zero_when_prev_missing(self):
+        t = subject.compute_curve_tangent_length(None, (0.0, 0.0), (0.0, 100.0), 50.0)
+        assert t == 0.0
+
+    def test_returns_zero_when_next_missing(self):
+        t = subject.compute_curve_tangent_length((-100.0, 0.0), (0.0, 0.0), None, 50.0)
+        assert t == 0.0
+
+    def test_right_angle_turn_gives_tangent_length_equal_to_radius(self):
+        # A 90-degree deflection: T = R * tan(45deg) = R.
+        t = subject.compute_curve_tangent_length((-100.0, 0.0), (0.0, 0.0), (0.0, 100.0), 50.0)
+        assert_close(t, 50.0, tol=1e-6)
+
+    def test_straight_through_pi_gives_zero_tangent_length(self):
+        # Collinear PI: no deflection, so even a "curved" PI claims nothing.
+        t = subject.compute_curve_tangent_length((-100.0, 0.0), (0.0, 0.0), (100.0, 0.0), 50.0)
+        assert_close(t, 0.0, tol=1e-6)
+
+
+class TestProjectPointOntoSegment2D(NewFile):
+    """Tests for Alignment.project_point_onto_segment_2d()."""
+
+    def test_projects_onto_middle_of_segment(self):
+        t, closest, perpendicular = subject.project_point_onto_segment_2d((50.0, 10.0), (0.0, 0.0), (100.0, 0.0))
+        assert_close(t, 0.5, tol=1e-9)
+        assert closest == pytest.approx((50.0, 0.0))
+        assert_close(perpendicular, 10.0, tol=1e-9)
+
+    def test_clamps_before_segment_start(self):
+        t, closest, perpendicular = subject.project_point_onto_segment_2d((-50.0, 0.0), (0.0, 0.0), (100.0, 0.0))
+        assert t == 0.0
+        assert closest == pytest.approx((0.0, 0.0))
+
+    def test_clamps_after_segment_end(self):
+        t, closest, perpendicular = subject.project_point_onto_segment_2d((150.0, 0.0), (0.0, 0.0), (100.0, 0.0))
+        assert t == 1.0
+        assert closest == pytest.approx((100.0, 0.0))
+
+    def test_degenerate_segment_returns_start_point(self):
+        t, closest, perpendicular = subject.project_point_onto_segment_2d((3.0, 4.0), (0.0, 0.0), (0.0, 0.0))
+        assert t == 0.0
+        assert closest == (0.0, 0.0)
+        assert_close(perpendicular, 5.0, tol=1e-9)
+
+
+class TestLineIntersection2D(NewFile):
+    """Tests for Alignment.line_intersection_2d()."""
+
+    def test_intersecting_lines(self):
+        point = subject.line_intersection_2d((0.0, 0.0), (1.0, 0.0), (5.0, -5.0), (0.0, 1.0))
+        assert point == pytest.approx((5.0, 0.0))
+
+    def test_parallel_lines_return_none(self):
+        point = subject.line_intersection_2d((0.0, 0.0), (1.0, 0.0), (0.0, 5.0), (2.0, 0.0))
+        assert point is None
+
+
+class TestFindTangentInsertionPoint(NewFile):
+    """Tests for Alignment.find_tangent_insertion_point() — spec 1.3 'I' key."""
+
+    def test_refuses_when_fewer_than_two_points(self):
+        result = subject.find_tangent_insertion_point([(0.0, 0.0)], [0.0], (0.0, 0.0))
+        assert result["ok"] is False
+
+    def test_point_projects_onto_correct_segment(self):
+        points = [(0.0, 0.0), (100.0, 0.0), (200.0, 0.0)]
+        radii = [0.0, 0.0, 0.0]
+        result = subject.find_tangent_insertion_point(points, radii, (150.0, 5.0))
+        assert result["ok"] is True
+        assert result["segment_index"] == 1
+        assert result["point"] == pytest.approx((150.0, 0.0))
+
+    def test_allows_insertion_just_outside_curve_extent(self):
+        # PI 1 is a 90-degree bend with R=50 -> T=50 claimed on both sides.
+        points = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)]
+        radii = [0.0, 50.0, 0.0]
+        result = subject.find_tangent_insertion_point(points, radii, (20.0, 0.0))
+        assert result["ok"] is True
+        assert result["segment_index"] == 0
+
+    def test_refuses_insertion_inside_curve_extent_on_incoming_tangent(self):
+        points = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)]
+        radii = [0.0, 50.0, 0.0]
+        # (80, 0) is 80 units along segment 0 (length 100); T=50 blocks
+        # anything past x=50.
+        result = subject.find_tangent_insertion_point(points, radii, (80.0, 0.0))
+        assert result["ok"] is False
+        assert "tangent extents" in result["reason"]
+
+    def test_refuses_insertion_inside_curve_extent_on_outgoing_tangent(self):
+        points = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)]
+        radii = [0.0, 50.0, 0.0]
+        # (100, 20) is 20 units along segment 1; T=50 blocks anything before y=50.
+        result = subject.find_tangent_insertion_point(points, radii, (100.0, 20.0))
+        assert result["ok"] is False
+        assert "tangent extents" in result["reason"]
+
+
+class TestValidateCurveFitGeometry(NewFile):
+    """Tests for Alignment.validate_curve_fit_geometry() — spec 1.3 'C' key."""
+
+    def test_fits_with_ample_tangent_length(self):
+        points = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)]
+        radii = [0.0, 0.0, 0.0]
+        ok, reason = subject.validate_curve_fit_geometry(points, radii, 1, 50.0)
+        assert ok is True
+        assert reason is None
+
+    def test_refuses_radius_not_positive(self):
+        points = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)]
+        radii = [0.0, 0.0, 0.0]
+        ok, reason = subject.validate_curve_fit_geometry(points, radii, 1, 0.0)
+        assert ok is False
+        assert "greater than zero" in reason
+
+    def test_refuses_endpoint_index(self):
+        points = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)]
+        radii = [0.0, 0.0, 0.0]
+        ok, reason = subject.validate_curve_fit_geometry(points, radii, 0, 50.0)
+        assert ok is False
+        assert "interior" in reason.lower()
+
+    def test_refuses_when_too_large_for_available_tangent(self):
+        points = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)]
+        radii = [0.0, 0.0, 0.0]
+        ok, reason = subject.validate_curve_fit_geometry(points, radii, 1, 200.0)
+        assert ok is False
+        assert "too large" in reason
+
+    def test_refuses_accounting_for_neighbor_curve_claim(self):
+        # U-shape: p0=(0,0) p1=(100,0) p2=(100,100) p3=(0,100). PI 1 already
+        # has a 60-radius curve, which claims 60 of the shared 100-length
+        # tangent between PI 1 and PI 2 (index under test).
+        points = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
+        radii = [0.0, 60.0, 0.0, 0.0]
+
+        # 50 alone would fit a 100-length tangent, but 50 + 60 (neighbor's
+        # claim) > 100, so it must be refused.
+        ok, reason = subject.validate_curve_fit_geometry(points, radii, 2, 50.0)
+        assert ok is False
+        assert "too large" in reason
+
+        # 30 + 60 = 90 <= 100, so it fits.
+        ok2, reason2 = subject.validate_curve_fit_geometry(points, radii, 2, 30.0)
+        assert ok2 is True
+        assert reason2 is None
+
+
+class TestSlideTangent(NewFile):
+    """Tests for Alignment.slide_tangent() — spec 1.3 'T' key (bearing-constant slide)."""
+
+    def test_mid_tangent_slide_keeps_bearing_and_applies_only_perpendicular_offset(self):
+        p_prev = (-100.0, 50.0)
+        p_a = (0.0, 0.0)
+        p_b = (100.0, 0.0)
+        p_next = (200.0, 50.0)
+        # x-component of delta is parallel to the tangent and must be discarded.
+        delta = (5.0, 10.0)
+
+        new_a, new_b = subject.slide_tangent(p_prev, p_a, p_b, p_next, delta)
+
+        assert new_a == pytest.approx((-20.0, 10.0))
+        assert new_b == pytest.approx((120.0, 10.0))
+        # Bearing (direction vector) of the slid tangent is unchanged.
+        direction = (new_b[0] - new_a[0], new_b[1] - new_a[1])
+        assert direction == pytest.approx((140.0, 0.0))
+        # Perpendicular offset equals the perpendicular component of delta.
+        assert new_a[1] == pytest.approx(10.0)
+        assert new_b[1] == pytest.approx(10.0)
+
+    def test_end_tangent_case_missing_prev_translates_endpoint_directly(self):
+        p_a = (0.0, 0.0)
+        p_b = (100.0, 0.0)
+        p_next = (200.0, 50.0)
+        delta = (0.0, 10.0)
+
+        new_a, new_b = subject.slide_tangent(None, p_a, p_b, p_next, delta)
+
+        assert new_a == pytest.approx((0.0, 10.0))
+        assert new_b == pytest.approx((120.0, 10.0))
+
+    def test_end_tangent_case_missing_next_translates_endpoint_directly(self):
+        p_prev = (-100.0, 50.0)
+        p_a = (0.0, 0.0)
+        p_b = (100.0, 0.0)
+        delta = (0.0, 10.0)
+
+        new_a, new_b = subject.slide_tangent(p_prev, p_a, p_b, None, delta)
+
+        assert new_a == pytest.approx((-20.0, 10.0))
+        assert new_b == pytest.approx((100.0, 10.0))
+
+    def test_degenerate_zero_length_tangent_returns_unchanged(self):
+        p = (5.0, 5.0)
+        new_a, new_b = subject.slide_tangent((0.0, 0.0), p, p, (10.0, 10.0), (3.0, 4.0))
+        assert new_a == p
+        assert new_b == p
+
+
+# ===========================================================================
+# PI Edit Mode — In-Mode Editing (spec 1.3) — Blender-dependent
+# ===========================================================================
+# These build PI edit empties directly from a hand-crafted ``pis`` list
+# (bypassing back_calculate_pis_from_alignment, which needs the geometry
+# engine to read segment endpoints) so they run without requires_geometry_engine.
+
+
+def _pi(e, n, radius=0.0, pi_type="TANGENT"):
+    return {"e": e, "n": n, "radius": radius, "pi_type": pi_type}
+
+
+def _create_bare_alignment_with_pi_empties(pis, name="Test Alignment"):
+    """Create an IfcAlignment (align_api.create — no geometry engine) and PI
+    edit empties from a hand-built ``pis`` list. Returns (alignment, empties)."""
+    ifc_file = tool.Ifc.get()
+    alignment = align_api.create(ifc_file, name=name)
+    subject.create_hierarchy_for_alignment(alignment)
+    empties = subject.create_pi_edit_empties(alignment, pis)
+    return alignment, empties
+
+
+class TestInsertPiOnTangent(NewIfc4X3):
+    """Tests for Alignment.insert_pi_on_tangent() — spec 1.3 'I' key."""
+
+    def test_inserts_on_nearest_segment_and_renumbers(self):
+        pis = [_pi(0.0, 0.0, pi_type="ENDPOINT"), _pi(500.0, 0.0), _pi(500.0, 500.0, pi_type="ENDPOINT")]
+        alignment, empties = _create_bare_alignment_with_pi_empties(pis)
+
+        new_empty, reason = subject.insert_pi_on_tangent(alignment.id(), (250.0, 0.0))
+
+        assert reason is None
+        assert new_empty is not None
+        assert new_empty.get("civil_pi_index") == 1
+
+        all_empties = subject.get_pi_edit_empties(alignment.id())
+        assert len(all_empties) == 4
+        assert [e.get("civil_pi_index") for e in all_empties] == [0, 1, 2, 3]
+        # The old index-1 PI (500, 0) is now renumbered to index 2.
+        assert all_empties[2].location.x == pytest.approx(500.0, abs=2.0)
+
+    def test_returns_none_with_reason_when_fewer_than_two_pis(self):
+        new_empty, reason = subject.insert_pi_on_tangent(999999, (0.0, 0.0))
+        assert new_empty is None
+        assert reason is not None and "at least 2" in reason.lower()
+
+    def test_refuses_when_inside_curve_extent(self):
+        pis = [
+            _pi(0.0, 0.0, pi_type="ENDPOINT"),
+            _pi(100.0, 0.0, radius=50.0, pi_type="CURVE"),
+            _pi(100.0, 100.0, pi_type="ENDPOINT"),
+        ]
+        alignment, empties = _create_bare_alignment_with_pi_empties(pis)
+
+        # 80 units along the first tangent (length 100); T=50 blocks past x=50.
+        new_empty, reason = subject.insert_pi_on_tangent(alignment.id(), (80.0, 0.0))
+        assert new_empty is None
+        assert reason is not None
+
+
+class TestDeletePiEditEmptyToolMethod(NewIfc4X3):
+    """Tests for Alignment.delete_pi_edit_empty() — spec 1.3 'X' key primitive."""
+
+    def test_deletes_and_renumbers_remaining_empties(self):
+        pis = [
+            _pi(0.0, 0.0, pi_type="ENDPOINT"),
+            _pi(100.0, 0.0),
+            _pi(200.0, 0.0),
+            _pi(300.0, 0.0, pi_type="ENDPOINT"),
+        ]
+        alignment, empties = _create_bare_alignment_with_pi_empties(pis)
+
+        removed = subject.delete_pi_edit_empty(alignment.id(), 1)
+        assert removed is True
+
+        remaining = subject.get_pi_edit_empties(alignment.id())
+        assert len(remaining) == 3
+        assert [e.get("civil_pi_index") for e in remaining] == [0, 1, 2]
+
+    def test_returns_false_for_out_of_range_index(self):
+        pis = [_pi(0.0, 0.0, pi_type="ENDPOINT"), _pi(100.0, 0.0, pi_type="ENDPOINT")]
+        alignment, empties = _create_bare_alignment_with_pi_empties(pis)
+        assert subject.delete_pi_edit_empty(alignment.id(), 5) is False
+
+
+class TestSetAndClearPiRadius(NewIfc4X3):
+    """Tests for Alignment.set_pi_radius() / clear_pi_radius()."""
+
+    def test_set_pi_radius_marks_curve_type(self):
+        pis = [_pi(0.0, 0.0, pi_type="ENDPOINT"), _pi(100.0, 0.0), _pi(200.0, 0.0, pi_type="ENDPOINT")]
+        alignment, empties = _create_bare_alignment_with_pi_empties(pis)
+
+        subject.set_pi_radius(empties, 1, 50.0)
+
+        assert empties[1].get("civil_pi_radius") == pytest.approx(50.0)
+        assert empties[1].get("civil_pi_type") == "CURVE"
+
+    def test_clear_pi_radius_resets_to_tangent(self):
+        pis = [
+            _pi(0.0, 0.0, pi_type="ENDPOINT"),
+            _pi(100.0, 0.0, radius=50.0, pi_type="CURVE"),
+            _pi(200.0, 0.0, pi_type="ENDPOINT"),
+        ]
+        alignment, empties = _create_bare_alignment_with_pi_empties(pis)
+
+        subject.clear_pi_radius(alignment.id(), 1)
+
+        refreshed = subject.get_pi_edit_empties(alignment.id())
+        assert refreshed[1].get("civil_pi_radius") == 0.0
+        assert refreshed[1].get("civil_pi_type") == "TANGENT"
+
+
+class TestValidateCurveFitEmpties(NewIfc4X3):
+    """Sanity check that the empties-facing wrapper matches validate_curve_fit_geometry."""
+
+    def test_matches_pure_geometry_result(self):
+        pis = [_pi(0.0, 0.0, pi_type="ENDPOINT"), _pi(100.0, 0.0), _pi(100.0, 100.0, pi_type="ENDPOINT")]
+        alignment, empties = _create_bare_alignment_with_pi_empties(pis)
+
+        ok, reason = subject.validate_curve_fit(empties, 1, 50.0)
+        assert ok is True
+
+        ok2, reason2 = subject.validate_curve_fit(empties, 1, 500.0)
+        assert ok2 is False
+
+
+# ===========================================================================
+# Alignment / Vertical Deletion (spec 1.4, 2.6)
+# ===========================================================================
+
+
+class TestRemoveAlignmentEntity(NewIfc4X3):
+    """Tests for Alignment.remove_alignment_entity()."""
+
+    def test_removes_the_ifc_alignment_entity(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="DeleteMe")
+        alignment_id = alignment.id()
+
+        subject.remove_alignment_entity(alignment)
+
+        with pytest.raises(RuntimeError):
+            ifc_file.by_id(alignment_id)
+
+
+class TestRemoveVerticalLayout(NewIfc4X3):
+    """Tests for Alignment.remove_vertical_layout() — spec 2.6."""
+
+    def test_noop_when_no_vertical_layout(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="NoVertical")
+
+        subject.remove_vertical_layout(alignment)  # should not raise
+
+        assert align_api.get_vertical_layout(alignment) is None
+
+    def test_removes_vertical_layout_and_reverts_representation(self):
+        import ifcopenshell.util.representation
+
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="WithVertical")
+        subject.add_vertical_layout(alignment)
+        assert align_api.get_vertical_layout(alignment) is not None
+
+        subject.remove_vertical_layout(alignment)
+
+        assert align_api.get_vertical_layout(alignment) is None
+        assert len(ifc_file.by_type("IfcAlignmentVertical")) == 0
+
+        representations = list(ifcopenshell.util.representation.get_representations_iter(alignment))
+        identifiers = [(r.RepresentationIdentifier, r.RepresentationType) for r in representations]
+        assert ("Axis", "Curve2D") in identifiers
+        assert ("Axis", "Curve3D") not in identifiers
+        assert ("FootPrint", "Curve2D") not in identifiers

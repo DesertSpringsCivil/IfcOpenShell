@@ -468,3 +468,96 @@ class TestVisualize3dAlignment:
         alignment.create_3d_alignment_object(entity, 5.0).should_be_called().will_return("obj")
         result = subject.visualize_3d_alignment(ifc, alignment, alignment_id=1)
         assert result == "obj"
+
+
+# ---------------------------------------------------------------------------
+# delete_alignment  (spec 1.4)
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteAlignment:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.delete_alignment(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_alignment_not_found(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        with pytest.raises(ValueError, match="not found"):
+            subject.delete_alignment(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.delete_alignment(ifc, alignment, alignment_id=1)
+
+    def test_removes_hierarchy_and_entity_and_returns_removed_count(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.remove_alignment_hierarchy(entity).should_be_called().will_return(3)
+        alignment.remove_3d_alignment_object(entity).should_be_called()
+        alignment.remove_alignment_entity(entity).should_be_called()
+        result = subject.delete_alignment(ifc, alignment, alignment_id=1)
+        assert result == 3
+
+
+# ---------------------------------------------------------------------------
+# delete_vertical_layout  (spec 2.6)
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteVerticalLayout:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.delete_vertical_layout(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_alignment_not_found(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        with pytest.raises(ValueError, match="not found"):
+            subject.delete_vertical_layout(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.delete_vertical_layout(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_no_vertical_layout(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_vertical_layout(entity).should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="no vertical layout"):
+            subject.delete_vertical_layout(ifc, alignment, alignment_id=1)
+
+    def test_removes_vertical_layout(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_vertical_layout(entity).should_be_called().will_return("v_layout")
+        alignment.remove_vertical_layout(entity).should_be_called()
+        result = subject.delete_vertical_layout(ifc, alignment, alignment_id=1)
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# delete_pi_in_edit_mode  (spec 1.3, "X" key core-level guard)
+# ---------------------------------------------------------------------------
+
+
+class TestDeletePiInEditMode:
+    def test_raises_when_fewer_than_three_would_remain(self, ifc, alignment):
+        alignment.get_pi_edit_empties(1).should_be_called().will_return(["e0", "e1", "e2"])
+        with pytest.raises(ValueError, match="At least 3 PIs"):
+            subject.delete_pi_in_edit_mode(ifc, alignment, alignment_id=1, index=1)
+
+    def test_raises_when_index_not_found(self, ifc, alignment):
+        alignment.get_pi_edit_empties(1).should_be_called().will_return(["e0", "e1", "e2", "e3"])
+        alignment.delete_pi_edit_empty(1, 9).should_be_called().will_return(False)
+        with pytest.raises(ValueError, match="not found"):
+            subject.delete_pi_in_edit_mode(ifc, alignment, alignment_id=1, index=9)
+
+    def test_deletes_when_enough_pis_remain(self, ifc, alignment):
+        alignment.get_pi_edit_empties(1).should_be_called().will_return(["e0", "e1", "e2", "e3"])
+        alignment.delete_pi_edit_empty(1, 1).should_be_called().will_return(True)
+        subject.delete_pi_in_edit_mode(ifc, alignment, alignment_id=1, index=1)
