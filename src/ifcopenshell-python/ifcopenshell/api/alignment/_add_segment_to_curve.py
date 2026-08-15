@@ -163,18 +163,15 @@ def _add_segment_to_curve(
     assert end_point is not ...
 
     # IfcCompositeCurve has no EndPoint attribute, only IfcGradientCurve and IfcSegmentedReferenceCurve do.
-    # _add_curve_segment_to_composite_curve() above already repositions the curve's zero length terminal
-    # segment to match the newly inserted segment, but it does not touch EndPoint, so it must be refreshed here.
-    if curve.is_a("IfcGradientCurve") or curve.is_a("IfcSegmentedReferenceCurve"):
-        try:
-            ifcopenshell.api.alignment.update_end_point(file, curve)
-        except RuntimeError as e:
-            # known win64 packaging gap (IfcOpenShell#9301): the geometry mapping DLLs required to evaluate
-            # curve segment geometry are not present in some dev environments. update_end_point only needs
-            # the geometry engine if curve is missing its zero length terminal segment; _add_curve_segment_to_composite_curve()
-            # above already guarantees it has one before this point. This guard is defensive; CI exercises
-            # the real (non-degraded) path.
-            if "No geometry mapping registered" not in str(e):
-                raise
+    # Refresh EndPoint only when the curve already carries its zero length terminal segment: flows like
+    # create_representation() insert real segments BEFORE the terminal exists, and update_end_point()'s
+    # missing-terminal fallback would try to add the terminal mid-construction and fail (the terminal
+    # segment cannot resolve its transition code against a curve still being assembled). Those flows
+    # establish EndPoint when they add the terminal; add_vertical_layout/add_cant_layout finish with
+    # their own update_end_point call.
+    if (curve.is_a("IfcGradientCurve") or curve.is_a("IfcSegmentedReferenceCurve")) and (
+        ifcopenshell.api.alignment.has_zero_length_segment(curve)
+    ):
+        ifcopenshell.api.alignment.update_end_point(file, curve)
 
     return end_point

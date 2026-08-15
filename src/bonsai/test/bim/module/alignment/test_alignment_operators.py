@@ -1217,12 +1217,18 @@ class TestVerticalKFlags(NewIfc4X3):
 
 
 def create_alignment_with_horizontal_and_vertical(name="Cant Test Alignment"):
-    """Build an alignment with both horizontal and vertical layouts present
-    (bare — zero-length terminators only), the minimum
-    civil.add_cant_to_alignment's poll requires. Mirrors create_empty_alignment()
-    + civil.add_vertical_to_alignment, neither of which needs the geometry
-    engine (see TestAddVerticalToAlignment above)."""
+    """Build an alignment with real horizontal geometry plus a vertical layout
+    — what civil.add_cant_to_alignment's poll requires AND what the cant
+    table's station-extent validation needs (a bare alignment has semantic
+    extent 0.0, so any cant point would be refused). Lays out a single
+    1,000-unit tangent via the PI method; requires the geometry engine, which
+    every caller already gates on via requires_geometry_engine."""
     alignment, alignment_obj = create_empty_alignment(name)
+    ifc_file = tool.Ifc.get()
+    h_layout = align_api.get_horizontal_layout(alignment)
+    align_api.layout_horizontal_alignment_by_pi_method(
+        ifc_file, h_layout, [(0.0, 0.0), (1000.0, 0.0)], []
+    )
     bpy.ops.civil.add_vertical_to_alignment()
     return alignment, alignment_obj
 
@@ -1582,11 +1588,11 @@ class TestAddStationEquationOperator(NewIfc4X3):
         props = get_alignment_props()
         props.start_station = 0.0
 
-        result = bpy.ops.civil.add_station_equation(back_station=100.0, ahead_station=100.0)
-
-        # core.add_station_equation raises ValueError -> operator reports
-        # an error and cancels rather than authoring a no-op equation.
-        assert result == {"CANCELLED"}
+        # core.add_station_equation raises ValueError -> the operator reports
+        # {'ERROR'}, which bpy.ops surfaces as a RuntimeError in background
+        # mode rather than returning {'CANCELLED'}.
+        with pytest.raises(RuntimeError, match="must differ"):
+            bpy.ops.civil.add_station_equation(back_station=100.0, ahead_station=100.0)
         assert not any(r.is_equation for r in props.referents)
 
 
