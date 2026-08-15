@@ -58,6 +58,13 @@ def _terrain_object_poll(self, obj):
     return obj.type == "MESH"
 
 
+def _on_design_speed_update(self, context):
+    """Re-flag the PVI table when the design speed changes."""
+    from . import operator as ops
+
+    ops.rebuild_vertical_display_rows(self)
+
+
 def _on_profile_exaggeration_update(self, context):
     """Push a changed exaggeration onto a live profile view immediately.
 
@@ -209,6 +216,9 @@ class VerticalDisplayRow(PropertyGroup):
     elevation: FloatProperty(name="Elevation", default=0.0, precision=3)
     curve_length: FloatProperty(name="Curve Length", default=0.0, precision=2)
     k_value: FloatProperty(name="K Value", default=0.0, precision=1)
+    # Advisory AASHTO K check (spec 2.4): flagged, never blocking.
+    k_deficient: BoolProperty(name="K Deficient", default=False)
+    k_required: FloatProperty(name="Required K", default=0.0, precision=1)
 
     # Grade segment data (SEGMENT rows)
     grade_pct: FloatProperty(name="Grade %", default=0.0, precision=3)
@@ -373,6 +383,20 @@ class CivilAlignmentProperties(PropertyGroup):
         default=260,
         min=120,
         max=900,
+    )
+
+    design_speed: FloatProperty(
+        name="Design Speed",
+        description=(
+            "Design speed for advisory checks — mph in imperial projects, "
+            "km/h in metric projects. 0 disables checking. Vertical curves "
+            "shorter than the AASHTO stopping-sight-distance K require are "
+            "flagged in the PVI table, never blocked"
+        ),
+        default=0.0,
+        min=0.0,
+        soft_max=120.0,
+        update=_on_design_speed_update,
     )
 
     profile_exaggeration: FloatProperty(

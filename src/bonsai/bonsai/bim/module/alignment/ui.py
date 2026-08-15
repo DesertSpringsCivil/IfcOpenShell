@@ -153,8 +153,16 @@ class CIVIL_UL_vertical_pvis(UIList):
                 else:
                     row.label(text="")
 
-                # K value — display only
-                if item.k_value > 0:
+                # K value — display only; ERROR icon flags an advisory
+                # AASHTO stopping-sight-distance deficiency (spec 2.4).
+                if item.k_value > 0 and item.k_deficient:
+                    sub = row.row(align=True)
+                    sub.alert = True
+                    sub.label(
+                        text=f"K={item.k_value:.1f} < {item.k_required:.0f}",
+                        icon="ERROR",
+                    )
+                elif item.k_value > 0:
                     row.label(text=f"K={item.k_value:.1f}")
                 else:
                     row.label(text="")
@@ -361,6 +369,10 @@ class CIVIL_PT_pvi_editor(Panel):
             box.label(text="Edit Vertical Alignment:", icon="EDITMODE_HLT")
             box.operator("civil.enter_pvi_edit_mode", icon="PIVOT_CURSOR", text="Edit PVIs (G key)")
             layout.separator()
+
+        # Advisory design-speed check (spec 2.4): flags short vertical curves
+        # in the table below; 0 disables.
+        layout.prop(props, "design_speed")
 
         # Header row with column labels
         header = layout.row(align=True)

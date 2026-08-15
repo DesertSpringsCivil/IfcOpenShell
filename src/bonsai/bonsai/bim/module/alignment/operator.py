@@ -353,6 +353,13 @@ def rebuild_vertical_display_rows(props):
             j = i - 1  # interior PVI index (0-based)
             if j < len(result.k_values):
                 row.k_value = result.k_values[j]
+                # Advisory AASHTO K check (spec 2.4) — flagged, never blocked.
+                if props.design_speed > 0 and j + 1 < len(result.grades):
+                    is_crest = result.grades[j] > result.grades[j + 1]
+                    required = tool.Alignment.required_k_for_design_speed(props.design_speed, is_crest)
+                    if required is not None and row.k_value < required:
+                        row.k_deficient = True
+                        row.k_required = required
 
         # Add grade segment after each PVI except the last
         if i < len(pvis) - 1:
@@ -1644,6 +1651,9 @@ class CIVIL_OT_recalculate_pvis(Operator, tool.Ifc.Operator):
         recalculate_pvi_geometry(props)
 
         alignment = _resolve_active_alignment(context)
+        if alignment is not None and props.design_speed > 0:
+            # Persist the advisory design speed so flags survive save/reopen.
+            tool.Alignment.set_design_criteria(alignment, props.design_speed)
         if not alignment:
             total_len = 0.0
             if len(props.vertical_pvis) >= 2:
@@ -1755,6 +1765,14 @@ class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
     def _invoke(self, context, event):
         props = context.scene.CivilAlignmentProperties
         self._alignment_id = props.active_alignment_id
+
+        # Rehydrate the persisted advisory design speed (spec 2.4) so K flags
+        # come back after save/reopen without re-entering the value.
+        alignment = _resolve_active_alignment(context)
+        if alignment is not None and props.design_speed == 0:
+            persisted_speed = tool.Alignment.get_design_criteria(alignment)
+            if persisted_speed:
+                props.design_speed = persisted_speed
 
         try:
             empties = core.enter_pvi_edit_mode(tool.Ifc, tool.Alignment, self._alignment_id)

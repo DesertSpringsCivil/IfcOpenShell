@@ -26,6 +26,27 @@ from bonsai.tool.alignment import Alignment as subject, PVIGeometryResult, Align
 from test.bim.bootstrap import NewFile, NewIfc4X3
 
 
+def _geometry_mapping_available() -> bool:
+    """True when the modular geometry-mapping plugins are present.
+
+    v0.9.0 evaluates segment endpoints through the geometry engine, which
+    loads per-schema ifcopenshell_geometry_mapping_* plugins at runtime. The
+    win64 v0.9.0alpha0 builds ship without them (IfcOpenShell#9301), so
+    geometry-dependent tests skip locally and run in CI where builds are
+    complete.
+    """
+    import pathlib
+
+    package_root = pathlib.Path(ifcopenshell.__file__).parent
+    return any(f.name.startswith("ifcopenshell_geometry_mapping_") for f in package_root.iterdir())
+
+
+requires_geometry_engine = pytest.mark.skipif(
+    not _geometry_mapping_available(),
+    reason="geometry mapping plugins unavailable (IfcOpenShell#9301); covered in CI",
+)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -385,6 +406,7 @@ class TestLayoutHasRealSegments(NewFile):
 # ---------------------------------------------------------------------------
 
 
+@requires_geometry_engine
 class TestSafeLayoutHorizontalByPiMethod(NewFile):
     def test_raises_when_layout_has_no_parent_alignment(self):
         """An orphan layout (no parent IfcAlignment) must raise ValueError."""
@@ -462,12 +484,12 @@ class TestCalculateKValue(NewFile):
         assert_close(subject.calculate_k_value(0.0, 0.04), 0.0)
 
     def test_calculates_k_for_positive_grade_change(self):
-        """L=200, Δg=0.04 → K=5000 (sag curve)."""
-        assert_close(subject.calculate_k_value(200.0, 0.04), 5000.0)
+        """L=200, Δg=0.04 (4%) → K=50 per civil convention (length/percent)."""
+        assert_close(subject.calculate_k_value(200.0, 0.04), 50.0)
 
     def test_calculates_k_for_negative_grade_change(self):
         """K uses |Δg|, so sign of grade change does not matter."""
-        assert_close(subject.calculate_k_value(200.0, -0.04), 5000.0)
+        assert_close(subject.calculate_k_value(200.0, -0.04), 50.0)
 
     def test_k_increases_with_longer_curve(self):
         k_short = subject.calculate_k_value(100.0, 0.04)
@@ -482,17 +504,17 @@ class TestCalculateKValue(NewFile):
 
 class TestCalculateVerticalCurveLengthFromK(NewFile):
     def test_calculates_length_from_k_and_grade_change(self):
-        """K=5000, Δg=0.04 → L=200."""
-        assert_close(subject.calculate_vertical_curve_length_from_k(5000.0, 0.04), 200.0)
+        """K=50 (per percent), Δg=0.04 (4%) → L=200."""
+        assert_close(subject.calculate_vertical_curve_length_from_k(50.0, 0.04), 200.0)
 
     def test_uses_absolute_value_of_grade_change(self):
         """Negative Δg gives same length as positive."""
-        l_pos = subject.calculate_vertical_curve_length_from_k(5000.0, 0.04)
-        l_neg = subject.calculate_vertical_curve_length_from_k(5000.0, -0.04)
+        l_pos = subject.calculate_vertical_curve_length_from_k(50.0, 0.04)
+        l_neg = subject.calculate_vertical_curve_length_from_k(50.0, -0.04)
         assert_close(l_pos, l_neg)
 
     def test_returns_zero_for_zero_grade_change(self):
-        assert_close(subject.calculate_vertical_curve_length_from_k(5000.0, 0.0), 0.0)
+        assert_close(subject.calculate_vertical_curve_length_from_k(50.0, 0.0), 0.0)
 
     def test_round_trips_with_calculate_k_value(self):
         """L → K → L should recover the original length."""
@@ -677,11 +699,11 @@ class TestCalculatePviGeometry(NewFile):
         assert_close(result.k_values[0], 0.0)
 
     def test_k_value_matches_expected_for_known_curve(self):
-        """g1=+2%, g2=-2%, Δg=0.04, L=200 → K=5000."""
+        """g1=+2%, g2=-2%, A=4%, L=200 → K=50 (length per percent)."""
         pvis = [(0.0, 100.0), (1000.0, 120.0), (2000.0, 100.0)]
         result = subject.calculate_pvi_geometry(pvis, curve_lengths=[200.0])
-        # grades: [0.02, -0.02], Δg = -0.04, K = 200/0.04 = 5000
-        assert_close(result.k_values[0], 5000.0)
+        # grades: [0.02, -0.02], A = 4%, K = 200/4 = 50
+        assert_close(result.k_values[0], 50.0)
 
     def test_defaults_curve_lengths_to_zero_when_not_provided(self):
         pvis = [(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)]
@@ -755,6 +777,7 @@ class TestIsSagCurve(NewFile):
 # ---------------------------------------------------------------------------
 
 
+@requires_geometry_engine
 class TestBackCalculatePvisFromVertical(NewFile):
     def _build_alignment_with_vertical(self, vpoints, lengths):
         """Helper: create IfcAlignment + vertical layout via Rick's API.
@@ -913,6 +936,7 @@ class TestGetVerticalLayout(NewIfc4X3):
 # ---------------------------------------------------------------------------
 
 
+@requires_geometry_engine
 class TestLayoutByPiMethod(NewIfc4X3):
     """Tests for Alignment.layout_by_pi_method() — IFC segment creation."""
 
@@ -948,6 +972,7 @@ class TestLayoutByPiMethod(NewIfc4X3):
 # ---------------------------------------------------------------------------
 
 
+@requires_geometry_engine
 class TestBackCalculatePisFromAlignment(NewIfc4X3):
     """Tests for Alignment.back_calculate_pis_from_alignment() — PI recovery."""
 
@@ -1124,6 +1149,7 @@ class TestGetActiveAlignment(NewIfc4X3):
 # ---------------------------------------------------------------------------
 
 
+@requires_geometry_engine
 class TestCreatePiEditEmpties(NewIfc4X3):
     """Tests for Alignment.create_pi_edit_empties()."""
 
@@ -1164,6 +1190,7 @@ class TestCreatePiEditEmpties(NewIfc4X3):
         assert indices == list(range(len(pis)))
 
 
+@requires_geometry_engine
 class TestGetPiEditEmpties(NewIfc4X3):
     """Tests for Alignment.get_pi_edit_empties()."""
 
@@ -1195,6 +1222,7 @@ class TestGetPiEditEmpties(NewIfc4X3):
         assert indices == sorted(indices)
 
 
+@requires_geometry_engine
 class TestRemovePiEditEmpties(NewIfc4X3):
     """Tests for Alignment.remove_pi_edit_empties()."""
 
@@ -1215,6 +1243,7 @@ class TestRemovePiEditEmpties(NewIfc4X3):
         assert removed == 0
 
 
+@requires_geometry_engine
 class TestCollectPisFromEmpties(NewIfc4X3):
     """Tests for Alignment.collect_pis_from_empties() — reading positions back."""
 
@@ -1290,6 +1319,7 @@ class TestRemoveAlignmentHierarchy(NewIfc4X3):
 # ---------------------------------------------------------------------------
 
 
+@requires_geometry_engine
 class TestIfcSaveReloadRoundtrip(NewIfc4X3):
     """Tests verifying alignment data survives IFC file save/reload."""
 
@@ -1333,6 +1363,7 @@ class TestIfcSaveReloadRoundtrip(NewIfc4X3):
 # ---------------------------------------------------------------------------
 
 
+@requires_geometry_engine
 class TestEvaluateAlignmentAtStation(NewFile):
     """Tests for Alignment.evaluate_alignment_at_station().
 
@@ -1436,6 +1467,7 @@ class TestEvaluateAlignmentAtStation(NewFile):
         assert_close(result.grade, 0.0, tol=1e-3)
 
 
+@requires_geometry_engine
 class TestGetAlignmentLength(NewFile):
     """Tests for Alignment.get_alignment_length()."""
 
@@ -1469,6 +1501,7 @@ class TestGetAlignmentLength(NewFile):
 # ---------------------------------------------------------------------------
 
 
+@requires_geometry_engine
 class TestCreate3DAlignmentObject(NewIfc4X3):
     """Tests for Alignment.create_3d_alignment_object()."""
 
@@ -1519,6 +1552,7 @@ class TestCreate3DAlignmentObject(NewIfc4X3):
 # ---------------------------------------------------------------------------
 
 
+@requires_geometry_engine
 class TestAlignmentVerticalBSIIntegration(NewIfc4X3):
     """Round-trips a horizontal+vertical alignment through
     ``ifcopenshell.validate`` to assert the IfcAlignmentVertical /
@@ -1668,6 +1702,7 @@ class TestBuildProfileViewTransform(NewFile):
 # ---------------------------------------------------------------------------
 
 
+@requires_geometry_engine
 class TestSampleDesignProfile(NewFile):
     def _build(self, vpoints, lengths):
         import ifcopenshell.api.root
@@ -1713,6 +1748,7 @@ class TestSampleDesignProfile(NewFile):
         assert subject.sample_design_profile(bare, interval=100.0) == []
 
 
+@requires_geometry_engine
 class TestSampleTerrainProfile(NewFile):
     def _build_horizontal(self, length=1000.0):
         import ifcopenshell.api.root
@@ -1796,6 +1832,7 @@ class TestProfileAndD3Registration(NewFile):
 # ---------------------------------------------------------------------------
 
 
+@requires_geometry_engine
 class TestClearLayoutSegments(NewFile):
     """The alignment API exposes no segment-clearing helper and its layout
     functions only append, so editing relies on tool.Alignment.clear_layout_segments.
@@ -1856,6 +1893,7 @@ class TestClearLayoutSegments(NewFile):
         assert subject.layout_has_real_segments(v) is False
 
 
+@requires_geometry_engine
 class TestSetLayoutSegmentsSelectable(NewIfc4X3):
     """PI edit mode disables segment-curve selection so clicks hit the PI
     empties; set_layout_segments_selectable toggles hide_select accordingly."""
@@ -1909,3 +1947,71 @@ class TestFormatStation(NewFile):
 
     def test_without_project_falls_back_to_plain_number(self):
         assert subject.format_station(1234.5) == "1234.50"
+
+
+class TestRequiredKForDesignSpeed(NewFile):
+    """AASHTO stopping-sight-distance K lookup (spec 2.4, advisory only)."""
+
+    def _make_file(self, length):
+        import ifcopenshell.api.root
+        import ifcopenshell.api.unit
+
+        ifc = ifcopenshell.file(schema="IFC4X3_ADD2")
+        tool.Ifc.set(ifc)
+        ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
+        ifcopenshell.api.unit.assign_unit(ifc, length=length)
+        return ifc
+
+    def test_zero_speed_disables_checking(self):
+        self._make_file(length={"is_metric": True, "raw": "METERS"})
+        assert subject.required_k_for_design_speed(0.0, is_crest=True) is None
+
+    def test_metric_exact_row(self):
+        self._make_file(length={"is_metric": True, "raw": "METERS"})
+        assert subject.required_k_for_design_speed(100.0, is_crest=True) == pytest.approx(52.0)
+        assert subject.required_k_for_design_speed(100.0, is_crest=False) == pytest.approx(45.0)
+
+    def test_metric_rounds_up_to_next_tabulated_speed(self):
+        self._make_file(length={"is_metric": True, "raw": "METERS"})
+        # 55 km/h is not tabulated; the 60 km/h row governs (conservative).
+        assert subject.required_k_for_design_speed(55.0, is_crest=True) == pytest.approx(11.0)
+
+    def test_imperial_project_uses_mph_table(self):
+        self._make_file(length={"is_metric": False, "raw": "FEET"})
+        assert subject.required_k_for_design_speed(60.0, is_crest=True) == pytest.approx(151.0)
+        assert subject.required_k_for_design_speed(60.0, is_crest=False) == pytest.approx(136.0)
+
+    def test_speed_above_table_returns_none(self):
+        self._make_file(length={"is_metric": True, "raw": "METERS"})
+        assert subject.required_k_for_design_speed(200.0, is_crest=True) is None
+
+
+class TestDesignCriteriaPset(NewFile):
+    """Design speed persistence on the alignment (Pset_SaikeiDesignCriteria)."""
+
+    def _make_alignment(self):
+        import ifcopenshell.api.root
+        import ifcopenshell.api.unit
+
+        ifc = ifcopenshell.file(schema="IFC4X3_ADD2")
+        tool.Ifc.set(ifc)
+        ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
+        ifcopenshell.api.unit.assign_unit(ifc)
+        return ifc.createIfcAlignment(GlobalId=ifcopenshell.guid.new(), Name="A1")
+
+    def test_round_trips_design_speed(self):
+        alignment = self._make_alignment()
+        subject.set_design_criteria(alignment, 60.0)
+        assert subject.get_design_criteria(alignment) == pytest.approx(60.0)
+
+    def test_set_twice_updates_in_place(self):
+        alignment = self._make_alignment()
+        subject.set_design_criteria(alignment, 60.0)
+        subject.set_design_criteria(alignment, 45.0)
+        assert subject.get_design_criteria(alignment) == pytest.approx(45.0)
+        ifc = tool.Ifc.get()
+        assert len([p for p in ifc.by_type("IfcPropertySet") if p.Name == "Pset_SaikeiDesignCriteria"]) == 1
+
+    def test_returns_none_when_never_set(self):
+        alignment = self._make_alignment()
+        assert subject.get_design_criteria(alignment) is None

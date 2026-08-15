@@ -768,3 +768,56 @@ class TestImportAlignmentCsv(NewIfc4X3):
         props = get_alignment_props()
         alignment = tool.Ifc.get().by_id(props.active_alignment_id)
         assert align_api.get_vertical_layout(alignment) is not None
+
+
+class TestVerticalKFlags(NewIfc4X3):
+    """Advisory AASHTO K flagging in the PVI table (spec 2.4). Pure props +
+    math — no geometry engine required."""
+
+    def _setup_metric_pvis(self, curve_length):
+        import ifcopenshell.api.unit
+
+        # Pin metric METRE units so the km/h K table governs.
+        ifcopenshell.api.unit.assign_unit(tool.Ifc.get(), length={"is_metric": True, "raw": "METERS"})
+        props = get_alignment_props()
+        for i, (station, elevation) in enumerate(((0.0, 100.0), (500.0, 110.0), (1000.0, 100.0))):
+            pvi = props.vertical_pvis.add()
+            pvi.station = station
+            pvi.elevation = elevation
+            pvi.pvi_type = "ENDPOINT" if i in (0, 2) else "INTERIOR"
+        props.vertical_pvis[1].curve_length = curve_length
+        return props
+
+    def test_short_crest_curve_is_flagged(self):
+        from bonsai.bim.module.alignment.operator import rebuild_vertical_display_rows
+
+        # Grades +2% / -2% (crest), K = L/A = 40/4 = 10 < 52 required at 100 km/h.
+        props = self._setup_metric_pvis(curve_length=40.0)
+        props.design_speed = 100.0
+        rebuild_vertical_display_rows(props)
+
+        pvi_rows = [r for r in props.vertical_display_rows if r.row_type == "POINT" and r.display_type == "PVI"]
+        assert len(pvi_rows) == 1
+        assert pvi_rows[0].k_deficient
+        assert pvi_rows[0].k_required == pytest.approx(52.0)
+
+    def test_adequate_curve_is_not_flagged(self):
+        from bonsai.bim.module.alignment.operator import rebuild_vertical_display_rows
+
+        # K = 400/4 = 100 >= 52 required at 100 km/h.
+        props = self._setup_metric_pvis(curve_length=400.0)
+        props.design_speed = 100.0
+        rebuild_vertical_display_rows(props)
+
+        pvi_rows = [r for r in props.vertical_display_rows if r.row_type == "POINT" and r.display_type == "PVI"]
+        assert not pvi_rows[0].k_deficient
+
+    def test_zero_design_speed_never_flags(self):
+        from bonsai.bim.module.alignment.operator import rebuild_vertical_display_rows
+
+        props = self._setup_metric_pvis(curve_length=40.0)
+        props.design_speed = 0.0
+        rebuild_vertical_display_rows(props)
+
+        pvi_rows = [r for r in props.vertical_display_rows if r.row_type == "POINT" and r.display_type == "PVI"]
+        assert not pvi_rows[0].k_deficient

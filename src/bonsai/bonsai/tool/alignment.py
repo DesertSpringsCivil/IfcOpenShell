@@ -353,37 +353,134 @@ class Alignment:
     def calculate_k_value(cls, curve_length: float, grade_change: float) -> float:
         """Calculate the K-value (rate of grade change) for a vertical curve.
 
-        K = L / |Δg|
-
-        A higher K-value means a more gradual curve. K is used in AASHTO
-        sight-distance calculations for crest and sag curves.
+        K = L / A, where A = |Δg| expressed in PERCENT — the civil convention
+        used by the AASHTO sight-distance tables (length per percent of grade
+        change). A higher K-value means a more gradual curve.
 
         Args:
             curve_length: Vertical curve length (L)
             grade_change: Algebraic grade change Δg = g2 - g1 (decimal)
 
         Returns:
-            K-value. Returns 0.0 if grade_change is effectively zero (flat
-            curve) or if curve_length is zero.
+            K-value per percent grade change. Returns 0.0 if grade_change is
+            effectively zero (flat curve) or if curve_length is zero.
         """
         if abs(grade_change) < 1e-10 or curve_length <= 0:
             return 0.0
-        return curve_length / abs(grade_change)
+        return curve_length / abs(grade_change * 100.0)
 
     @classmethod
     def calculate_vertical_curve_length_from_k(cls, k_value: float, grade_change: float) -> float:
         """Calculate vertical curve length from K-value and grade change.
 
-        L = K * |Δg|
+        L = K * A, where A = |Δg| in PERCENT — the inverse of
+        ``calculate_k_value``, sharing its per-percent civil convention.
 
         Args:
-            k_value: Design K-value
+            k_value: Design K-value (length per percent grade change)
             grade_change: Algebraic grade change Δg = g2 - g1 (decimal)
 
         Returns:
             Vertical curve length
         """
-        return k_value * abs(grade_change)
+        return k_value * abs(grade_change * 100.0)
+
+    # Minimum K values for stopping sight distance, AASHTO "A Policy on
+    # Geometric Design of Highways and Streets" (Green Book), 7th Edition:
+    # Table 3-34 (crest) and Table 3-36 (sag). Keyed by design speed;
+    # imperial K in ft per % grade change at mph, metric K in m per % at km/h
+    # (6th Edition metric tables). Advisory only — deviations are flagged,
+    # never blocked (the engineer seals the drawings).
+    AASHTO_K_TABLE_IMPERIAL = {
+        # mph: (crest_K, sag_K)
+        30: (19.0, 37.0),
+        35: (29.0, 49.0),
+        40: (44.0, 64.0),
+        45: (61.0, 79.0),
+        50: (84.0, 96.0),
+        55: (114.0, 115.0),
+        60: (151.0, 136.0),
+        65: (193.0, 157.0),
+        70: (247.0, 181.0),
+    }
+    AASHTO_K_TABLE_METRIC = {
+        # km/h: (crest_K, sag_K)
+        30: (2.0, 6.0),
+        40: (4.0, 9.0),
+        50: (7.0, 13.0),
+        60: (11.0, 18.0),
+        70: (17.0, 23.0),
+        80: (26.0, 30.0),
+        90: (39.0, 38.0),
+        100: (52.0, 45.0),
+        110: (74.0, 55.0),
+        120: (95.0, 63.0),
+    }
+
+    @classmethod
+    def is_imperial_project(cls) -> bool:
+        """True when the project LENGTHUNIT is a conversion-based (imperial) unit."""
+        import ifcopenshell.util.unit
+
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None:
+            return False
+        unit_type = ifcopenshell.util.unit.get_project_unit(ifc_file, "LENGTHUNIT")
+        return unit_type is not None and unit_type.is_a("IfcConversionBasedUnit")
+
+    @classmethod
+    def required_k_for_design_speed(cls, design_speed: float, is_crest: bool) -> Optional[float]:
+        """Minimum AASHTO stopping-sight-distance K for ``design_speed``.
+
+        The table (imperial mph / metric km/h, chosen by project units) is
+        looked up at the given speed, rounding UP to the next tabulated speed
+        (conservative). Returns None when design_speed is 0/negative or above
+        the table's range.
+        """
+        if design_speed <= 0:
+            return None
+        table = cls.AASHTO_K_TABLE_IMPERIAL if cls.is_imperial_project() else cls.AASHTO_K_TABLE_METRIC
+        for speed in sorted(table):
+            if design_speed <= speed:
+                crest_k, sag_k = table[speed]
+                return crest_k if is_crest else sag_k
+        return None
+
+    @classmethod
+    def set_design_criteria(cls, alignment: "ifcopenshell.entity_instance", design_speed: float) -> None:
+        """Persist design criteria on the alignment as Pset_SaikeiDesignCriteria.
+
+        IFC 4.3 has no standard pset for alignment design criteria, so the
+        design speed rides in a Saikei pset for save/reopen round-trip.
+        """
+        import ifcopenshell.api.pset
+        import ifcopenshell.util.element
+
+        ifc_file = tool.Ifc.get()
+        existing = ifcopenshell.util.element.get_pset(
+            alignment, "Pset_SaikeiDesignCriteria", should_inherit=False
+        )
+        if existing:
+            pset_entity = ifc_file.by_id(existing["id"])
+        else:
+            pset_entity = ifcopenshell.api.pset.add_pset(
+                ifc_file, product=alignment, name="Pset_SaikeiDesignCriteria"
+            )
+        ifcopenshell.api.pset.edit_pset(
+            ifc_file, pset=pset_entity, properties={"DesignSpeed": float(design_speed)}
+        )
+
+    @classmethod
+    def get_design_criteria(cls, alignment: "ifcopenshell.entity_instance") -> Optional[float]:
+        """Return the persisted design speed, or None when never set."""
+        import ifcopenshell.util.element
+
+        pset = ifcopenshell.util.element.get_pset(
+            alignment, "Pset_SaikeiDesignCriteria", should_inherit=False
+        )
+        if pset and pset.get("DesignSpeed") is not None:
+            return float(pset["DesignSpeed"])
+        return None
 
     @classmethod
     def calculate_elevation_on_parabola(
