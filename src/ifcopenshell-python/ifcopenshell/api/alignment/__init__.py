@@ -82,6 +82,7 @@ from .get_mapped_segments import get_mapped_segments
 from .get_parent_alignment import get_parent_alignment
 from .get_stationing_nest import get_stationing_nest
 from .get_vertical_layout import get_vertical_layout
+from .get_vertical_layouts import get_vertical_layouts
 from .has_zero_length_segment import has_zero_length_segment
 from .layout_horizontal_alignment_by_pi_method import (
     layout_horizontal_alignment_by_pi_method,
@@ -91,6 +92,7 @@ from .layout_vertical_alignment_by_pi_method import (
 )
 from .name_segments import name_segments
 from .segment_vertices import segment_vertices
+from .station_from_distance_along import station_from_distance_along
 from .update_alignment_parameter_segment_tags import update_alignment_parameter_segment_tags
 from .update_end_point import update_end_point
 from .update_fallback_position import update_fallback_position
@@ -132,11 +134,13 @@ __all__ = [
     "get_parent_alignment",
     "get_stationing_nest",
     "get_vertical_layout",
+    "get_vertical_layouts",
     "has_zero_length_segment",
     "layout_horizontal_alignment_by_pi_method",
     "layout_vertical_alignment_by_pi_method",
     "name_segments",
     "segment_vertices",
+    "station_from_distance_along",
     "register_referent_name_callback",
     "update_alignment_parameter_segment_tags",
     "update_end_point",
