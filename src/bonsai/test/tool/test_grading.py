@@ -1600,14 +1600,14 @@ class TestAuthorGroup:
         ifc_file = _make_ifc_file_with_site()
         group = tool_grading.GradingGroup(interior_fill="flat")
         tool_grading.Grading.author_group(ifc_file, group)
-        # Pset_SaikeiGradingSource on the group records InteriorFillStrategy.
+        # SaikeiCivil_GradingSource on the group records InteriorFillStrategy.
         ifc_group = ifc_file.by_id(group.ifc_group_id)
         psets = []
         for rel in ifc_file.by_type("IfcRelDefinesByProperties"):
             if ifc_group in (rel.RelatedObjects or []):
                 psets.append(rel.RelatingPropertyDefinition)
         source_pset = next(
-            (p for p in psets if p.Name == "Pset_SaikeiGradingSource"), None
+            (p for p in psets if p.Name == "SaikeiCivil_GradingSource"), None
         )
         assert source_pset is not None
         strategy = next(
@@ -3088,7 +3088,7 @@ class TestGradingBSIIntegration(NewIfc4X3):
             if any(
                 rel.is_a("IfcRelDefinesByProperties")
                 and rel.RelatingPropertyDefinition.Name
-                == "Pset_SaikeiFeatureLineCommon"
+                == "SaikeiCivil_FeatureLineCommon"
                 for rel in (a.IsDefinedBy or [])
             )
         ]
@@ -3550,7 +3550,7 @@ class TestGradingHelpers:
         IfcRelAssignsToGroup is correctly detected as in use.
 
         The canonical source of truth is group membership, not the
-        Pset_SaikeiFeatureLineCommon.GradingGroupGuid field (which is only
+        SaikeiCivil_FeatureLineCommon.GradingGroupGuid field (which is only
         written at create-time and is never updated by add_slope_fill_to_group).
         """
         import ifcopenshell.api.grading

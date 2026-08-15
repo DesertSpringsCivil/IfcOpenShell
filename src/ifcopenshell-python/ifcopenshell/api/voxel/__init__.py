@@ -39,7 +39,7 @@ Source-of-truth stance
 The voxel grid is a **derived/analysis** representation. The production model
 stays IFC4X3_ADD2 (TIN / ``IfcSectionedSolidHorizontal`` are the parametric
 source of truth); voxel grids live in a separate **IFC 4.4 sidecar** and point
-back to production surfaces by GlobalId (``Pset_SaikeiVoxelSource``). No schema
+back to production surfaces by GlobalId (``SaikeiCivil_VoxelSource``). No schema
 mixing within a file.
 
 Entity tree authored

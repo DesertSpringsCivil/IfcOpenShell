@@ -61,7 +61,7 @@ def _attach_source_reference(
     runtime-registered prototype schema crashes (access violation) when creating
     a standalone defined-type value wrapper (e.g. ``IfcIdentifier``) for a
     property ``NominalValue``. Direct attribute writes (auto-wrapped) are safe.
-    Promote to a proper ``Pset_SaikeiVoxelSource`` once authoring against a
+    Promote to a proper ``SaikeiCivil_VoxelSource`` once authoring against a
     real built IFC 4.4 schema.
     """
     product.Description = f"{SOURCE_PREFIX}{source_surface_guid}"

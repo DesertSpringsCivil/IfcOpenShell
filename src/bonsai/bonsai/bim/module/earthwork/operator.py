@@ -65,7 +65,7 @@ class CIVIL_OT_compute_earthwork_volumes(Operator, tool.Ifc.Operator):
       ``CompactedVolume`` / ``LooseVolume`` (fill) — ``LooseVolume``
       is computed as ``UndisturbedVolume × swell_factor``, closing
       the audit gap.
-    - Authors ``Pset_SaikeiGradingShrinkSwell`` with the shrink/swell
+    - Authors ``SaikeiCivil_GradingShrinkSwell`` with the shrink/swell
       factors.
     - Stamps ``last_cut_m3`` / ``last_fill_m3`` / ``last_net_m3`` /
       ``last_loose_cut_m3`` on :class:`CivilEarthworkProperties` so

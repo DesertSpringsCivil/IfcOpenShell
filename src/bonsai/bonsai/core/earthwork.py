@@ -100,7 +100,7 @@ def compute_earthwork_volumes(
     4. :meth:`tool.Earthwork.author_volume_result` — authors
        :class:`IfcEarthworksCut`, :class:`IfcEarthworksFill`,
        :class:`IfcRelVoidsElement`, :class:`IfcRelFillsElement`,
-       both Qtos, and ``Pset_SaikeiGradingShrinkSwell``.
+       both Qtos, and ``SaikeiCivil_GradingShrinkSwell``.
 
     :param ifc_tool: the :class:`tool.Ifc` class.
     :param surface_tool: the :class:`tool.Surface` class.

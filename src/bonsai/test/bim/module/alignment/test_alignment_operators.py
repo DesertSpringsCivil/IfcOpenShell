@@ -1620,7 +1620,7 @@ class TestAddEventReferentOperator(NewIfc4X3):
         alignment_fresh = ifc_file.by_id(alignment.id())
         referents = [r for r in ifc_file.by_type("IfcReferent") if r.PredefinedType == "WIDTHEVENT"]
         assert len(referents) == 1
-        assert ifcopenshell.util.element.get_pset(referents[0], "Pset_SaikeiEvent")["Value"] == pytest.approx(3.6)
+        assert ifcopenshell.util.element.get_pset(referents[0], "SaikeiCivil_Event")["Value"] == pytest.approx(3.6)
 
     def test_add_event_referent_without_value_omits_saikei_event_pset(self):
         import ifcopenshell.util.element
@@ -1632,7 +1632,7 @@ class TestAddEventReferentOperator(NewIfc4X3):
         assert result == {"FINISHED"}
         ifc_file = tool.Ifc.get()
         referent = next(r for r in ifc_file.by_type("IfcReferent") if r.PredefinedType == "SUPERELEVATIONEVENT")
-        assert ifcopenshell.util.element.get_pset(referent, "Pset_SaikeiEvent") is None
+        assert ifcopenshell.util.element.get_pset(referent, "SaikeiCivil_Event") is None
 
 
 class TestRemoveReferent(NewIfc4X3):

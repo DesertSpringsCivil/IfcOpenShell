@@ -228,7 +228,7 @@ extensions site-packages (`%APPDATA%\Blender Foundation\Blender\5.0\extensions\.
   authoring via `ifcopenshell.api.earthwork` with cut→terrain
   voiding and cut→fill linkage), `core.earthwork.compute_earthwork_volumes`
   orchestration (validates inputs, computes volumes, builds solids,
-  authors all entities + Qto + Pset_SaikeiGradingShrinkSwell),
+  authors all entities + Qto + SaikeiCivil_GradingShrinkSwell),
   UI (one operator `CIVIL_OT_compute_earthwork_volumes`, panel
   `BIM_PT_tab_earthwork` with Inputs and Compute sub-panels,
   `CivilEarthworkProperties` with persistent last-run report).
@@ -271,7 +271,7 @@ internal). Audit fixes applied as commits 16's preamble:
 
 **Remaining audit items** (deferred to Phase 6):
 - Boundary-polygon round-trip on rehydration (currently falls back to
-  convex hull). `Pset_SaikeiGradingSurface.BoundaryPolygonReference`
+  convex hull). `SaikeiCivil_GradingSurface.BoundaryPolygonReference`
   slot exists but no read path.
 - TIN-minus-TIN surface-difference algorithm (Phase 3 API takes a
   pre-computed solid; the differencing math is the Phase 6 task).

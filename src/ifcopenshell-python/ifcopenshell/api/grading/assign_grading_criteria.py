@@ -36,7 +36,7 @@ ALLOWED_TARGET_KINDS = frozenset(ENUMERATION_VALUES)
 def _find_existing_pset(
     group: ifcopenshell.entity_instance,
 ) -> Optional[ifcopenshell.entity_instance]:
-    """Return the IfcPropertySet of name ``Pset_SaikeiGradingCriteria`` attached to group, or None."""
+    """Return the IfcPropertySet of name ``SaikeiCivil_GradingCriteria`` attached to group, or None."""
     for rel in group.IsDefinedBy or []:
         if not rel.is_a("IfcRelDefinesByProperties"):
             continue
@@ -164,7 +164,7 @@ def assign_grading_criteria(
     """Bind a :class:`IfcPropertySetTemplate` to a grading group with concrete values.
 
     Authors an :class:`IfcPropertySet` whose ``Name`` matches the template
-    (``Pset_SaikeiGradingCriteria`` by default), wires it to the template
+    (``SaikeiCivil_GradingCriteria`` by default), wires it to the template
     via :class:`IfcRelDefinesByTemplate`, and attaches it to the group via
     :class:`IfcRelDefinesByProperties`. Re-assigning to the same group
     updates the existing pset's values in place rather than creating a
@@ -206,11 +206,11 @@ def assign_grading_criteria(
     :param retaining_wall_at_limit: whether to insert a retaining wall
         when ``max_distance`` is reached before daylighting
     :param name: optional override for ``IfcPropertySet.Name``; defaults to
-        the template's name (``Pset_SaikeiGradingCriteria``)
+        the template's name (``SaikeiCivil_GradingCriteria``)
     :returns: the :class:`IfcPropertySet` carrying the values (existing or
         newly created)
     :raises ValueError: if ``group`` is not an :class:`IfcGroup`, if
-        ``criteria_template`` is not the ``Pset_SaikeiGradingCriteria``
+        ``criteria_template`` is not the ``SaikeiCivil_GradingCriteria``
         template, if ``target_kind`` is not one of the allowed values, or
         if ``cut_slope``/``fill_slope``/``max_distance`` violate their
         positivity constraints

@@ -50,7 +50,7 @@ class GradingData:
         registered with :class:`tool.Grading` — disk-loaded criteria
         whose dataclasses haven't been rehydrated yet won't appear
         until they're touched by an operator. Full IFC-side criteria
-        rehydration (walking each group's ``Pset_SaikeiGradingCriteria``
+        rehydration (walking each group's ``SaikeiCivil_GradingCriteria``
         bindings) is Phase 5.1.
         """
         cls.data = {
@@ -84,7 +84,7 @@ class GradingData:
         # entities (e.g., from upstream BIM authoring tools). Filter
         # by Name to count only Saikei criteria templates.
         criteria_templates = [
-            t for t in templates if t.Name == "Pset_SaikeiGradingCriteria"
+            t for t in templates if t.Name == "SaikeiCivil_GradingCriteria"
         ]
         cls.data["criteria_count"] = len(criteria_templates)
 
@@ -212,7 +212,7 @@ class GradingData:
         there is no canonical "list of criteria entities" to walk in
         IFC. The registry is the authoritative in-session list.
         Phase 5.1 will replace this with a walk of each group's
-        ``Pset_SaikeiGradingCriteria`` bindings.
+        ``SaikeiCivil_GradingCriteria`` bindings.
         """
         scene = bpy.context.scene if bpy.context else None
         if scene is None or not hasattr(scene, "CivilGradingProperties"):

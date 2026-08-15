@@ -193,7 +193,7 @@ class CivilSurfaceProperties(PropertyGroup):
     triangulation_tolerance: FloatProperty(
         name="Triangulation Tolerance",
         description="Maximum point-to-surface distance below which a point "
-        "may be omitted from the TIN (stored on Pset_SaikeiGradingSurface)",
+        "may be omitted from the TIN (stored on SaikeiCivil_GradingSurface)",
         default=0.0,
         min=0.0,
         max=1.0,

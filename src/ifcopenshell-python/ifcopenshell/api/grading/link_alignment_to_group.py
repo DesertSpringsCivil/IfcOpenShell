@@ -16,7 +16,7 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with IfcOpenShell.  If not, see <http://www.gnu.org/licenses/>.
 
-"""Attach Pset_SaikeiGradingAlignment to a grading group or fill, recording corridor linkage."""
+"""Attach SaikeiCivil_GradingAlignment to a grading group or fill, recording corridor linkage."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from typing import Optional
 import ifcopenshell
 import ifcopenshell.api.pset
 
-PSET_NAME = "Pset_SaikeiGradingAlignment"
+PSET_NAME = "SaikeiCivil_GradingAlignment"
 
 
 def link_alignment_to_group(
@@ -41,7 +41,7 @@ def link_alignment_to_group(
     Used when grading is being authored alongside a corridor — the
     ``AlignmentGuid``, ``StartStation``, and ``EndStation`` give cost-
     estimating tools the station range over which the grading applies. Per
-    spec §3.3, ``Pset_SaikeiGradingAlignment`` may be attached to either
+    spec §3.3, ``SaikeiCivil_GradingAlignment`` may be attached to either
     :class:`IfcGroup` (the grading group) or :class:`IfcEarthworksFill` (a
     specific fill within the group); both are accepted here.
 

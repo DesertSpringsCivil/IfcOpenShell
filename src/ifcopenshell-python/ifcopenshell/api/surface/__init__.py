@@ -37,7 +37,7 @@ For an existing-ground TIN, ``create_terrain`` produces:
       CoordIndex 1-based, Flags) and an ``IfcCartesianPointList3D``
     - Box ``IfcShapeRepresentation`` containing ``IfcBoundingBox``
   - has ``Pset_GeographicElementCommon`` (standard, Status="NEW")
-  - has ``Pset_SaikeiGradingSurface`` (Saikei-specific:
+  - has ``SaikeiCivil_GradingSurface`` (Saikei-specific:
     TriangulationTolerance, BreaklineCount, VertexCount,
     BoundaryPolygonReference)
 

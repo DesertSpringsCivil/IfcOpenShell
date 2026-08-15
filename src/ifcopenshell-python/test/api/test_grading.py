@@ -368,7 +368,7 @@ class TestCreateFeatureLine:
         rel = (feature_line.ContainedInStructure or [None])[0]
         assert rel is not None and rel.RelatingStructure.is_a("IfcSite")
 
-        properties = _read_pset(feature_line, "Pset_SaikeiFeatureLineCommon")
+        properties = _read_pset(feature_line, "SaikeiCivil_FeatureLineCommon")
         assert properties["IsClosed"] is True
         assert properties["Source"] == "manual"
         assert properties["ElevationSource"] == "drape"
@@ -386,7 +386,7 @@ class TestCreateFeatureLine:
 
         curve = feature_line.Representation.Representations[0].Items[0]
         assert len(curve.Points.CoordList) == 3
-        properties = _read_pset(feature_line, "Pset_SaikeiFeatureLineCommon")
+        properties = _read_pset(feature_line, "SaikeiCivil_FeatureLineCommon")
         assert properties["IsClosed"] is False
 
     def test_grading_group_guid_optional_property(
@@ -400,7 +400,7 @@ class TestCreateFeatureLine:
             vertices=[(0.0, 0.0, 0.0), (1.0, 1.0, 1.0)],
             grading_group_guid="3VxJzKQwT9XwJZ8RbZkH7E",
         )
-        properties = _read_pset(feature_line, "Pset_SaikeiFeatureLineCommon")
+        properties = _read_pset(feature_line, "SaikeiCivil_FeatureLineCommon")
         assert properties["GradingGroupGuid"] == "3VxJzKQwT9XwJZ8RbZkH7E"
 
     def test_too_few_vertices_raises(self, empty_project_file: ifcopenshell.file) -> None:
@@ -468,7 +468,7 @@ class TestCreateFeatureLine:
         feature_line = feature_lines[0]
         curve = feature_line.Representation.Representations[0].Items[0]
         assert len(curve.Points.CoordList) == 5  # 4 + 1 repeated for closure
-        properties = _read_pset(feature_line, "Pset_SaikeiFeatureLineCommon")
+        properties = _read_pset(feature_line, "SaikeiCivil_FeatureLineCommon")
         assert properties["IsClosed"] is True
         assert properties["Source"] == "csv_import"
         assert properties["GradingGroupGuid"] == "abc"
@@ -483,7 +483,7 @@ class TestCreateGradingCriteriaTemplate:
         template = create_grading_criteria_template(empty_project_file)
 
         assert template.is_a("IfcPropertySetTemplate")
-        assert template.Name == "Pset_SaikeiGradingCriteria"
+        assert template.Name == "SaikeiCivil_GradingCriteria"
         assert template.TemplateType == "PSET_OCCURRENCEDRIVEN"
         assert template.ApplicableEntity == "IfcGroup"
         property_templates = list(template.HasPropertyTemplates)
@@ -550,7 +550,7 @@ class TestCreateGradingCriteriaTemplate:
         reopened = ifcopenshell.open(str(path))
         templates = [
             t for t in reopened.by_type("IfcPropertySetTemplate")
-            if t.Name == "Pset_SaikeiGradingCriteria"
+            if t.Name == "SaikeiCivil_GradingCriteria"
         ]
         assert len(templates) == 1
         template = templates[0]
@@ -656,7 +656,7 @@ class TestCreateGradingGroup:
         result = create_grading_group(
             empty_project_file, name="X", interior_fill="flat"
         )
-        source = _read_pset(result.group, "Pset_SaikeiGradingSource")
+        source = _read_pset(result.group, "SaikeiCivil_GradingSource")
         assert source["InteriorFillStrategy"] == "flat"
         assert source["Version"] == 1
         assert isinstance(source["Timestamp"], int)
@@ -672,7 +672,7 @@ class TestCreateGradingGroup:
         result = create_grading_group(
             empty_project_file, name="X", target_surface=terrain, author="MJY"
         )
-        source = _read_pset(result.group, "Pset_SaikeiGradingSource")
+        source = _read_pset(result.group, "SaikeiCivil_GradingSource")
         assert source["TargetSurfaceGuid"] == terrain.GlobalId
         assert source["Author"] == "MJY"
 
@@ -707,7 +707,7 @@ class TestCreateGradingGroup:
             interior_fill="from_surface",
             interior_fill_source=source_terrain,
         )
-        info = _read_pset(result.group, "Pset_SaikeiGradingSource")
+        info = _read_pset(result.group, "SaikeiCivil_GradingSource")
         assert info["InteriorFillStrategy"] == "from_surface"
 
     def test_raises_when_no_site(self) -> None:
@@ -747,7 +747,7 @@ class TestCreateGradingGroup:
             for m in members
         )
         # Source pset round-trips.
-        source = _read_pset(group, "Pset_SaikeiGradingSource")
+        source = _read_pset(group, "SaikeiCivil_GradingSource")
         assert source["Author"] == "Tester"
         assert source["TargetSurfaceGuid"] == terrain.GlobalId
 
@@ -763,7 +763,7 @@ class TestAssignGradingCriteria:
             if not rel.is_a("IfcRelDefinesByProperties"):
                 continue
             pset = rel.RelatingPropertyDefinition
-            if not (pset.is_a("IfcPropertySet") and pset.Name == "Pset_SaikeiGradingCriteria"):
+            if not (pset.is_a("IfcPropertySet") and pset.Name == "SaikeiCivil_GradingCriteria"):
                 continue
             out: dict[str, object] = {}
             for prop in pset.HasProperties:
@@ -797,7 +797,7 @@ class TestAssignGradingCriteria:
         )
 
         assert pset.is_a("IfcPropertySet")
-        assert pset.Name == "Pset_SaikeiGradingCriteria"
+        assert pset.Name == "SaikeiCivil_GradingCriteria"
 
         properties = self._read_criteria_pset(result.group)
         assert properties["TargetKind"] == ["surface"]
@@ -902,7 +902,7 @@ class TestAssignGradingCriteria:
             r.RelatingPropertyDefinition
             for r in result.group.IsDefinedBy or []
             if r.is_a("IfcRelDefinesByProperties")
-            and r.RelatingPropertyDefinition.Name == "Pset_SaikeiGradingCriteria"
+            and r.RelatingPropertyDefinition.Name == "SaikeiCivil_GradingCriteria"
         ]
         assert len(criteria_psets) == 1
 
@@ -1021,7 +1021,7 @@ class TestAssignGradingCriteria:
             ],
         )
         result = create_grading_group(empty_project_file, name="Pad")
-        with pytest.raises(ValueError, match="Pset_SaikeiGradingCriteria"):
+        with pytest.raises(ValueError, match="SaikeiCivil_GradingCriteria"):
             assign_grading_criteria(
                 empty_project_file,
                 result.group,
@@ -1069,7 +1069,7 @@ class TestAssignGradingCriteria:
         # Template binding survives round-trip.
         rels = reopened.by_type("IfcRelDefinesByTemplate")
         assert len(rels) == 1
-        assert rels[0].RelatingTemplate.Name == "Pset_SaikeiGradingCriteria"
+        assert rels[0].RelatingTemplate.Name == "SaikeiCivil_GradingCriteria"
 
 
 def _slope_ribbon_geometry() -> tuple[
@@ -1606,14 +1606,14 @@ class TestLinkAlignmentToGroup:
         )
 
         assert pset.is_a("IfcPropertySet")
-        assert pset.Name == "Pset_SaikeiGradingAlignment"
-        properties = _read_pset(result.group, "Pset_SaikeiGradingAlignment")
+        assert pset.Name == "SaikeiCivil_GradingAlignment"
+        properties = _read_pset(result.group, "SaikeiCivil_GradingAlignment")
         assert properties["AlignmentGuid"] == alignment.GlobalId
         assert properties["StartStation"] == 10.0
         assert properties["EndStation"] == 85.0
 
     def test_happy_path_on_fill(self, empty_project_file: ifcopenshell.file) -> None:
-        """Pset_SaikeiGradingAlignment can attach to IfcEarthworksFill too (per spec §3.3)."""
+        """SaikeiCivil_GradingAlignment can attach to IfcEarthworksFill too (per spec §3.3)."""
         from ifcopenshell.api.grading import (
             create_grading_group,
             link_alignment_to_group,
@@ -1629,7 +1629,7 @@ class TestLinkAlignmentToGroup:
             end_station=50.0,
         )
 
-        properties = _read_pset(result.composite_fill, "Pset_SaikeiGradingAlignment")
+        properties = _read_pset(result.composite_fill, "SaikeiCivil_GradingAlignment")
         assert properties["AlignmentGuid"] == alignment.GlobalId
 
     def test_optional_stations_omitted(self, empty_project_file: ifcopenshell.file) -> None:
@@ -1642,7 +1642,7 @@ class TestLinkAlignmentToGroup:
         alignment = self._make_corridor_alignment(empty_project_file)
         link_alignment_to_group(empty_project_file, result.group, alignment)
 
-        properties = _read_pset(result.group, "Pset_SaikeiGradingAlignment")
+        properties = _read_pset(result.group, "SaikeiCivil_GradingAlignment")
         assert properties["AlignmentGuid"] == alignment.GlobalId
         assert "StartStation" not in properties
         assert "EndStation" not in properties
@@ -1669,7 +1669,7 @@ class TestLinkAlignmentToGroup:
         )
 
         assert first.id() == second.id()
-        properties = _read_pset(result.group, "Pset_SaikeiGradingAlignment")
+        properties = _read_pset(result.group, "SaikeiCivil_GradingAlignment")
         assert properties["StartStation"] == 20.0
         assert properties["EndStation"] == 75.0
 
@@ -1678,7 +1678,7 @@ class TestLinkAlignmentToGroup:
             r
             for r in result.group.IsDefinedBy or []
             if r.is_a("IfcRelDefinesByProperties")
-            and r.RelatingPropertyDefinition.Name == "Pset_SaikeiGradingAlignment"
+            and r.RelatingPropertyDefinition.Name == "SaikeiCivil_GradingAlignment"
         ]
         assert len(rels) == 1
 
@@ -1749,7 +1749,7 @@ class TestLinkAlignmentToGroup:
             if g.Name == "RTPad" and g.ObjectType == "GradingGroup"
         ]
         assert len(groups) == 1
-        properties = _read_pset(groups[0], "Pset_SaikeiGradingAlignment")
+        properties = _read_pset(groups[0], "SaikeiCivil_GradingAlignment")
         assert properties["StartStation"] == 12.5
         assert properties["EndStation"] == 87.5
         assert properties["AlignmentGuid"] == alignment.GlobalId

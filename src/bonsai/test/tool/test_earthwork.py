@@ -719,7 +719,7 @@ class TestAuthorVolumeResult:
             if rel.is_a("IfcRelDefinesByProperties")
         ]
         names = {p.Name for p in psets if p.is_a("IfcPropertySet")}
-        assert "Pset_SaikeiGradingShrinkSwell" in names
+        assert "SaikeiCivil_GradingShrinkSwell" in names
 
     def test_cut_without_terrain_raises(self) -> None:
         ifc_file = _make_ifc_file_with_site()
@@ -1214,7 +1214,7 @@ class TestEarthworkAuthorVolumeLabel:
 
     @pytest.mark.civil
     def test_author_volume_label_writes_pset(self) -> None:
-        """author_volume_label must attach Pset_SaikeiVolumeLabel with
+        """author_volume_label must attach SaikeiCivil_VolumeLabel with
         CutDepth, FillDepth, and LabelText (when label_text is supplied)."""
         ifc_file = _make_ifc_file_with_site()
 
@@ -1234,11 +1234,11 @@ class TestEarthworkAuthorVolumeLabel:
                 if rel.is_a("IfcRelDefinesByProperties")
                 and rel.RelatingPropertyDefinition.is_a("IfcPropertySet")
                 and rel.RelatingPropertyDefinition.Name
-                == "Pset_SaikeiVolumeLabel"
+                == "SaikeiCivil_VolumeLabel"
             ),
             None,
         )
-        assert pset is not None, "Pset_SaikeiVolumeLabel not found on annotation"
+        assert pset is not None, "SaikeiCivil_VolumeLabel not found on annotation"
 
         props = {p.Name: p for p in pset.HasProperties or []}
         # CutDepth
@@ -1401,7 +1401,7 @@ class TestEarthworkVolumeProbeModal(NewIfc4X3):
 
     @pytest.mark.civil
     def test_from_data_writes_cut_fill_pset(self, tmp_path) -> None:
-        """The authored IfcAnnotation must carry Pset_SaikeiVolumeLabel
+        """The authored IfcAnnotation must carry SaikeiCivil_VolumeLabel
         with CutDepth and FillDepth values consistent with the surfaces."""
         existing_guid, proposed_guid = self._build_two_surfaces(tmp_path)
 
@@ -1427,11 +1427,11 @@ class TestEarthworkVolumeProbeModal(NewIfc4X3):
                 for rel in label.IsDefinedBy or []
                 if rel.is_a("IfcRelDefinesByProperties")
                 and rel.RelatingPropertyDefinition.is_a("IfcPropertySet")
-                and rel.RelatingPropertyDefinition.Name == "Pset_SaikeiVolumeLabel"
+                and rel.RelatingPropertyDefinition.Name == "SaikeiCivil_VolumeLabel"
             ),
             None,
         )
-        assert pset is not None, "Pset_SaikeiVolumeLabel missing from annotation"
+        assert pset is not None, "SaikeiCivil_VolumeLabel missing from annotation"
 
         props = {p.Name: p for p in pset.HasProperties or []}
         # Existing at z=110, proposed at z=100 → cut_depth=10, fill_depth=0.

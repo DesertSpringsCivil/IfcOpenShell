@@ -76,7 +76,7 @@ def create_proposed_surface(
     :func:`ifcopenshell.api.spatial.assign_container`. A Body TIN
     representation, a Box LOD representation, the standard
     ``Pset_EarthworksFillCommon`` (``Status="NEW"``), the Saikei
-    ``Pset_SaikeiGradingSurface``, and an OmniClass Table 22
+    ``SaikeiCivil_GradingSurface``, and an OmniClass Table 22
     ``IfcClassificationReference`` are attached.
 
     :func:`ifcopenshell.api.grading.create_grading_group` (Phase 2) will call
@@ -94,8 +94,8 @@ def create_proposed_surface(
         to all zeros
     :param site: the :class:`IfcSite` to attach to; if ``None``, the project's
         first ``IfcSite`` is used
-    :param triangulation_tolerance: stored on ``Pset_SaikeiGradingSurface``
-    :param breakline_count: stored on ``Pset_SaikeiGradingSurface``
+    :param triangulation_tolerance: stored on ``SaikeiCivil_GradingSurface``
+    :param breakline_count: stored on ``SaikeiCivil_GradingSurface``
     :param omniclass_code: OmniClass Table 22 code. Default ``22-07 31 23``
         (Fill). Override for project-specific or agency classifications.
     :param omniclass_title: human-readable title paired with ``omniclass_code``.

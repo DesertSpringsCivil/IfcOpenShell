@@ -28,7 +28,7 @@ Builds a complete grading scenario end-to-end:
 5. The criteria bound to the group (``target_kind="surface"``)
 6. Two slope-fill ribbons (north and south edges of the pad)
 7. A flat interior fill (the pad floor)
-8. Corridor linkage on the group via Pset_SaikeiGradingAlignment
+8. Corridor linkage on the group via SaikeiCivil_GradingAlignment
 
 Writes the result to disk, reopens it, and prints a structural summary.
 Useful as a smoke test when changes to the API surface or as a stakeholder

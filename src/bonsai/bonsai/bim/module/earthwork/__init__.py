@@ -31,7 +31,7 @@ surfaces). The earthwork volume calculation is the canonical "what
 does this site cost in dirt?" computation: existing TIN minus
 proposed TIN → cut/fill regions → closed PolygonalFaceSet bodies →
 :class:`IfcEarthworksCut` + :class:`IfcEarthworksFill` with full
-``Qto_Earthworks*BaseQuantities`` and ``Pset_SaikeiGradingShrinkSwell``
+``Qto_Earthworks*BaseQuantities`` and ``SaikeiCivil_GradingShrinkSwell``
 attached.
 
 Subsequent commits add the VolumeResult dataclass / volume math /

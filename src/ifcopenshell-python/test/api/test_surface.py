@@ -400,7 +400,7 @@ class TestApplySaikeiPset:
         pset = apply_saikei_pset(empty_project_file, host)
 
         assert pset.is_a("IfcPropertySet")
-        assert pset.Name == "Pset_SaikeiGradingSurface"
+        assert pset.Name == "SaikeiCivil_GradingSurface"
         properties = self._read_back_properties(pset)
         assert properties["TriangulationTolerance"] == 0.0
         assert properties["BreaklineCount"] == 0
@@ -459,7 +459,7 @@ class TestApplySaikeiPset:
             r
             for r in host.IsDefinedBy or []
             if r.is_a("IfcRelDefinesByProperties")
-            and r.RelatingPropertyDefinition.Name == "Pset_SaikeiGradingSurface"
+            and r.RelatingPropertyDefinition.Name == "SaikeiCivil_GradingSurface"
         ]
         assert len(rels) == 1
 
@@ -486,7 +486,7 @@ class TestApplySaikeiPset:
             r.RelatingPropertyDefinition
             for r in host_again.IsDefinedBy or []
             if r.is_a("IfcRelDefinesByProperties")
-            and r.RelatingPropertyDefinition.Name == "Pset_SaikeiGradingSurface"
+            and r.RelatingPropertyDefinition.Name == "SaikeiCivil_GradingSurface"
         ]
         assert len(psets) == 1
         properties = self._read_back_properties(psets[0])
@@ -560,7 +560,7 @@ class TestCreateTerrain:
         assert common.get("Status") == "NEW"
 
         # Saikei pset present and populated.
-        saikei = self._read_pset(terrain, "Pset_SaikeiGradingSurface")
+        saikei = self._read_pset(terrain, "SaikeiCivil_GradingSurface")
         assert saikei["TriangulationTolerance"] == 0.005
         assert saikei["BreaklineCount"] == 0
         assert saikei["VertexCount"] == len(points)
@@ -666,7 +666,7 @@ class TestCreateTerrain:
             r.RepresentationIdentifier for r in terrain.Representation.Representations
         }
         assert rep_identifiers == {"Body", "Box"}
-        saikei_pset = self._read_pset(terrain, "Pset_SaikeiGradingSurface")
+        saikei_pset = self._read_pset(terrain, "SaikeiCivil_GradingSurface")
         assert saikei_pset["TriangulationTolerance"] == 0.01
         assert saikei_pset["BreaklineCount"] == 3
         assert saikei_pset["VertexCount"] == 5
@@ -720,7 +720,7 @@ class TestCreateProposedSurface:
         # Geographic-element pset must NOT be attached to a fill.
         assert self._read_pset(proposed, "Pset_GeographicElementCommon") == {}
 
-        saikei = self._read_pset(proposed, "Pset_SaikeiGradingSurface")
+        saikei = self._read_pset(proposed, "SaikeiCivil_GradingSurface")
         assert saikei["TriangulationTolerance"] == 0.002
         assert saikei["BreaklineCount"] == 1
         assert saikei["VertexCount"] == len(points)
@@ -775,7 +775,7 @@ class TestCreateProposedSurface:
         ]
         assert len(proposed) == 1
         assert proposed[0].PredefinedType == "SUBGRADE"
-        saikei = self._read_pset(proposed[0], "Pset_SaikeiGradingSurface")
+        saikei = self._read_pset(proposed[0], "SaikeiCivil_GradingSurface")
         assert saikei["TriangulationTolerance"] == 0.003
         assert saikei["BreaklineCount"] == 2
         assert saikei["VertexCount"] == 5
@@ -824,7 +824,7 @@ class TestAddBreaklineAnnotation:
         rel = (breakline.ContainedInStructure or [None])[0]
         assert rel is not None and rel.RelatingStructure.id() == site.id()
 
-        properties = self._read_pset(breakline, "Pset_SaikeiBreaklineCommon")
+        properties = self._read_pset(breakline, "SaikeiCivil_BreaklineCommon")
         assert properties["Kind"] == "standard"
         assert properties["Source"] == "manual"
         assert "GradingGroupGuid" not in properties
@@ -843,7 +843,7 @@ class TestAddBreaklineAnnotation:
             grading_group_guid="3VxJzKQwT9XwJZ8RbZkH7E",
         )
 
-        properties = self._read_pset(breakline, "Pset_SaikeiBreaklineCommon")
+        properties = self._read_pset(breakline, "SaikeiCivil_BreaklineCommon")
         assert properties["Kind"] == "wall"
         assert properties["Source"] == "csv import"
         assert properties["GradingGroupGuid"] == "3VxJzKQwT9XwJZ8RbZkH7E"
@@ -903,7 +903,7 @@ class TestAddBreaklineAnnotation:
         ]
         assert round_trip_coords == polyline
 
-        properties = self._read_pset(breakline, "Pset_SaikeiBreaklineCommon")
+        properties = self._read_pset(breakline, "SaikeiCivil_BreaklineCommon")
         assert properties["Kind"] == "non_destructive"
         assert properties["Source"] == "survey"
 

@@ -33,7 +33,7 @@ Phase 6 of the Saikei grading/earthwork sprint. This module owns:
   (Phase 3) — handles spatial containment under :class:`IfcSite`,
   :class:`IfcRelVoidsElement` linkage to the host terrain, and
   pre-computed quantity-set authoring (``Qto_EarthworksCut/FillBaseQuantities``,
-  ``Pset_SaikeiGradingShrinkSwell``).
+  ``SaikeiCivil_GradingShrinkSwell``).
 - Shrink/swell handling per spec §6.4 — caller supplies factors,
   the dataclass exposes derived ``loose_cut_m3`` and ``bank_fill_m3``
   ``@property`` accessors, and this module writes the Qto and the
@@ -160,7 +160,7 @@ class VolumeResult:
       ``LooseVolume``
 
     Shrink/swell factors are written to
-    ``Pset_SaikeiGradingShrinkSwell`` (Saikei custom pset, not in the
+    ``SaikeiCivil_GradingShrinkSwell`` (Saikei custom pset, not in the
     IFC 4.3 standard pset library). The spec audit explicitly required
     that ``loose_cut_m3`` be derived from
     ``undisturbed_cut_m3 × swell_factor`` rather than carried as an
@@ -631,10 +631,10 @@ class Earthwork:
           (= ``compacted / shrink_factor`` — the bank-state source
           volume of fill material). Both stay internally consistent
           with the swell/shrink factors written into
-          ``Pset_SaikeiGradingShrinkSwell``, closing the spec audit
+          ``SaikeiCivil_GradingShrinkSwell``, closing the spec audit
           gap.
         - ``apply_shrink_swell_pset`` on whichever entities exist —
-          attaches ``Pset_SaikeiGradingShrinkSwell`` with the result's
+          attaches ``SaikeiCivil_GradingShrinkSwell`` with the result's
           shrink/swell factors.
 
         :param ifc_file: the IFC file to author into.
@@ -902,7 +902,7 @@ class Earthwork:
         label_text: "str | None" = None,
     ) -> "ifcopenshell.entity_instance":
         """Author an :class:`IfcAnnotation` at ``xyz`` stamping cut/fill
-        depth values as a ``Pset_SaikeiVolumeLabel`` property set.
+        depth values as a ``SaikeiCivil_VolumeLabel`` property set.
 
         Thin dispatcher: validates inputs, resolves the IFC site, then
         delegates all entity authoring to
@@ -981,7 +981,7 @@ class Earthwork:
         :class:`IfcEarthworksFill` volume-result entities authored by a
         prior :meth:`author_volume_result` call, together with any
         ``Qto_Earthworks*BaseQuantities`` and
-        ``Pset_SaikeiGradingShrinkSwell`` property sets attached to them.
+        ``SaikeiCivil_GradingShrinkSwell`` property sets attached to them.
 
         Per spec §5.3, only the two specific entities whose GUIDs are
         provided are removed — this is not a global "delete all earthwork

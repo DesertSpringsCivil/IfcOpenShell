@@ -1012,7 +1012,7 @@ class Grading:
         criteria: GradingCriteria,
     ) -> "ifcopenshell.entity_instance":
         """Persist (or return the existing) :class:`IfcPropertySetTemplate`
-        for ``Pset_SaikeiGradingCriteria`` at project scope.
+        for ``SaikeiCivil_GradingCriteria`` at project scope.
 
         The Phase 2 API ``create_grading_criteria_template`` is a
         singleton-by-shape — calling it repeatedly returns the same
@@ -1098,7 +1098,7 @@ class Grading:
         Phase 2 API guarantees idempotence.
 
         :param target_reference: GUID-or-numeric override for
-            ``Pset_SaikeiGradingCriteria.TargetReference``. Defaults to
+            ``SaikeiCivil_GradingCriteria.TargetReference``. Defaults to
             ``str(criteria.target_ref)`` since the underlying API stores
             it as a string regardless of ``target_kind``.
         """
@@ -1317,7 +1317,7 @@ class Grading:
     @staticmethod
     def is_feature_line_alignment(alignment) -> bool:
         """Return True if ``alignment`` is a Saikei feature line
-        (carries ``Pset_SaikeiFeatureLineCommon``), False if it's an
+        (carries ``SaikeiCivil_FeatureLineCommon``), False if it's an
         ordinary IfcAlignment (e.g., a roadway centerline).
 
         Public predicate so UI-layer code (data cache, GPU decorator)
@@ -1327,7 +1327,7 @@ class Grading:
             if not rel.is_a("IfcRelDefinesByProperties"):
                 continue
             pset = rel.RelatingPropertyDefinition
-            if pset is not None and pset.Name == "Pset_SaikeiFeatureLineCommon":
+            if pset is not None and pset.Name == "SaikeiCivil_FeatureLineCommon":
                 return True
         return False
 
@@ -1394,7 +1394,7 @@ class Grading:
         :class:`IfcAlignment` identified by ``guid``.
 
         Reads the polyline geometry from the alignment's representation
-        and the ``Pset_SaikeiFeatureLineCommon`` for ``closed`` and
+        and the ``SaikeiCivil_FeatureLineCommon`` for ``closed`` and
         ``GradingGroupGuid`` (per Phase 2's ``create_feature_line``).
         """
         alignment = next(
@@ -1440,7 +1440,7 @@ class Grading:
         """Reconstruct a :class:`GradingGroup` from the
         :class:`IfcGroup[GradingGroup]` identified by ``guid``.
 
-        Reads ``Pset_SaikeiGradingSource`` for ``InteriorFillStrategy``
+        Reads ``SaikeiCivil_GradingSource`` for ``InteriorFillStrategy``
         and ``TargetSurfaceGuid``. Locates the per-group composite
         :class:`IfcEarthworksFill[SUBGRADE]` via the group's
         :class:`IfcRelAssignsToGroup` membership.
@@ -1514,7 +1514,7 @@ class Grading:
         alignment: "ifcopenshell.entity_instance",
     ) -> tuple[bool, Optional[str]]:
         """Pull ``IsClosed`` and ``GradingGroupGuid`` from
-        ``Pset_SaikeiFeatureLineCommon`` (per Phase 2's
+        ``SaikeiCivil_FeatureLineCommon`` (per Phase 2's
         :func:`create_feature_line`). Defaults: not closed, no group."""
         closed = False
         grading_group_guid = None
@@ -1522,7 +1522,7 @@ class Grading:
             if not rel.is_a("IfcRelDefinesByProperties"):
                 continue
             pset = rel.RelatingPropertyDefinition
-            if pset is None or pset.Name != "Pset_SaikeiFeatureLineCommon":
+            if pset is None or pset.Name != "SaikeiCivil_FeatureLineCommon":
                 continue
             for prop in pset.HasProperties or []:
                 if prop.Name == "IsClosed" and prop.NominalValue is not None:
@@ -1540,7 +1540,7 @@ class Grading:
         ifc_group: "ifcopenshell.entity_instance",
     ) -> tuple[str, Optional[str]]:
         """Pull ``InteriorFillStrategy`` and ``TargetSurfaceGuid`` from
-        ``Pset_SaikeiGradingSource``. Defaults:
+        ``SaikeiCivil_GradingSource``. Defaults:
         ``"interpolate_from_boundary"``, no target."""
         interior_fill = "interpolate_from_boundary"
         target_surface_guid = None
@@ -1548,7 +1548,7 @@ class Grading:
             if not rel.is_a("IfcRelDefinesByProperties"):
                 continue
             pset = rel.RelatingPropertyDefinition
-            if pset is None or pset.Name != "Pset_SaikeiGradingSource":
+            if pset is None or pset.Name != "SaikeiCivil_GradingSource":
                 continue
             for prop in pset.HasProperties or []:
                 if (
@@ -2095,7 +2095,7 @@ class Grading:
 
         This checks the canonical source of truth — group membership via
         ``IfcRelAssignsToGroup`` — rather than the stale
-        ``Pset_SaikeiFeatureLineCommon.GradingGroupGuid`` field, which is
+        ``SaikeiCivil_FeatureLineCommon.GradingGroupGuid`` field, which is
         only written at feature-line create time and is never updated when
         the feature line is added to a group by
         :func:`ifcopenshell.api.grading.add_slope_fill_to_group`.
@@ -2134,7 +2134,7 @@ class Grading:
         feature_line_guid: str,
     ) -> None:
         """Delete a feature line: removes the :class:`IfcAlignment` entity,
-        its ``Pset_SaikeiFeatureLineCommon``, unlinks the Blender curve,
+        its ``SaikeiCivil_FeatureLineCommon``, unlinks the Blender curve,
         and evicts the entry from the registry.
 
         :raises BlockedByDependentError: when the feature line is currently
@@ -2395,7 +2395,7 @@ class Grading:
         if not cls.is_feature_line_alignment(alignment):
             raise SaikeiGradingError(
                 f"IfcAlignment #{fl_id} is not a Saikei feature line "
-                "(missing Pset_SaikeiFeatureLineCommon)"
+                "(missing SaikeiCivil_FeatureLineCommon)"
             )
 
         feature_line = cls.get_feature_line(ifc_file, alignment.GlobalId)

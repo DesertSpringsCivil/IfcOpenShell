@@ -16,7 +16,7 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with IfcOpenShell.  If not, see <http://www.gnu.org/licenses/>.
 
-"""Attach the Saikei-specific property set ``Pset_SaikeiGradingSurface``."""
+"""Attach the Saikei-specific property set ``SaikeiCivil_GradingSurface``."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from typing import Optional
 import ifcopenshell
 import ifcopenshell.api.pset
 
-PSET_NAME = "Pset_SaikeiGradingSurface"
+PSET_NAME = "SaikeiCivil_GradingSurface"
 
 
 def _find_existing_pset(
@@ -65,7 +65,7 @@ def apply_saikei_pset(
     vertex_count: Optional[int] = None,
     boundary_polygon_reference: Optional[str] = None,
 ) -> ifcopenshell.entity_instance:
-    """Attach (or update) ``Pset_SaikeiGradingSurface`` on a surface host.
+    """Attach (or update) ``SaikeiCivil_GradingSurface`` on a surface host.
 
     The pset records Saikei-specific triangulation metadata that the IFC 4.3
     standard psets do not cover:

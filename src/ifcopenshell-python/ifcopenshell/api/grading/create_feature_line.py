@@ -30,7 +30,7 @@ import ifcopenshell.guid
 
 from ._shared import _resolve_site
 
-PSET_NAME = "Pset_SaikeiFeatureLineCommon"
+PSET_NAME = "SaikeiCivil_FeatureLineCommon"
 ALLOWED_SOURCES = frozenset({"manual", "drape", "corridor_extract", "csv_import"})
 
 
@@ -59,7 +59,7 @@ def create_feature_line(
     :func:`ifcopenshell.api.spatial.assign_container` — feature lines are
     site-scoped grading objects, distinct from transportation alignments
     which IFC 4.1.4.1.1 aggregates under :class:`IfcProject`. The
-    ``Pset_SaikeiFeatureLineCommon`` carries ``IsClosed``, ``Source``,
+    ``SaikeiCivil_FeatureLineCommon`` carries ``IsClosed``, ``Source``,
     ``ElevationSource``, and the optional ``GradingGroupGuid``.
 
     :param file: the IFC file to author into

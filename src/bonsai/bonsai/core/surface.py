@@ -132,7 +132,7 @@ def create_surface_from_points(
     :param points: ``(N, 3)`` array of XYZ coordinates; numpy array or
         sequence of triples — the tool layer coerces.
     :param kind: surface kind per spec §2.2 / :class:`CivilSurface.kind`.
-    :param triangulation_tolerance: forwarded to ``Pset_SaikeiGradingSurface``
+    :param triangulation_tolerance: forwarded to ``SaikeiCivil_GradingSurface``
         for downstream-tool quality reporting.
     :returns: the newly-built :class:`CivilSurface` (with all IFC step ids
         stamped).
@@ -204,7 +204,7 @@ def add_breakline_to_surface(
     :param surface_guid: GlobalId of the host surface entity.
     :param breakline: a :class:`Breakline` dataclass to attach.
     :param grading_group_guid: optional GUID linking the breakline to a
-        grading group (forwarded to ``Pset_SaikeiBreaklineCommon``).
+        grading group (forwarded to ``SaikeiCivil_BreaklineCommon``).
     :returns: the mutated :class:`CivilSurface`.
     :raises ValueError: if no IFC file is loaded.
     """

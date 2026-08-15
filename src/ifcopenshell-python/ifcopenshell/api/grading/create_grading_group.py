@@ -37,7 +37,7 @@ from ._shared import (
 from .add_member_to_group import add_member_to_group
 
 GROUP_OBJECT_TYPE = "GradingGroup"
-SOURCE_PSET_NAME = "Pset_SaikeiGradingSource"
+SOURCE_PSET_NAME = "SaikeiCivil_GradingSource"
 COMPOSITE_FILL_OMNICLASS_CODE = "22-07 31 23"
 COMPOSITE_FILL_OMNICLASS_TITLE = "Fill"
 ALLOWED_INTERIOR_FILL_STRATEGIES = frozenset(
@@ -62,7 +62,7 @@ def _attach_grading_source_pset(
     target_surface_guid: Optional[str],
     author: Optional[str],
 ) -> None:
-    """Attach Pset_SaikeiGradingSource with creation-time metadata."""
+    """Attach SaikeiCivil_GradingSource with creation-time metadata."""
     properties: dict[str, object] = {
         "InteriorFillStrategy": interior_fill,
         "Timestamp": int(time.time()),
@@ -92,7 +92,7 @@ def create_grading_group(
     entities the caller now owns:
 
     1. :class:`IfcGroup` with ``ObjectType="GradingGroup"`` — the logical
-       collection. Carries ``Pset_SaikeiGradingSource`` with ``Timestamp``,
+       collection. Carries ``SaikeiCivil_GradingSource`` with ``Timestamp``,
        ``Version``, ``InteriorFillStrategy``, and the optional
        ``TargetSurfaceGuid`` and ``Author``. NOT placed in the spatial tree
        (``IfcGroup`` is not an :class:`IfcProduct`); discoverable via
@@ -128,14 +128,14 @@ def create_grading_group(
     :param name: human-readable name shared by the group and the composite fill
     :param target_surface: the existing-ground surface this group is grading
         against; when supplied, its GUID is recorded on
-        ``Pset_SaikeiGradingSource``
+        ``SaikeiCivil_GradingSource``
     :param interior_fill: one of ``none``, ``flat``,
         ``interpolate_from_boundary``, ``from_surface``
     :param interior_fill_source: required when
         ``interior_fill="from_surface"``; ignored otherwise
     :param site: the :class:`IfcSite` to spatially contain the composite_fill
         in; if ``None``, the project's first ``IfcSite`` is used
-    :param author: free-form author label for ``Pset_SaikeiGradingSource``
+    :param author: free-form author label for ``SaikeiCivil_GradingSource``
     :returns: a :class:`GradingGroupAuthoring` named tuple
         ``(group, composite_fill)``
     :raises ValueError: if ``interior_fill`` is not one of the four allowed

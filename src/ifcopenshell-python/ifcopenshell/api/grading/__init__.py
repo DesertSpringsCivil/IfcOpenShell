@@ -33,11 +33,11 @@ A complete grading group as authored by this API:
 - :class:`IfcGroup` with ``ObjectType="GradingGroup"`` (the logical
   collection)
 
-  - ``Pset_SaikeiGradingSource`` (criteria reference, author, timestamp,
+  - ``SaikeiCivil_GradingSource`` (criteria reference, author, timestamp,
     target surface, interior-fill strategy)
-  - ``Pset_SaikeiGradingCriteria`` (instance bound to the project's
+  - ``SaikeiCivil_GradingCriteria`` (instance bound to the project's
     template via :class:`IfcRelDefinesByTemplate`)
-  - ``Pset_SaikeiGradingAlignment`` (optional, for corridor linkage)
+  - ``SaikeiCivil_GradingAlignment`` (optional, for corridor linkage)
   - :class:`IfcRelAssignsToGroup` membership: composite fill, slope
     fills, interior fill, source feature lines
 
@@ -70,9 +70,9 @@ A complete grading group as authored by this API:
 
   - Spatially contained in :class:`IfcSite` (distinct from transportation
     alignments, which are project-aggregated)
-  - ``Pset_SaikeiFeatureLineCommon``
+  - ``SaikeiCivil_FeatureLineCommon``
 
-- :class:`IfcPropertySetTemplate` for ``Pset_SaikeiGradingCriteria``
+- :class:`IfcPropertySetTemplate` for ``SaikeiCivil_GradingCriteria``
   (project-scope, singleton; six :class:`IfcSimplePropertyTemplate`
   children including an :class:`IfcPropertyEnumeration` for
   ``TargetKind``). Discoverable via ``file.by_type``; instances bound via
@@ -102,7 +102,7 @@ Currently supported
 
 1. :func:`create_feature_line` — :class:`IfcAlignment` 3D polyline.
 2. :func:`create_grading_criteria_template` — singleton
-   :class:`IfcPropertySetTemplate` for ``Pset_SaikeiGradingCriteria``.
+   :class:`IfcPropertySetTemplate` for ``SaikeiCivil_GradingCriteria``.
 3. :func:`create_grading_group` — entity pair
    (:class:`IfcGroup`, per-group composite :class:`IfcEarthworksFill`)
    returned as a :class:`GradingGroupAuthoring` named tuple.
@@ -114,7 +114,7 @@ Currently supported
 6. :func:`add_interior_fill_to_group` — author the per-group
    :class:`IfcEarthworksFill[SUBGRADE]` interior; one per group.
 7. :func:`link_alignment_to_group` —
-   ``Pset_SaikeiGradingAlignment`` for corridor linkage; valid on either
+   ``SaikeiCivil_GradingAlignment`` for corridor linkage; valid on either
    :class:`IfcGroup` or :class:`IfcEarthworksFill`.
 8. :func:`add_member_to_group` — lower-level
    :class:`IfcRelAssignsToGroup` building block.

@@ -588,7 +588,7 @@ def _annotation_belongs_to_host(
 def _extract_breakline_pset(
     annotation: "ifcopenshell.entity_instance",
 ) -> tuple[str, str]:
-    """Return ``(kind, source)`` from ``Pset_SaikeiBreaklineCommon`` on the
+    """Return ``(kind, source)`` from ``SaikeiCivil_BreaklineCommon`` on the
     annotation, defaulting to ``"standard"`` / ``"recovered"`` if the pset
     or properties are missing.
 
@@ -603,7 +603,7 @@ def _extract_breakline_pset(
         if not rel.is_a("IfcRelDefinesByProperties"):
             continue
         pset = rel.RelatingPropertyDefinition
-        if pset is None or pset.Name != "Pset_SaikeiBreaklineCommon":
+        if pset is None or pset.Name != "SaikeiCivil_BreaklineCommon":
             continue
         for prop in pset.HasProperties or []:
             if prop.Name == "Kind" and prop.NominalValue is not None:
@@ -1118,7 +1118,7 @@ class Surface:
 
         Walks the polyline geometry from the annotation's
         ``IfcShapeRepresentation`` and pulls ``Kind`` / ``Source`` from
-        ``Pset_SaikeiBreaklineCommon``. Entries that don't conform (no
+        ``SaikeiCivil_BreaklineCommon``. Entries that don't conform (no
         representation, missing pset, malformed polyline) are skipped
         silently.
         """
@@ -1442,7 +1442,7 @@ class Surface:
             ``triangles``, and ``triangle_flags`` must be populated.
         :param site: optional explicit :class:`IfcSite` parent; defaults to the
             file's first ``IfcSite`` (matches the Phase 1 API behavior).
-        :param triangulation_tolerance: forwarded to ``Pset_SaikeiGradingSurface``.
+        :param triangulation_tolerance: forwarded to ``SaikeiCivil_GradingSurface``.
         :returns: the created :class:`IfcGeographicElement` or :class:`IfcEarthworksFill`.
         :raises SaikeiSurfaceError: if ``surface.kind`` is not one of the three
             supported values.
@@ -1506,7 +1506,7 @@ class Surface:
             triangle_flags=surface.triangle_flags,
         )
         surface.ifc_tin_representation_id = new_tin.id()
-        # Refresh Pset_SaikeiGradingSurface so BreaklineCount /
+        # Refresh SaikeiCivil_GradingSurface so BreaklineCount /
         # VertexCount stay consistent with the rebuilt TIN. Without this,
         # the pset reflects only the values at create_terrain /
         # create_proposed_surface time and goes stale after every edit.

@@ -18,12 +18,12 @@
 
 """Author the project-scope IfcPropertySetTemplate for Saikei grading criteria.
 
-The template defines the parameter shape of ``Pset_SaikeiGradingCriteria``.
+The template defines the parameter shape of ``SaikeiCivil_GradingCriteria``.
 Instances of the pset (with concrete values) are authored against grading
 groups by :func:`assign_grading_criteria`.
 
 This is a singleton template: every file has at most one
-``Pset_SaikeiGradingCriteria`` template. The function is idempotent — calling
+``SaikeiCivil_GradingCriteria`` template. The function is idempotent — calling
 it twice returns the same template entity.
 """
 
@@ -34,7 +34,7 @@ from typing import Optional
 import ifcopenshell
 import ifcopenshell.guid
 
-PSET_TEMPLATE_NAME = "Pset_SaikeiGradingCriteria"
+PSET_TEMPLATE_NAME = "SaikeiCivil_GradingCriteria"
 ENUMERATION_NAME = "SaikeiGradingTargetKind"
 ENUMERATION_VALUES: tuple[str, ...] = (
     "surface",
@@ -94,7 +94,7 @@ def create_grading_criteria_template(
 ) -> ifcopenshell.entity_instance:
     """Create or return the project's :class:`IfcPropertySetTemplate` for grading criteria.
 
-    The template defines the structure of ``Pset_SaikeiGradingCriteria``:
+    The template defines the structure of ``SaikeiCivil_GradingCriteria``:
 
     - ``TargetKind`` — enumerated label, one of ``surface``, ``elevation``,
       ``relative_elevation``, ``distance``. Backed by an
@@ -118,7 +118,7 @@ def create_grading_criteria_template(
     existing template entity unchanged.
 
     :param file: the IFC file to author into
-    :returns: the :class:`IfcPropertySetTemplate` for ``Pset_SaikeiGradingCriteria``
+    :returns: the :class:`IfcPropertySetTemplate` for ``SaikeiCivil_GradingCriteria``
     """
     existing = _find_existing_template(file)
     if existing is not None:

@@ -24,10 +24,10 @@ Builds a complete cut + fill scenario end-to-end:
 1. Existing-ground TIN at z=99 (Phase 1 ``api.surface``)
 2. An IfcEarthworksCut[EXCAVATION] with a closed cube body, voiding
    the terrain via IfcRelVoidsElement
-3. Qto_EarthworksCutBaseQuantities and Pset_SaikeiGradingShrinkSwell
+3. Qto_EarthworksCutBaseQuantities and SaikeiCivil_GradingShrinkSwell
    on the cut
 4. An IfcEarthworksFill[EMBANKMENT] with a closed tetrahedron body
-5. Qto_EarthworksFillBaseQuantities and Pset_SaikeiGradingShrinkSwell
+5. Qto_EarthworksFillBaseQuantities and SaikeiCivil_GradingShrinkSwell
    on the fill
 
 Writes to disk, reopens, and prints a structural summary.

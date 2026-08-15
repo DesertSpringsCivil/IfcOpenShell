@@ -16,7 +16,7 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with IfcOpenShell.  If not, see <http://www.gnu.org/licenses/>.
 
-"""Attach Pset_SaikeiGradingShrinkSwell to an earthwork product."""
+"""Attach SaikeiCivil_GradingShrinkSwell to an earthwork product."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from typing import Optional
 import ifcopenshell
 import ifcopenshell.api.pset
 
-PSET_NAME = "Pset_SaikeiGradingShrinkSwell"
+PSET_NAME = "SaikeiCivil_GradingShrinkSwell"
 
 
 def _find_existing_pset(
@@ -48,7 +48,7 @@ def apply_shrink_swell_pset(
     shrink_factor: float = 1.0,
     swell_factor: float = 1.0,
 ) -> ifcopenshell.entity_instance:
-    """Attach (or update) :data:`Pset_SaikeiGradingShrinkSwell` on an earthwork product.
+    """Attach (or update) :data:`SaikeiCivil_GradingShrinkSwell` on an earthwork product.
 
     Per spec §3.3 this Saikei-specific pset carries shrink and swell
     factors that the standard ``Qto_Earthworks*BaseQuantities`` don't

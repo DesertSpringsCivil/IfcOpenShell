@@ -21,7 +21,7 @@
 Per Saikei spec section 1.6, every Saikei Pset is authored by an
 ifcopenshell.api.* helper rather than inline in Bonsai code. This
 helper authors the IfcAnnotation entity and attaches
-Pset_SaikeiVolumeLabel with CutDepth, FillDepth, and optional
+SaikeiCivil_VolumeLabel with CutDepth, FillDepth, and optional
 LabelText.
 """
 
@@ -49,7 +49,7 @@ def add_volume_label_annotation(
     label_text: Optional[str] = None,
     name: Optional[str] = None,
 ) -> ifcopenshell.entity_instance:
-    """Author an :class:`IfcAnnotation` with ``Pset_SaikeiVolumeLabel`` at xyz.
+    """Author an :class:`IfcAnnotation` with ``SaikeiCivil_VolumeLabel`` at xyz.
 
     The annotation is spatially contained in ``site`` via
     :class:`IfcRelContainedInSpatialStructure`. Returns the annotation entity.
@@ -61,7 +61,7 @@ def add_volume_label_annotation(
       is expressed as a world-origin-relative placement per spec §2.8)
     - :class:`IfcRelContainedInSpatialStructure` attaching the annotation to
       ``site``
-    - ``Pset_SaikeiVolumeLabel`` with ``CutDepth``, ``FillDepth``, and
+    - ``SaikeiCivil_VolumeLabel`` with ``CutDepth``, ``FillDepth``, and
       optionally ``LabelText``
     - OmniClass Table 22 classification ``22-07 31 00`` (Earthwork —
       general site preparation; the umbrella code for volume probes)
@@ -157,11 +157,11 @@ def add_volume_label_annotation(
         "Earthwork",
     )
 
-    # -- Pset_SaikeiVolumeLabel -----------------------------------------------
+    # -- SaikeiCivil_VolumeLabel -----------------------------------------------
     pset = ifcopenshell.api.pset.add_pset(
         file,
         product=annotation,
-        name="Pset_SaikeiVolumeLabel",
+        name="SaikeiCivil_VolumeLabel",
     )
     pset_properties: dict = {
         "CutDepth": cut_depth,

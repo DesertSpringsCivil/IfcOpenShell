@@ -1440,8 +1440,8 @@ class TestApplyShrinkSwellPset:
         )
 
         assert pset.is_a("IfcPropertySet")
-        assert pset.Name == "Pset_SaikeiGradingShrinkSwell"
-        properties = _read_pset(fill, "Pset_SaikeiGradingShrinkSwell")
+        assert pset.Name == "SaikeiCivil_GradingShrinkSwell"
+        properties = _read_pset(fill, "SaikeiCivil_GradingShrinkSwell")
         assert properties == {"ShrinkFactor": 0.92, "SwellFactor": 1.18}
 
     def test_happy_path_on_cut(self, empty_project_file: ifcopenshell.file) -> None:
@@ -1451,7 +1451,7 @@ class TestApplyShrinkSwellPset:
         apply_shrink_swell_pset(
             empty_project_file, cut, shrink_factor=0.85, swell_factor=1.25
         )
-        properties = _read_pset(cut, "Pset_SaikeiGradingShrinkSwell")
+        properties = _read_pset(cut, "SaikeiCivil_GradingShrinkSwell")
         assert properties == {"ShrinkFactor": 0.85, "SwellFactor": 1.25}
 
     def test_default_factors(self, empty_project_file: ifcopenshell.file) -> None:
@@ -1460,7 +1460,7 @@ class TestApplyShrinkSwellPset:
 
         fill = _make_fill(empty_project_file)
         apply_shrink_swell_pset(empty_project_file, fill)
-        properties = _read_pset(fill, "Pset_SaikeiGradingShrinkSwell")
+        properties = _read_pset(fill, "SaikeiCivil_GradingShrinkSwell")
         assert properties == {"ShrinkFactor": 1.0, "SwellFactor": 1.0}
 
     def test_idempotent_in_place_update(
@@ -1477,14 +1477,14 @@ class TestApplyShrinkSwellPset:
         )
 
         assert first.id() == second.id()
-        properties = _read_pset(fill, "Pset_SaikeiGradingShrinkSwell")
+        properties = _read_pset(fill, "SaikeiCivil_GradingShrinkSwell")
         assert properties == {"ShrinkFactor": 0.88, "SwellFactor": 1.22}
 
         rels = [
             r
             for r in fill.IsDefinedBy or []
             if r.is_a("IfcRelDefinesByProperties")
-            and r.RelatingPropertyDefinition.Name == "Pset_SaikeiGradingShrinkSwell"
+            and r.RelatingPropertyDefinition.Name == "SaikeiCivil_GradingShrinkSwell"
         ]
         assert len(rels) == 1
 
@@ -1515,7 +1515,7 @@ class TestApplyShrinkSwellPset:
         reopened = ifcopenshell.open(str(path))
         fills = [f for f in reopened.by_type("IfcEarthworksFill") if f.Name == "RTSwell"]
         assert len(fills) == 1
-        properties = _read_pset(fills[0], "Pset_SaikeiGradingShrinkSwell")
+        properties = _read_pset(fills[0], "SaikeiCivil_GradingShrinkSwell")
         assert properties == {"ShrinkFactor": 0.93, "SwellFactor": 1.20}
 
 
@@ -1677,7 +1677,7 @@ class TestAddVolumeLabelAnnotation:
     """Tests for :func:`ifcopenshell.api.earthwork.add_volume_label_annotation`.
 
     Per spec §1.6 this helper is the canonical author of
-    ``Pset_SaikeiVolumeLabel``; the Bonsai tool layer delegates to it.
+    ``SaikeiCivil_VolumeLabel``; the Bonsai tool layer delegates to it.
     """
 
     def test_creates_annotation_at_xyz(
@@ -1705,7 +1705,7 @@ class TestAddVolumeLabelAnnotation:
     def test_writes_pset_with_cut_fill(
         self, empty_project_file: ifcopenshell.file
     ) -> None:
-        """CutDepth and FillDepth must be written to Pset_SaikeiVolumeLabel."""
+        """CutDepth and FillDepth must be written to SaikeiCivil_VolumeLabel."""
         import ifcopenshell.api.earthwork
 
         site = _site(empty_project_file)
@@ -1717,7 +1717,7 @@ class TestAddVolumeLabelAnnotation:
             fill_depth=0.0,
         )
 
-        pset_props = _read_pset(annotation, "Pset_SaikeiVolumeLabel")
+        pset_props = _read_pset(annotation, "SaikeiCivil_VolumeLabel")
         assert "CutDepth" in pset_props
         assert float(pset_props["CutDepth"]) == pytest.approx(2.5)
         assert "FillDepth" in pset_props
@@ -1739,7 +1739,7 @@ class TestAddVolumeLabelAnnotation:
             label_text="Station 1+250",
         )
 
-        pset_props = _read_pset(annotation, "Pset_SaikeiVolumeLabel")
+        pset_props = _read_pset(annotation, "SaikeiCivil_VolumeLabel")
         assert "LabelText" in pset_props
         assert str(pset_props["LabelText"]) == "Station 1+250"
 
@@ -1759,7 +1759,7 @@ class TestAddVolumeLabelAnnotation:
             label_text=None,
         )
 
-        pset_props = _read_pset(annotation, "Pset_SaikeiVolumeLabel")
+        pset_props = _read_pset(annotation, "SaikeiCivil_VolumeLabel")
         assert "LabelText" not in pset_props
         # Auto-generated name should contain the depth values.
         assert annotation.Name is not None

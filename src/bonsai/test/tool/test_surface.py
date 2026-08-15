@@ -46,13 +46,13 @@ from test.bim.bootstrap import NewIfc4X3
 def _read_breakline_count(
     ifc_file: ifcopenshell.file, host: ifcopenshell.entity_instance
 ) -> int:
-    """Read ``Pset_SaikeiGradingSurface.BreaklineCount`` off the host
+    """Read ``SaikeiCivil_GradingSurface.BreaklineCount`` off the host
     entity. Returns 0 if the pset or property is missing."""
     for rel in ifc_file.by_type("IfcRelDefinesByProperties"):
         if host not in (rel.RelatedObjects or []):
             continue
         pset = rel.RelatingPropertyDefinition
-        if pset is None or pset.Name != "Pset_SaikeiGradingSurface":
+        if pset is None or pset.Name != "SaikeiCivil_GradingSurface":
             continue
         for prop in pset.HasProperties or []:
             if prop.Name == "BreaklineCount" and prop.NominalValue is not None:
@@ -1129,13 +1129,13 @@ class TestSurfaceAuthorIfcHost:
             )
         )
         host = tool_surface.Surface.author_ifc_host(ifc_file, surface)
-        # Find the Pset_SaikeiGradingSurface and verify BreaklineCount.
+        # Find the SaikeiCivil_GradingSurface and verify BreaklineCount.
         psets_via_rels = []
         for rel in ifc_file.by_type("IfcRelDefinesByProperties"):
             if host in (rel.RelatedObjects or []):
                 psets_via_rels.append(rel.RelatingPropertyDefinition)
         saikei_pset = next(
-            (p for p in psets_via_rels if p.Name == "Pset_SaikeiGradingSurface"),
+            (p for p in psets_via_rels if p.Name == "SaikeiCivil_GradingSurface"),
             None,
         )
         assert saikei_pset is not None
@@ -1229,7 +1229,7 @@ class TestSurfaceUpdateIfcTin:
         assert len(ifc_file.by_type("IfcBoundingBox")) == 1
 
     def test_refreshes_breakline_count_pset(self) -> None:
-        """``Pset_SaikeiGradingSurface.BreaklineCount`` should reflect
+        """``SaikeiCivil_GradingSurface.BreaklineCount`` should reflect
         ``len(surface.breaklines)`` after every ``update_ifc_tin``. Without
         this refresh, the pset goes stale after every edit (it was set
         once at create_terrain / create_proposed_surface time).
@@ -1332,13 +1332,13 @@ class TestSurfaceAuthorIfcBreakline:
         annotation = tool_surface.Surface.author_ifc_breakline(
             ifc_file, breakline, grading_group_guid=group_guid
         )
-        # Find Pset_SaikeiBreaklineCommon and check GradingGroupGuid.
+        # Find SaikeiCivil_BreaklineCommon and check GradingGroupGuid.
         psets = []
         for rel in ifc_file.by_type("IfcRelDefinesByProperties"):
             if annotation in (rel.RelatedObjects or []):
                 psets.append(rel.RelatingPropertyDefinition)
         breakline_pset = next(
-            (p for p in psets if p.Name == "Pset_SaikeiBreaklineCommon"), None
+            (p for p in psets if p.Name == "SaikeiCivil_BreaklineCommon"), None
         )
         assert breakline_pset is not None
         stored_guid = next(
@@ -1427,7 +1427,7 @@ class TestRehydrationHelpers:
 
     def test_extract_breakline_pset_falls_back_when_pset_missing(self) -> None:
         ifc_file = _make_ifc_file_with_site()
-        # Bare annotation with no Pset_SaikeiBreaklineCommon.
+        # Bare annotation with no SaikeiCivil_BreaklineCommon.
         annotation = ifc_file.create_entity(
             "IfcAnnotation",
             GlobalId=ifcopenshell.guid.new(),
@@ -3377,12 +3377,12 @@ class TestSurfaceAddBreaklineOperator(NewIfc4X3):
         )
         assert annotation is not None
 
-        # Find the Pset_SaikeiBreaklineCommon and check Kind.
+        # Find the SaikeiCivil_BreaklineCommon and check Kind.
         kind_value = None
         for rel in ifc_file.by_type("IfcRelDefinesByProperties"):
             if annotation in (rel.RelatedObjects or []):
                 pset = rel.RelatingPropertyDefinition
-                if pset.Name == "Pset_SaikeiBreaklineCommon":
+                if pset.Name == "SaikeiCivil_BreaklineCommon":
                     for prop in pset.HasProperties:
                         if prop.Name == "Kind":
                             kind_value = prop.NominalValue.wrappedValue
@@ -4272,7 +4272,7 @@ class TestCivilAddMenu(NewIfc4X3):
     def test_dispatch_feature_line_create(self, tmp_path) -> None:
         """Invoking civil.feature_line_create headless (the Feature Line
         entry in the Add Civil Element menu) authors an IfcAlignment with
-        Pset_SaikeiFeatureLineCommon.
+        SaikeiCivil_FeatureLineCommon.
 
         This is the spec §4 table row:
         IfcAlignment (feature-line variant) → civil.feature_line_create

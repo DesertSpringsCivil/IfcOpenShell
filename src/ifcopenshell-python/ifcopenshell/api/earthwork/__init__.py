@@ -22,7 +22,7 @@ Persists cut and fill volumes as :class:`IfcEarthworksCut` /
 :class:`IfcEarthworksFill` entities with closed
 :class:`IfcPolygonalFaceSet` body representations, the standard
 ``Qto_Earthworks*BaseQuantities``, the Saikei
-``Pset_SaikeiGradingShrinkSwell``, and OmniClass Table 22
+``SaikeiCivil_GradingShrinkSwell``, and OmniClass Table 22
 classifications. Phase 3 of the Saikei grading/earthwork sprint;
 depends on Phase 1 (``ifcopenshell.api.surface``) for terrain authoring
 and Phase 2 (``ifcopenshell.api.grading``) for the de-facto civil-
@@ -52,7 +52,7 @@ For an excavation+fill scenario:
   - ``Qto_EarthworksCutBaseQuantities`` with Length / Width / Depth
     (IfcQuantityLength), UndisturbedVolume / LooseVolume
     (IfcQuantityVolume), Weight (IfcQuantityWeight)
-  - ``Pset_SaikeiGradingShrinkSwell`` with ShrinkFactor / SwellFactor
+  - ``SaikeiCivil_GradingShrinkSwell`` with ShrinkFactor / SwellFactor
 
 - :class:`IfcEarthworksFill` (the placed fill material)
 
@@ -68,7 +68,7 @@ For an excavation+fill scenario:
   - ``Qto_EarthworksFillBaseQuantities`` with Length / Width / Depth,
     CompactedVolume / LooseVolume (no Weight on the fill side, per
     buildingSMART standard)
-  - ``Pset_SaikeiGradingShrinkSwell``
+  - ``SaikeiCivil_GradingShrinkSwell``
 
 Coordinate system
 =================
@@ -122,7 +122,7 @@ Currently supported
 7. :func:`write_fill_quantities` — idempotent
    ``Qto_EarthworksFillBaseQuantities`` author.
 8. :func:`apply_shrink_swell_pset` — idempotent
-   ``Pset_SaikeiGradingShrinkSwell`` author.
+   ``SaikeiCivil_GradingShrinkSwell`` author.
 
 Future versions of this API may support
 =======================================

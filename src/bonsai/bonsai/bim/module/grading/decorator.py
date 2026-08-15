@@ -21,7 +21,7 @@
 One class, two draw methods:
 
 1. :meth:`draw_feature_lines_3d` — every authored feature line
-   (:class:`IfcAlignment` with ``Pset_SaikeiFeatureLineCommon``)
+   (:class:`IfcAlignment` with ``SaikeiCivil_FeatureLineCommon``)
    rendered as a yellow polyline. Toggled by
    ``CivilGradingProperties.show_feature_lines``.
 2. :meth:`draw_daylight_lines_3d` — every cached
@@ -130,7 +130,7 @@ class GradingDecorator:
     @staticmethod
     def _collect_feature_line_segments(ifc_file):
         """Build ``(positions, line_indices)`` from every IfcAlignment
-        carrying ``Pset_SaikeiFeatureLineCommon``."""
+        carrying ``SaikeiCivil_FeatureLineCommon``."""
         positions: list[tuple[float, float, float]] = []
         indices: list[tuple[int, int]] = []
         for alignment in ifc_file.by_type("IfcAlignment"):

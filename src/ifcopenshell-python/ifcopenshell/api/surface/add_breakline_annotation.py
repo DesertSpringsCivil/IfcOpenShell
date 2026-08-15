@@ -29,7 +29,7 @@ import ifcopenshell.guid
 
 from ._representation_context import get_annotation_subcontext
 
-PSET_NAME = "Pset_SaikeiBreaklineCommon"
+PSET_NAME = "SaikeiCivil_BreaklineCommon"
 ALLOWED_KINDS = frozenset({"standard", "wall", "non_destructive", "proximity"})
 
 
@@ -53,7 +53,7 @@ def add_breakline_annotation(
     :func:`ifcopenshell.api.spatial.assign_container`. It uses
     ``PredefinedType=USERDEFINED`` with ``ObjectType="BREAKLINE"`` since the
     standard ``IfcAnnotationTypeEnum`` has no first-class breakline value. A
-    ``Pset_SaikeiBreaklineCommon`` is attached carrying ``Kind``, ``Source``,
+    ``SaikeiCivil_BreaklineCommon`` is attached carrying ``Kind``, ``Source``,
     and (when provided) ``GradingGroupGuid``.
 
     :param file: the IFC file to author into

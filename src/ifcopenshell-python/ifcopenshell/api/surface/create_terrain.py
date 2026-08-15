@@ -110,7 +110,7 @@ def create_terrain(
     attached, alongside an :class:`IfcBoundingBox` LOD representation derived
     from the point cloud's axis-aligned extents. The standard
     ``Pset_GeographicElementCommon`` (``Status="NEW"``) and the Saikei
-    ``Pset_SaikeiGradingSurface`` (with ``triangulation_tolerance``,
+    ``SaikeiCivil_GradingSurface`` (with ``triangulation_tolerance``,
     ``breakline_count``, and inferred ``VertexCount``) are attached.
     An OmniClass Table 22 ``IfcClassificationReference`` is associated
     via :class:`IfcRelAssociatesClassification` so consumers can
@@ -135,8 +135,8 @@ def create_terrain(
         to all zeros
     :param site: the :class:`IfcSite` to attach to; if ``None``, the project's
         first ``IfcSite`` is used
-    :param triangulation_tolerance: stored on ``Pset_SaikeiGradingSurface``
-    :param breakline_count: stored on ``Pset_SaikeiGradingSurface``
+    :param triangulation_tolerance: stored on ``SaikeiCivil_GradingSurface``
+    :param breakline_count: stored on ``SaikeiCivil_GradingSurface``
     :param omniclass_code: OmniClass Table 22 code. Default ``22-07 31 13``
         (Site Preparation). Override for project-specific or agency
         classifications (e.g., ``22-07 31 14`` Site Clearing).
