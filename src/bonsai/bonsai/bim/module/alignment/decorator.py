@@ -29,6 +29,7 @@ import math
 import bonsai.tool as tool
 from bpy.types import SpaceView3D
 from gpu_extras.batch import batch_for_shader
+from bonsai.tool.alignment import ProfileViewTransform
 
 
 class PIEditDecorator:
@@ -273,6 +274,21 @@ class ProfileViewDecorator:
     # convert mouse position to (station, elevation).
     current_transform = None
 
+    # ---- Cant band (spec 3.4, display-only) ----
+    # When the alignment has a cant layout with >= 2 points, the panel rect
+    # splits into the profile (upper) and a cant band (lower), sharing
+    # MARGIN_LEFT/RIGHT and the station axis. Cached on refresh(); read-only
+    # config (design_speed/track_gauge/cant_limit_max_applied) is set
+    # externally by install()/CIVIL_OT_refresh_profile_view, mirroring how
+    # vertical_exaggeration is threaded through.
+    has_cant = False
+    cant_points_data = []  # [{"station","cant_left","cant_right","transition_type"}, ...]
+    design_speed = 0.0
+    track_gauge = 1.435
+    cant_limit_max_applied = 0.160
+    CANT_BAND_FRACTION = 0.30  # lower ~30% of the panel height
+    CANT_BAND_MIN_HEIGHT = 70
+
     # Layout (pixels)
     MARGIN_LEFT = 64
     MARGIN_RIGHT = 24
@@ -287,9 +303,25 @@ class ProfileViewDecorator:
     COLOR_DESIGN = (0.20, 0.80, 0.95, 1.0)  # cyan
     COLOR_PVI = (1.0, 0.85, 0.15, 1.0)  # yellow
     COLOR_TEXT = (0.88, 0.88, 0.90, 1.0)
+    COLOR_CANT_LEFT = (0.95, 0.55, 0.15, 1.0)  # orange
+    COLOR_CANT_RIGHT = (0.35, 0.75, 1.0, 1.0)  # light blue
+    COLOR_CANT_EQUILIBRIUM = (0.85, 0.85, 0.20, 1.0)  # yellow — equilibrium cant
+    COLOR_CANT_ZERO = (0.55, 0.55, 0.58, 1.0)
+    COLOR_CANT_LIMIT = (0.9, 0.3, 0.3, 0.45)  # faint red
 
     @classmethod
-    def install(cls, context, alignment_id, terrain_obj, interval, panel_height, vertical_exaggeration=0.0):
+    def install(
+        cls,
+        context,
+        alignment_id,
+        terrain_obj,
+        interval,
+        panel_height,
+        vertical_exaggeration=0.0,
+        design_speed=0.0,
+        track_gauge=1.435,
+        cant_limit_max_applied=0.160,
+    ):
         if cls.is_installed:
             cls.uninstall()
         cls.alignment_id = alignment_id
@@ -297,6 +329,9 @@ class ProfileViewDecorator:
         cls.interval = interval
         cls.panel_height = panel_height
         cls.vertical_exaggeration = vertical_exaggeration
+        cls.design_speed = design_speed
+        cls.track_gauge = track_gauge
+        cls.cant_limit_max_applied = cant_limit_max_applied
         cls.refresh()
         handler = cls()
         cls.handlers.append(
@@ -318,11 +353,14 @@ class ProfileViewDecorator:
 
     @classmethod
     def refresh(cls):
-        """Re-sample the design + terrain profiles and PVI markers from IFC."""
+        """Re-sample the design + terrain profiles, PVI markers, and (when
+        present) the cant point table — all from IFC."""
         cls.design_points = []
         cls.terrain_points = []
         cls.pvi_points = []
         cls.station_labels = {}
+        cls.has_cant = False
+        cls.cant_points_data = []
 
         ifc_file = tool.Ifc.get()
         if ifc_file is None or not cls.alignment_id:
@@ -347,6 +385,12 @@ class ProfileViewDecorator:
             except (ValueError, KeyError):
                 cls.pvi_points = []
 
+        if tool.Alignment.get_cant_layout(alignment) is not None:
+            cant_points = tool.Alignment.back_calculate_cant_points_from_layout(alignment)
+            if len(cant_points) >= 2:
+                cls.has_cant = True
+                cls.cant_points_data = cant_points
+
     # ------------------------------------------------------------------ draw
 
     def draw_profile(self, context):
@@ -361,10 +405,24 @@ class ProfileViewDecorator:
         self._draw_quad(0, 0, width, panel_h, cls.COLOR_BG)
         self._draw_text(cls.MARGIN_LEFT, panel_h - 19, "Profile View — Station vs Elevation", cls.COLOR_TEXT, size=12)
 
+        # When cant data is present, split the panel into the profile band
+        # (upper ~70%) and a cant band (lower ~30%), sharing MARGIN_LEFT/
+        # RIGHT and the station axis (spec 3.4). show_cant is also re-checked
+        # after the profile transform is known — an empty/too-thin cant band
+        # is silently skipped rather than drawn broken.
+        show_cant = cls.has_cant and len(cls.cant_points_data) >= 2
+        cant_band_h = 0
+        if show_cant:
+            cant_band_h = max(cls.CANT_BAND_MIN_HEIGHT, int(panel_h * cls.CANT_BAND_FRACTION))
+            if panel_h - cant_band_h < 120:
+                # Not enough room left for a usable profile band — skip the cant band.
+                cant_band_h = 0
+                show_cant = False
+
         rect_x = cls.MARGIN_LEFT
-        rect_y = cls.MARGIN_BOTTOM
+        rect_y = cant_band_h + cls.MARGIN_BOTTOM
         rect_w = width - cls.MARGIN_LEFT - cls.MARGIN_RIGHT
-        rect_h = panel_h - cls.MARGIN_BOTTOM - cls.PADDING_TOP
+        rect_h = panel_h - cant_band_h - cls.MARGIN_BOTTOM - cls.PADDING_TOP
         if rect_w < 80 or rect_h < 40:
             gpu.state.blend_set("NONE")
             return
@@ -417,7 +475,107 @@ class ProfileViewDecorator:
         if cls.terrain_points:
             self._draw_text(legend_x, legend_y - 15, "— Terrain", cls.COLOR_TERRAIN, size=10)
 
+        if show_cant:
+            self._draw_cant_band(region, rect_x, rect_w, cant_band_h, transform)
+
         gpu.state.blend_set("NONE")
+
+    def _draw_cant_band(self, region, rect_x, rect_w, band_h, station_transform):
+        """Draw the cant band (spec 3.4): applied cant L/R + equilibrium cant
+        polylines, a zero line, and faint max-applied-cant limit lines.
+        Display-only — shares MARGIN_LEFT/RIGHT and the station axis with
+        the profile band above via ``station_transform``.
+        """
+        cls = ProfileViewDecorator
+        rect_y = cls.MARGIN_BOTTOM
+        rect_h = band_h - cls.MARGIN_BOTTOM - 16
+        if rect_w < 80 or rect_h < 30:
+            return
+
+        stations = self._linspace(station_transform.station_min, station_transform.station_max, 60)
+        samples = tool.Alignment.sample_cant_profile(cls.cant_points_data, stations)
+
+        alignment = None
+        ifc_file = tool.Ifc.get()
+        if ifc_file is not None and cls.alignment_id:
+            try:
+                alignment = ifc_file.by_id(cls.alignment_id)
+            except RuntimeError:
+                alignment = None
+
+        equilibrium_points = []
+        if alignment is not None:
+            is_imperial = tool.Alignment.is_imperial_project()
+            for station in stations:
+                radius = tool.Alignment.radius_at_station(alignment, station)
+                e_eq = tool.Alignment.cant_equilibrium(cls.design_speed, radius, cls.track_gauge, is_imperial)
+                equilibrium_points.append((station, e_eq))
+
+        applied_lefts = [s[1] for s in samples]
+        applied_rights = [s[2] for s in samples]
+        equilibrium_values = [p[1] for p in equilibrium_points]
+        limit = cls.cant_limit_max_applied
+        all_values = applied_lefts + applied_rights + equilibrium_values + [0.0, limit, -limit]
+        cant_min, cant_max = min(all_values), max(all_values)
+        pad = ((cant_max - cant_min) or 0.01) * 0.15
+        cant_min -= pad
+        cant_max += pad
+
+        cant_transform = ProfileViewTransform(
+            station_min=station_transform.station_min,
+            station_max=station_transform.station_max,
+            elevation_min=cant_min,
+            elevation_max=cant_max,
+            rect_x=rect_x,
+            rect_y=rect_y,
+            rect_width=rect_w,
+            rect_height=rect_h,
+        )
+
+        self._draw_grid(region, cant_transform)
+        self._draw_frame(region, cant_transform)
+        self._draw_text(rect_x, rect_y + rect_h - 14, "Cant — applied vs equilibrium", cls.COLOR_TEXT, size=11)
+
+        zx0, zy0 = cant_transform.data_to_screen(cant_transform.station_min, 0.0)
+        zx1, zy1 = cant_transform.data_to_screen(cant_transform.station_max, 0.0)
+        self._draw_lines(region, [(zx0, zy0, 0.0), (zx1, zy1, 0.0)], [(0, 1)], cls.COLOR_CANT_ZERO, 1.0)
+
+        for limit_value in (limit, -limit):
+            lx0, ly0 = cant_transform.data_to_screen(cant_transform.station_min, limit_value)
+            lx1, ly1 = cant_transform.data_to_screen(cant_transform.station_max, limit_value)
+            self._draw_lines(region, [(lx0, ly0, 0.0), (lx1, ly1, 0.0)], [(0, 1)], cls.COLOR_CANT_LIMIT, 1.0)
+
+        if len(samples) >= 2:
+            left_verts = [(*cant_transform.data_to_screen(s, left), 0.0) for s, left, right in samples]
+            self._draw_lines(
+                region, left_verts, [(i, i + 1) for i in range(len(left_verts) - 1)], cls.COLOR_CANT_LEFT, 2.0
+            )
+            right_verts = [(*cant_transform.data_to_screen(s, right), 0.0) for s, left, right in samples]
+            self._draw_lines(
+                region, right_verts, [(i, i + 1) for i in range(len(right_verts) - 1)], cls.COLOR_CANT_RIGHT, 2.0
+            )
+
+        if len(equilibrium_points) >= 2:
+            eq_verts = [(*cant_transform.data_to_screen(s, e), 0.0) for s, e in equilibrium_points]
+            self._draw_lines(
+                region, eq_verts, [(i, i + 1) for i in range(len(eq_verts) - 1)], cls.COLOR_CANT_EQUILIBRIUM, 1.5
+            )
+
+        legend_x = rect_x + rect_w - 190
+        legend_y = rect_y + rect_h - 14
+        self._draw_text(legend_x, legend_y, "— Left", cls.COLOR_CANT_LEFT, size=9)
+        self._draw_text(legend_x + 55, legend_y, "— Right", cls.COLOR_CANT_RIGHT, size=9)
+        self._draw_text(legend_x + 120, legend_y, "— E_eq", cls.COLOR_CANT_EQUILIBRIUM, size=9)
+
+    @staticmethod
+    def _linspace(start, stop, count):
+        """Return ``count`` evenly spaced values from ``start`` to ``stop``
+        inclusive. Returns ``[start]`` for a degenerate (empty/zero-span)
+        range."""
+        if count <= 1 or stop <= start:
+            return [start]
+        step = (stop - start) / (count - 1)
+        return [start + i * step for i in range(count)]
 
     # --------------------------------------------------------------- helpers
 

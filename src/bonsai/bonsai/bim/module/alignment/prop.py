@@ -65,6 +65,47 @@ def _on_design_speed_update(self, context):
     ops.rebuild_vertical_display_rows(self)
 
 
+def _on_cant_value_update(self, context):
+    """Callback when a cant point's edited value changes.
+
+    Mirrors ``_on_design_speed_update``: recomputes the CHECKS row (E_eq,
+    deficiency/excess, gradient, twist, limit violations) so the table stays
+    live as the user types. This does NOT write to IFC — spec 3.5 keeps the
+    PI/PVI table idiom of an explicit Recalculate button for the IFC write;
+    "recompute on cell edit" here refers only to the advisory checks.
+    """
+    from . import operator as ops
+
+    props = context.scene.CivilAlignmentProperties
+    ops.rebuild_cant_display_rows(props)
+
+
+def _on_cant_rotation_reference_update(self, context):
+    """Persist the cant rotation reference immediately when changed (spec 3.3).
+
+    "Recorded, not assumed": there is no Recalculate-button gate for this
+    value (unlike the cant point table) since it has no geometry consequence
+    to defer — it is a pure design-intent record, so it is written to
+    Pset_SaikeiCant as soon as the dropdown changes.
+    """
+    import bonsai.tool as tool
+
+    props = context.scene.CivilAlignmentProperties
+    if props.active_alignment_id == 0:
+        return
+    ifc_file = tool.Ifc.get()
+    if ifc_file is None:
+        return
+    try:
+        alignment = ifc_file.by_id(props.active_alignment_id)
+    except RuntimeError:
+        return
+    cant_layout = tool.Alignment.get_cant_layout(alignment)
+    if cant_layout is None:
+        return
+    tool.Alignment.set_cant_rotation_reference(cant_layout, self.cant_rotation_reference)
+
+
 def _on_profile_exaggeration_update(self, context):
     """Push a changed exaggeration onto a live profile view immediately.
 
@@ -268,6 +309,120 @@ class AlignmentDisplayRow(PropertyGroup):
     arc_length: FloatProperty(name="Arc Length", default=0.0, precision=2, unit="LENGTH")
 
 
+CANT_TRANSITION_TYPE_ITEMS = [
+    ("CONSTANTCANT", "Constant", "Holds the cant flat at this point's value (no transition)"),
+    ("LINEARTRANSITION", "Linear", "Straight-line ramp between this point's value and the next"),
+    ("HELMERTCURVE", "Helmert", "Two-parabola transition; zero slope at both ends, continuous slope at midpoint"),
+    ("BLOSSCURVE", "Bloss", "Cubic S-curve transition; zero slope and zero curvature at both ends"),
+    ("COSINECURVE", "Cosine", "Half-cosine transition; zero slope at both ends"),
+    ("SINECURVE", "Sine", "Sine-wave transition; zero slope and zero curvature at both ends"),
+    ("VIENNESEBEND", "Viennese Bend", "7th-order polynomial spiral transition (approximated as Bloss for display)"),
+]
+
+
+class CivilCantPointProperties(PropertyGroup):
+    """Property group for a single cant point (spec 3.2).
+
+    Cant points mark STATIONS where cant VALUES (the left/right rail
+    heights relative to the reference plane) are defined. Consecutive points
+    make up SEGMENTS: the segment length is the station delta between them,
+    and each point's ``transition_type`` describes the shape of the segment
+    that carries ITS value INTO THE NEXT point's value (i.e.
+    ``transition_type`` on the LAST point is unused — there is no segment
+    leaving it). This is the same convention used by
+    ``tool.Alignment.write_cant_segments`` and ``sample_cant_profile``.
+    """
+
+    station: FloatProperty(
+        name="Station",
+        description="Station value at this cant point (distance along the horizontal alignment)",
+        default=0.0,
+        precision=2,
+    )
+
+    cant_left: FloatProperty(
+        name="Cant L",
+        description="Left rail height at this station, relative to the reference plane",
+        default=0.0,
+        precision=4,
+        unit="LENGTH",
+        update=_on_cant_value_update,
+    )
+
+    cant_right: FloatProperty(
+        name="Cant R",
+        description="Right rail height at this station, relative to the reference plane",
+        default=0.0,
+        precision=4,
+        unit="LENGTH",
+        update=_on_cant_value_update,
+    )
+
+    transition_type: EnumProperty(
+        name="Transition",
+        description=(
+            "Shape of the segment carrying this point's cant value into the NEXT point's value "
+            "(unused on the last point, which has no outgoing segment)"
+        ),
+        items=CANT_TRANSITION_TYPE_ITEMS,
+        default="LINEARTRANSITION",
+        update=_on_cant_value_update,
+    )
+
+    design_speed: FloatProperty(
+        name="Design Speed",
+        description=(
+            "Design speed for the equilibrium-cant check at this point — mph in imperial "
+            "projects, km/h in metric projects. 0 inherits the alignment-level Design Speed"
+        ),
+        default=0.0,
+        min=0.0,
+        soft_max=200.0,
+        update=_on_cant_value_update,
+    )
+
+
+class CantDisplayRow(PropertyGroup):
+    """Property group for the interleaved cant point / computed-checks table
+    (spec 3.2) — mirrors ``AlignmentDisplayRow`` / ``VerticalDisplayRow``'s
+    POINT/SEGMENT interleaving:
+
+        Point 1  (station, cant L/R, transition — editable)
+          Computed  (E_eq, deficiency, excess, gradient, twist for the
+                     segment leaving Point 1)
+        Point 2
+          Computed
+        ...
+        Point N  (no Computed row — no outgoing segment)
+    """
+
+    row_type: EnumProperty(
+        name="Row Type",
+        items=[
+            ("POINT", "Point", "A cant point row"),
+            ("COMPUTED", "Computed", "Computed checks for the segment leaving this point"),
+        ],
+        default="POINT",
+    )
+
+    point_index: IntProperty(name="Point Index", default=0)
+
+    radius: FloatProperty(name="Radius", default=0.0, precision=2)
+    applied_left: FloatProperty(name="Applied L", default=0.0, precision=4)
+    applied_right: FloatProperty(name="Applied R", default=0.0, precision=4)
+    applied: FloatProperty(name="Applied", default=0.0, precision=4)
+    equilibrium: FloatProperty(name="E_eq", default=0.0, precision=4)
+    deficiency: FloatProperty(name="Deficiency", default=0.0, precision=4)
+    excess: FloatProperty(name="Excess", default=0.0, precision=4)
+    gradient: FloatProperty(name="Gradient", default=0.0, precision=3)
+    twist_per_length: FloatProperty(name="Twist Rate", default=0.0, precision=3)
+    twist_per_time: FloatProperty(name="Twist (mm/s)", default=0.0, precision=2)
+
+    # Comma-separated limit names from EN13803_DEFAULT_LIMITS (or the user's
+    # overrides) that this segment violates — empty string when compliant.
+    violations: StringProperty(name="Violations", default="")
+
+
 class CivilAlignmentProperties(PropertyGroup):
     """Properties for the alignment module"""
 
@@ -410,4 +565,91 @@ class CivilAlignmentProperties(PropertyGroup):
         min=0.0,
         soft_max=20.0,
         update=_on_profile_exaggeration_update,
+    )
+
+    # ---- Cant (spec Section 3) ----
+    cant_points: CollectionProperty(type=CivilCantPointProperties)
+    active_cant_point_index: IntProperty(name="Active Cant Point", default=0)
+
+    cant_display_rows: CollectionProperty(type=CantDisplayRow)
+    active_cant_display_row_index: IntProperty(name="Active Cant Display Row", default=0)
+
+    track_gauge: FloatProperty(
+        name="Track Gauge",
+        description=(
+            "Rail gauge used for the equilibrium cant / deficiency / excess checks "
+            "(EN 13803 standard gauge = 1.435 m)"
+        ),
+        default=1.435,
+        min=0.0,
+        precision=4,
+        unit="LENGTH",
+        update=_on_cant_value_update,
+    )
+
+    show_cant_limits: BoolProperty(
+        name="Show Cant Limits",
+        description="Expand/collapse the EN 13803 limit-override box in the Cant Editor panel",
+        default=False,
+    )
+
+    cant_rotation_reference: EnumProperty(
+        name="Rotation Reference",
+        description=(
+            "Which rail the cant rotation is measured about — recorded for design intent "
+            "and save/reopen round-trip (Pset_SaikeiCant.RotationReference); no geometry "
+            "consequence yet, the geometric representation always applies cant per "
+            "RailHeadDistance exactly as authored"
+        ),
+        items=[
+            ("LOW_RAIL", "Low Rail", "Cant rotation measured about the low (inner) rail"),
+            ("CENTERLINE", "Centerline", "Cant rotation measured about the track centerline"),
+            ("HIGH_RAIL", "High Rail", "Cant rotation measured about the high (outer) rail"),
+        ],
+        default="LOW_RAIL",
+        update=_on_cant_rotation_reference_update,
+    )
+
+    # EN 13803-1:2017 plain-line normal-limit defaults (metres / dimensionless
+    # ratios — see tool.Alignment.EN13803_DEFAULT_LIMITS, the source of truth
+    # these mirror; PropertyGroup defaults must be literals so they cannot
+    # simply reference that dict at class-definition time). Advisory only,
+    # user-overridable.
+    cant_limit_max_applied: FloatProperty(
+        name="Max Applied Cant",
+        description="EN 13803 plain-line normal limit: 160 mm",
+        default=0.160,
+        min=0.0,
+        precision=4,
+        unit="LENGTH",
+    )
+    cant_limit_max_deficiency: FloatProperty(
+        name="Max Deficiency",
+        description="EN 13803 plain-line normal limit: 153 mm",
+        default=0.153,
+        min=0.0,
+        precision=4,
+        unit="LENGTH",
+    )
+    cant_limit_max_excess: FloatProperty(
+        name="Max Excess",
+        description="EN 13803 plain-line normal limit: 110 mm",
+        default=0.110,
+        min=0.0,
+        precision=4,
+        unit="LENGTH",
+    )
+    cant_limit_max_gradient: FloatProperty(
+        name="Max Cant Gradient",
+        description="EN 13803 plain-line normal limit: 2.25 mm/m, stored as a dimensionless ratio (m/m)",
+        default=0.00225,
+        min=0.0,
+        precision=6,
+    )
+    cant_limit_max_twist: FloatProperty(
+        name="Max Twist",
+        description="EN 13803 plain-line normal limit: 3 mm/m, stored as a dimensionless ratio (m/m)",
+        default=0.003,
+        min=0.0,
+        precision=6,
     )

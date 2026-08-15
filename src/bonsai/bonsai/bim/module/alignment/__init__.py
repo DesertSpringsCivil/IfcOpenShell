@@ -27,10 +27,13 @@ classes = (
     prop.AlignmentDisplayRow,
     prop.VerticalPVI,
     prop.VerticalDisplayRow,
+    prop.CivilCantPointProperties,
+    prop.CantDisplayRow,
     prop.CivilAlignmentProperties,
     # UILists
     ui.CIVIL_UL_alignment_pis,
     ui.CIVIL_UL_vertical_pvis,
+    ui.CIVIL_UL_cant_points,
     operator.ImportAlignmentCSV,
     # Operators - PI Management
     operator.CIVIL_OT_add_pi,
@@ -63,6 +66,13 @@ classes = (
     operator.CIVIL_OT_toggle_profile_view,
     operator.CIVIL_OT_refresh_profile_view,
     operator.CIVIL_OT_edit_pvi_in_profile,
+    # Operators - Cant (spec Section 3)
+    operator.CIVIL_OT_add_cant_to_alignment,
+    operator.CIVIL_OT_add_cant_point,
+    operator.CIVIL_OT_remove_cant_point,
+    operator.CIVIL_OT_recalculate_cant,
+    operator.CIVIL_OT_clear_cant_points,
+    operator.CIVIL_OT_delete_cant_layout,
     # UI Panels (appear in Properties sidebar under CIVIL tab)
     ui.CIVIL_PT_alignment_creation,
     ui.CIVIL_PT_pi_editor,
@@ -70,6 +80,7 @@ classes = (
     ui.CIVIL_PT_pvi_editor,
     ui.CIVIL_PT_profile_view,
     ui.CIVIL_PT_alignment_stationing,
+    ui.CIVIL_PT_cant_editor,
 )
 
 

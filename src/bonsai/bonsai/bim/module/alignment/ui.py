@@ -181,6 +181,57 @@ class CIVIL_UL_vertical_pvis(UIList):
             layout.label(text="", icon="DECORATE")
 
 
+class CIVIL_UL_cant_points(UIList):
+    """UIList for displaying interleaved cant points and computed checks
+    (spec 3.2).
+
+    Row types:
+    - POINT rows: editable station, cant L/R, and the transition type
+      carried into the NEXT point (hidden on the last point — it has no
+      outgoing segment).
+    - COMPUTED rows: E_eq, deficiency, excess, gradient, twist for the
+      segment leaving that point; ERROR icon + alert when any EN 13803
+      limit is violated (mirrors the vertical table's K-flag idiom).
+    """
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {"DEFAULT", "COMPACT"}:
+            row = layout.row(align=True)
+
+            if item.row_type == "POINT":
+                point = data.cant_points[item.point_index] if item.point_index < len(data.cant_points) else None
+                row.label(text=f"{item.point_index + 1}", icon="DOT")
+                if point:
+                    sub = row.row(align=True)
+                    sub.prop(point, "station", text="")
+                    sub.prop(point, "cant_left", text="")
+                    sub.prop(point, "cant_right", text="")
+                    if item.point_index < len(data.cant_points) - 1:
+                        sub.prop(point, "transition_type", text="")
+                    else:
+                        sub.label(text="")
+                else:
+                    row.label(text="")
+
+            elif item.row_type == "COMPUTED":
+                is_violation = bool(item.violations)
+                sub = row.row(align=True)
+                sub.label(text="")
+                if is_violation:
+                    sub.alert = True
+                    sub.label(text=f"VIOLATES: {item.violations}", icon="ERROR")
+                else:
+                    sub.label(text=f"E_eq {item.equilibrium * 1000:.0f}mm", icon="INFO")
+                sub.label(text=f"Def {item.deficiency * 1000:.0f}mm")
+                sub.label(text=f"Exc {item.excess * 1000:.0f}mm")
+                sub.label(text=f"Grad {item.gradient:.2f}")
+                sub.label(text=f"Twist {item.twist_per_length:.2f}")
+
+        elif self.layout_type == "GRID":
+            layout.alignment = "CENTER"
+            layout.label(text="", icon="DECORATE")
+
+
 # =============================================================================
 # Creation Sub-Panel
 # =============================================================================
@@ -499,3 +550,118 @@ class CIVIL_PT_alignment_stationing(Panel):
         col = layout.column(align=True)
         col.operator("civil.add_stationing_referent", icon="EMPTY_AXIS")
         col.operator("civil.name_segments", icon="FONT_DATA")
+
+
+# =============================================================================
+# Cant Editor Sub-Panel (spec Section 3)
+# =============================================================================
+
+
+class CIVIL_PT_cant_editor(Panel):
+    """Sub-panel for the cant (rail superelevation) table editor (spec 3)"""
+
+    bl_label = "Cant Editor"
+    bl_idname = "CIVIL_PT_cant_editor"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "scene"
+    bl_parent_id = "BIM_PT_tab_horizontal_alignment"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    # Lightweight rehydration cache (spec 3.3): reload the persisted
+    # rotation reference from Pset_SaikeiCant once per alignment switch,
+    # not on every draw() call. Plain Python class attribute, not a bpy
+    # property — mirrors the decorator classes' class-level state pattern.
+    _loaded_for_id = 0
+
+    @classmethod
+    def poll(cls, context):
+        return tool.Blender.should_show_panel(context, "CIVIL", cls.bl_idname) and is_ifc4x3()
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.CivilAlignmentProperties
+
+        if props.active_alignment_id == 0:
+            layout.label(text="Select an alignment", icon="INFO")
+            return
+
+        alignment = None
+        ifc_file = tool.Ifc.get()
+        if ifc_file is not None:
+            try:
+                alignment = ifc_file.by_id(props.active_alignment_id)
+            except RuntimeError:
+                alignment = None
+
+        cant_layout = tool.Alignment.get_cant_layout(alignment) if alignment else None
+
+        if cant_layout is None:
+            CIVIL_PT_cant_editor._loaded_for_id = 0
+            box = layout.box()
+            box.label(text="No cant layout — adding cant marks this alignment as rail", icon="INFO")
+            box.operator("civil.add_cant_to_alignment", icon="ADD")
+            return
+
+        # Rehydrate the rotation-reference dropdown once per alignment switch
+        # ("loaded when the cant panel populates" — spec 3.3).
+        if CIVIL_PT_cant_editor._loaded_for_id != props.active_alignment_id:
+            persisted = tool.Alignment.get_cant_rotation_reference(cant_layout)
+            if persisted:
+                props.cant_rotation_reference = persisted
+            CIVIL_PT_cant_editor._loaded_for_id = props.active_alignment_id
+
+        layout.prop(props, "cant_rotation_reference")
+        layout.prop(props, "track_gauge")
+        layout.prop(props, "design_speed")
+
+        # Collapsible limit-override box.
+        box = layout.box()
+        header = box.row()
+        header.prop(
+            props,
+            "show_cant_limits",
+            icon="TRIA_DOWN" if props.show_cant_limits else "TRIA_RIGHT",
+            emboss=False,
+            text="Limits (EN 13803-1:2017 plain-line defaults)",
+        )
+        if props.show_cant_limits:
+            col = box.column(align=True)
+            col.prop(props, "cant_limit_max_applied")
+            col.prop(props, "cant_limit_max_deficiency")
+            col.prop(props, "cant_limit_max_excess")
+            col.prop(props, "cant_limit_max_gradient")
+            col.prop(props, "cant_limit_max_twist")
+
+        layout.separator()
+
+        # Header row with column labels
+        header = layout.row(align=True)
+        header.label(text="No.")
+        header.label(text="Station")
+        header.label(text="Cant L")
+        header.label(text="Cant R")
+        header.label(text="Transition")
+
+        row = layout.row()
+        row.template_list(
+            "CIVIL_UL_cant_points",
+            "",
+            props,
+            "cant_display_rows",
+            props,
+            "active_cant_display_row_index",
+            rows=8,
+        )
+
+        col = row.column(align=True)
+        col.operator("civil.add_cant_point", icon="ADD", text="")
+        col.operator("civil.remove_cant_point", icon="REMOVE", text="")
+
+        layout.separator()
+        row = layout.row(align=True)
+        row.operator("civil.recalculate_cant", icon="FILE_REFRESH", text="Recalculate")
+        row.operator("civil.clear_cant_points", icon="TRASH", text="Clear All")
+
+        layout.separator()
+        layout.operator("civil.delete_cant_layout", icon="TRASH")

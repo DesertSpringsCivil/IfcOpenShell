@@ -382,6 +382,84 @@ def rebuild_vertical_display_rows(props):
 
 
 # =============================================================================
+# Cant Helpers (spec Section 3)
+# =============================================================================
+
+
+def _cant_points_as_dicts(props):
+    return [
+        {
+            "station": p.station,
+            "cant_left": p.cant_left,
+            "cant_right": p.cant_right,
+            "transition_type": p.transition_type,
+            "design_speed": p.design_speed,
+        }
+        for p in props.cant_points
+    ]
+
+
+def _cant_limits_from_props(props):
+    return {
+        "max_applied_cant": props.cant_limit_max_applied,
+        "max_deficiency": props.cant_limit_max_deficiency,
+        "max_excess": props.cant_limit_max_excess,
+        "max_cant_gradient": props.cant_limit_max_gradient,
+        "max_twist": props.cant_limit_max_twist,
+    }
+
+
+def rebuild_cant_display_rows(props):
+    """Rebuild cant_display_rows from the cant_points collection (spec 3.2).
+
+    Civil 3D-style interleaving: each POINT row (editable station/cant L-R/
+    transition) is followed by ONE COMPUTED row for the segment LEAVING that
+    point (E_eq, deficiency, excess, gradient, twist, and any violated
+    limits) — mirroring rebuild_vertical_display_rows's POINT/SEGMENT
+    interleaving, except cant always pairs exactly one COMPUTED row per
+    POINT row (never more), and the last point has no COMPUTED row (no
+    outgoing segment).
+
+    This only recomputes the CHECKS — it never writes to IFC (spec 3.5): the
+    explicit Recalculate button (civil.recalculate_cant) is what regenerates
+    the IFC segments, matching the PI/PVI table idiom.
+    """
+    props.cant_display_rows.clear()
+
+    points = props.cant_points
+    if len(points) == 0:
+        return
+
+    alignment = tool.Alignment.get_active_alignment()
+    point_dicts = _cant_points_as_dicts(props)
+    limits = _cant_limits_from_props(props)
+    gauge = props.track_gauge
+    design_speed = props.design_speed
+
+    for i in range(len(points)):
+        point_row = props.cant_display_rows.add()
+        point_row.row_type = "POINT"
+        point_row.point_index = i
+
+        if i < len(points) - 1 and alignment is not None:
+            checks = tool.Alignment.compute_cant_checks(point_dicts, i, alignment, gauge, limits, design_speed)
+            computed_row = props.cant_display_rows.add()
+            computed_row.row_type = "COMPUTED"
+            computed_row.point_index = i
+            computed_row.radius = checks["radius"]
+            computed_row.applied_left = checks["applied_left"]
+            computed_row.applied_right = checks["applied_right"]
+            computed_row.applied = checks["applied"]
+            computed_row.equilibrium = checks["equilibrium"]
+            computed_row.deficiency = checks["deficiency"]
+            computed_row.excess = checks["excess"]
+            computed_row.gradient = checks["gradient"]
+            computed_row.twist_per_length = checks["twist_per_length"]
+            computed_row.twist_per_time = checks["twist_per_time"]
+            computed_row.violations = ", ".join(checks["violations"])
+
+
+# =============================================================================
 # PI Management Operators
 # =============================================================================
 
@@ -1714,6 +1792,9 @@ class CIVIL_OT_toggle_profile_view(Operator):
                 props.profile_view_interval,
                 props.profile_view_height,
                 vertical_exaggeration=props.profile_exaggeration,
+                design_speed=props.design_speed,
+                track_gauge=props.track_gauge,
+                cant_limit_max_applied=props.cant_limit_max_applied,
             )
             props.show_profile_view = True
         tool.Blender.update_viewport()
@@ -1745,6 +1826,9 @@ class CIVIL_OT_refresh_profile_view(Operator):
         decorator.interval = props.profile_view_interval
         decorator.panel_height = props.profile_view_height
         decorator.vertical_exaggeration = props.profile_exaggeration
+        decorator.design_speed = props.design_speed
+        decorator.track_gauge = props.track_gauge
+        decorator.cant_limit_max_applied = props.cant_limit_max_applied
         decorator.refresh()
         tool.Blender.update_viewport()
         return {"FINISHED"}
@@ -2271,5 +2355,345 @@ class CIVIL_OT_enter_pvi_edit_mode(Operator, tool.Ifc.Operator):
         if apply:
             return {"FINISHED"}
         return {"CANCELLED"}
+
+
+# =============================================================================
+# Cant Operators (spec Section 3)
+# =============================================================================
+
+
+class CIVIL_OT_add_cant_to_alignment(Operator, tool.Ifc.Operator):
+    """Add a cant layout to the active alignment — marks it as rail"""
+
+    bl_idname = "civil.add_cant_to_alignment"
+    bl_label = "Add Cant"
+    bl_description = (
+        "Add a cant (rail superelevation) layout to the active alignment. Requires both a "
+        "horizontal and a vertical layout to already exist"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    rail_head_distance: FloatProperty(
+        name="Rail Head Distance",
+        description=(
+            "Distance between rail heads — the alignment API uses it to convert cant height "
+            "(a vertical offset between the two rails) into a rotation angle for the geometric "
+            "representation"
+        ),
+        default=1.5,
+        min=0.0001,
+        unit="LENGTH",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("No alignment selected")
+            return False
+        alignment = _resolve_active_alignment(context)
+        if alignment is None:
+            cls.poll_message_set("Selected alignment no longer exists")
+            return False
+        if tool.Alignment.get_vertical_layout(alignment) is None:
+            cls.poll_message_set("Alignment has no vertical layout — add vertical first")
+            return False
+        if tool.Alignment.get_cant_layout(alignment) is not None:
+            cls.poll_message_set("Alignment already has a cant layout")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        try:
+            cant_layout = core.add_cant_to_alignment(
+                tool.Ifc, tool.Alignment, props.active_alignment_id, self.rail_head_distance
+            )
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        # Give the new layout an outliner node (parallel to IfcAlignmentHorizontal/Vertical),
+        # mirroring CIVIL_OT_add_vertical_to_alignment.
+        alignment = tool.Ifc.get().by_id(props.active_alignment_id)
+        alignment_obj = tool.Ifc.get_object(alignment)
+        if alignment_obj is None:
+            alignment_obj = tool.Alignment.create_hierarchy_for_alignment(alignment)
+        if cant_layout and alignment_obj:
+            tool.Alignment.create_object_for_layout(cant_layout, alignment_obj)
+
+        # Persist the (default) rotation reference immediately so the pset
+        # round-trips even if the user never touches the dropdown.
+        if cant_layout:
+            tool.Alignment.set_cant_rotation_reference(cant_layout, props.cant_rotation_reference)
+
+        props.cant_points.clear()
+        props.active_cant_point_index = 0
+        props.cant_display_rows.clear()
+        props.active_cant_display_row_index = 0
+
+        tool.Blender.update_viewport()
+        self.report({"INFO"}, "Cant layout added — add cant points below")
+
+
+class CIVIL_OT_add_cant_point(Operator):
+    """Add a new cant point to the table"""
+
+    bl_idname = "civil.add_cant_point"
+    bl_label = "Add Cant Point"
+    bl_description = "Add a new cant point — appends after the selected point, or at the end"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return poll_ifc4x3(cls, context)
+
+    def execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        points = props.cant_points
+
+        # Resolve the currently-selected POINT row (if any) to insert after.
+        insert_after = len(points) - 1
+        if points and props.cant_display_rows:
+            idx = props.active_cant_display_row_index
+            if 0 <= idx < len(props.cant_display_rows):
+                row = props.cant_display_rows[idx]
+                if row.row_type == "POINT" and row.point_index < len(points) - 1:
+                    insert_after = row.point_index
+
+        if len(points) == 0:
+            new_point = points.add()
+            new_point.station = 0.0
+            new_point.cant_left = 0.0
+            new_point.cant_right = 0.0
+            new_point.transition_type = "LINEARTRANSITION"
+            new_index = 0
+        else:
+            before = points[insert_after]
+            if insert_after + 1 < len(points):
+                after = points[insert_after + 1]
+                new_station = (before.station + after.station) / 2.0
+            else:
+                alignment = tool.Alignment.get_active_alignment()
+                extent = tool.Alignment.get_horizontal_extent_semantic(alignment) if alignment else 0.0
+                new_station = min(before.station + 100.0, extent) if extent > before.station else before.station + 100.0
+
+            # bpy CollectionProperty only supports append; add then shift values
+            # down to open a slot at insert_after + 1 (mirrors civil.insert_pi
+            # style renumbering, done here inline since it's a plain float shift).
+            points.add()
+            new_index = len(points) - 1
+            for i in range(new_index, insert_after + 1, -1):
+                src, dst = points[i - 1], points[i]
+                dst.station = src.station
+                dst.cant_left = src.cant_left
+                dst.cant_right = src.cant_right
+                dst.transition_type = src.transition_type
+                dst.design_speed = src.design_speed
+            new_point = points[insert_after + 1]
+            new_point.station = new_station
+            new_point.cant_left = before.cant_left
+            new_point.cant_right = before.cant_right
+            new_point.transition_type = before.transition_type
+            new_point.design_speed = 0.0
+            new_index = insert_after + 1
+
+        props.active_cant_point_index = new_index
+        rebuild_cant_display_rows(props)
+        return {"FINISHED"}
+
+
+class CIVIL_OT_remove_cant_point(Operator):
+    """Remove the selected cant point"""
+
+    bl_idname = "civil.remove_cant_point"
+    bl_label = "Remove Cant Point"
+    bl_description = "Remove the selected cant point"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if len(props.cant_points) == 0:
+            cls.poll_message_set("No cant points to remove")
+            return False
+        if props.cant_display_rows:
+            idx = props.active_cant_display_row_index
+            if 0 <= idx < len(props.cant_display_rows):
+                if props.cant_display_rows[idx].row_type != "POINT":
+                    cls.poll_message_set("Select a point row to remove")
+                    return False
+        return True
+
+    def execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+
+        point_index = -1
+        if props.cant_display_rows:
+            idx = props.active_cant_display_row_index
+            if 0 <= idx < len(props.cant_display_rows):
+                row = props.cant_display_rows[idx]
+                if row.row_type == "POINT":
+                    point_index = row.point_index
+
+        if point_index < 0:
+            point_index = props.active_cant_point_index
+
+        if 0 <= point_index < len(props.cant_points):
+            props.cant_points.remove(point_index)
+            props.active_cant_point_index = min(point_index, len(props.cant_points) - 1)
+            rebuild_cant_display_rows(props)
+
+            if len(props.cant_display_rows) > 0:
+                props.active_cant_display_row_index = min(
+                    props.active_cant_display_row_index, len(props.cant_display_rows) - 1
+                )
+            else:
+                props.active_cant_display_row_index = 0
+
+        return {"FINISHED"}
+
+
+class CIVIL_OT_recalculate_cant(Operator, tool.Ifc.Operator):
+    """Recalculate cant checks and write IFC cant segments"""
+
+    bl_idname = "civil.recalculate_cant"
+    bl_label = "Recalculate Cant"
+    bl_description = "Recalculate checks, write IFC cant segments, and refresh visualization"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if len(props.cant_points) < 2:
+            cls.poll_message_set("Need at least 2 cant points to recalculate")
+            return False
+        return True
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        rebuild_cant_display_rows(props)
+
+        alignment = _resolve_active_alignment(context)
+        if alignment is None:
+            self.report({"ERROR"}, "Select an IfcAlignment in the outliner first")
+            return {"CANCELLED"}
+
+        cant_layout = tool.Alignment.get_cant_layout(alignment)
+        if cant_layout is None:
+            self.report({"ERROR"}, "Alignment has no cant layout — add cant first")
+            return {"CANCELLED"}
+
+        points = _cant_points_as_dicts(props)
+        try:
+            core.update_cant_segments(tool.Ifc, tool.Alignment, alignment.id(), points)
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        tool.Alignment.remove_layout_segment_objects(cant_layout)
+        layout_obj = tool.Ifc.get_object(cant_layout)
+        if not layout_obj:
+            alignment_obj = tool.Ifc.get_object(alignment)
+            if alignment_obj:
+                layout_obj = tool.Alignment.create_object_for_layout(cant_layout, alignment_obj)
+        if layout_obj:
+            tool.Alignment.create_objects_for_layout_segments(cant_layout, layout_obj)
+
+        tool.Blender.update_viewport()
+        self.report({"INFO"}, f"Updated cant layout with {len(points)} points")
+
+
+class CIVIL_OT_clear_cant_points(Operator, tool.Ifc.Operator):
+    """Clear all cant points from the editor table"""
+
+    bl_idname = "civil.clear_cant_points"
+    bl_label = "Clear All Cant Points"
+    bl_description = (
+        "Remove all cant points from the editor table (rows only — does not delete the "
+        "cant layout or its IFC segments; use Delete Cant Layout for that)"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if len(props.cant_points) == 0:
+            cls.poll_message_set("No cant points to clear")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+        props.cant_points.clear()
+        props.active_cant_point_index = 0
+        props.cant_display_rows.clear()
+        props.active_cant_display_row_index = 0
+        self.report({"INFO"}, "Cleared all cant points")
+
+
+class CIVIL_OT_delete_cant_layout(Operator, tool.Ifc.Operator):
+    """Delete the cant layout and its IFC segments"""
+
+    bl_idname = "civil.delete_cant_layout"
+    bl_label = "Delete Cant Layout"
+    bl_description = (
+        "Delete the cant layout and its IFC segments, reverting the alignment's representation "
+        "to horizontal + vertical only. Anything swept with cant is not rebuilt automatically "
+        "(no corridor/sweep tooling exists yet)"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not poll_ifc4x3(cls, context):
+            return False
+        props = context.scene.CivilAlignmentProperties
+        if props.active_alignment_id == 0:
+            cls.poll_message_set("No alignment selected")
+            return False
+        alignment = _resolve_active_alignment(context)
+        if alignment is None:
+            cls.poll_message_set("Selected alignment no longer exists")
+            return False
+        if tool.Alignment.get_cant_layout(alignment) is None:
+            cls.poll_message_set("Alignment has no cant layout")
+            return False
+        return True
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def _execute(self, context):
+        props = context.scene.CivilAlignmentProperties
+
+        try:
+            core.delete_cant_layout(tool.Ifc, tool.Alignment, props.active_alignment_id)
+        except ValueError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+        props.cant_points.clear()
+        props.active_cant_point_index = 0
+        props.cant_display_rows.clear()
+        props.active_cant_display_row_index = 0
+
+        tool.Blender.update_viewport()
+        self.report({"INFO"}, "Cant layout deleted")
+        return {"FINISHED"}
 
 
