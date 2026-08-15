@@ -788,11 +788,14 @@ class CIVIL_OT_recalculate_pis(Operator, tool.Ifc.Operator):
 
 
 class CIVIL_OT_clear_pis(Operator, tool.Ifc.Operator):
-    """Clear all PI points and optionally remove visualization/IFC data"""
+    """Delete the active alignment and clear the PI table"""
 
     bl_idname = "civil.clear_pis"
     bl_label = "Clear All PIs"
-    bl_description = "Remove all PI points and clear segment visualization"
+    bl_description = (
+        "Delete the entire active alignment — its IFC entity, all nested "
+        "layouts and segments, and its viewport objects — and clear the PI table"
+    )
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -814,14 +817,15 @@ class CIVIL_OT_clear_pis(Operator, tool.Ifc.Operator):
 
         removed_objects = 0
 
-        # If there's an active alignment, remove it entirely (Blender + IFC)
-        # This ensures we don't leave the IFC in an inconsistent state
-        if alignment := tool.Alignment.get_active_alignment():
-            # Remove all Blender objects for this alignment
+        # Delete the active alignment entirely (Blender + IFC) so the file is
+        # never left with an orphaned, PI-less alignment. Resolved through
+        # props.active_alignment_id — the same reference every other panel
+        # operator uses — not the viewport's active object.
+        if alignment := _resolve_active_alignment(context):
             removed_objects = tool.Alignment.remove_alignment_hierarchy(alignment)
-
-            # Remove the IFC alignment entity entirely
             ifcopenshell.api.run("root.remove_product", ifc, product=alignment)
+            props.active_alignment_id = 0
+            props.active_alignment_name = ""
 
         # Clear the PI list in the UI
         props.pis.clear()
@@ -832,7 +836,7 @@ class CIVIL_OT_clear_pis(Operator, tool.Ifc.Operator):
         props.active_display_row_index = 0
 
         if removed_objects > 0:
-            self.report({"INFO"}, f"Cleared all PIs and removed {removed_objects} objects")
+            self.report({"INFO"}, f"Deleted alignment and removed {removed_objects} objects")
         else:
             self.report({"INFO"}, "Cleared all PIs")
 
@@ -929,7 +933,7 @@ class CIVIL_OT_create_alignment_by_pi(Operator, tool.Ifc.Operator):
         segments = ifcopenshell.api.alignment.get_layout_segments(h_layout)
         has_real_segments = bool([s for s in segments if not tool.Alignment.is_zero_length_segment(s)])
 
-        ifcopenshell.api.alignment._create_geometric_representation(tool.Ifc.get(), existing_alignment)
+        ifcopenshell.api.alignment.create_representation(tool.Ifc.get(), existing_alignment)
 
         if not has_real_segments:
             # Use existing alignment - add segments to it

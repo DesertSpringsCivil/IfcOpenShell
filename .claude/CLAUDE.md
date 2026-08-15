@@ -92,29 +92,31 @@ tool.Blender.validate_shader_batch_data() / .scale_font_size()
 
 ## Testing
 
-> ### ⚠ Tool/operator tests cannot run on 0.9.0 yet
+> ### ⚠ 0.9.0 test environment status (2026-08-14)
 >
-> 0.9.0's Python requires a 0.9.0-compiled SWIG wrapper. The installed
-> `.pyd` is 0.8.0-era and is missing 27 names, including the reworked
-> geometry types `native_element`, `element`, `triangulation`,
-> `serialization`, `iterator`, `settings`. These come from
-> `src/ifcwrap/IfcGeomWrapper.i`, so they need a C++ recompile — there is
-> no Python-side workaround, and every tool test dies at collection with
-> `AttributeError: ... has no attribute 'native_element'`.
+> The 0.9 modular SWIG wrapper IS installed (from the official
+> `v0.9.0alpha0-83fc219` win64 build + schema plugin DLLs lifted from the
+> BonsaiViewer zip). Core, tool, and operator tests all run on 0.9.0.
 >
-> **Core tests are unaffected** (pure-Python Prophecy mocks): 90 passed,
-> 2 skipped on 0.9.0.
+> **Still blocked locally:** anything touching the geometry engine fails
+> with `No geometry mapping registered` — the win64 alpha artifacts ship
+> no `ifcopenshell_geometry_mapping_*.dll` (upstream issue **#9301**).
+> Geometry-dependent tests carry a `requires_geometry_engine` skipif and
+> run in CI instead. When #9301 ships fixed artifacts: re-download the
+> python-311 win64 zip, copy the mapping DLLs into
+> `src/ifcopenshell-python/ifcopenshell/`, and the skips disappear.
 >
-> **To run tool tests meanwhile:** `git switch archive/saikei-dev-0.8.0`
-> (verified 92 passed there with the same wrapper and Blender).
+> **Operator tests under `test/bim/` need two extra plugins** (see the
+> canonical command below): `-p saikei_parse_fix -p pytest_bdd.plugin`.
+> pytest-bdd + deps are installed in Blender's extensions site-packages
+> but don't autoload under `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`; and the
+> blosm addon shadows the PyPI `parse` package inside Blender, which
+> `saikei_parse_fix.py` (a shim installed in both the outer Python and
+> Blender extensions site-packages) evicts before pytest-bdd loads.
 >
 > **Signal to watch:** `.github/workflows/ci-bonsai-daily.yml` still reads
-> `branches: [v0.8.0]`. No 0.9.0 nightly exists until upstream flips that
-> to v0.9.0 — only `publish-cpp-api-docs.yml` has moved so far. Re-check
-> with:
-> ```bash
-> git fetch upstream && git show upstream/v0.9.0:.github/workflows/ci-bonsai-daily.yml | grep -A3 branches
-> ```
+> `branches: [v0.8.0]` — no 0.9.0 nightly yet; PR-triggered CI is the
+> geometry-test signal.
 
 Run from `src/bonsai/`.
 
@@ -144,14 +146,15 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_earthwork.py \
   -o "addopts=" -p pytest-blender -v \
   --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
 
-# Operator tests — requires Blender headless (pytest-blender)
+# Operator tests — requires Blender headless (pytest-blender) plus the
+# pytest_bdd + saikei_parse_fix plugins (see the environment callout above)
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/bim/module/alignment/test_alignment_operators.py \
-  -o "addopts=" -p pytest-blender -m "alignment" -v \
+  -o "addopts=" -p pytest-blender -p saikei_parse_fix -p pytest_bdd.plugin -m "alignment" -v \
   --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
 
 # All alignment tests at once (tool + operator, in Blender headless)
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_alignment.py test/bim/module/alignment/ \
-  -o "addopts=" -p pytest-blender -m "alignment or not alignment" -v \
+  -o "addopts=" -p pytest-blender -p saikei_parse_fix -p pytest_bdd.plugin -m "alignment or not alignment" -v \
   --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
 ```
 

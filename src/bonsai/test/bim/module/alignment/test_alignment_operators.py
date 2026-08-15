@@ -40,6 +40,27 @@ import bonsai.tool as tool
 from bonsai.bim.ifc import IfcStore
 from test.bim.bootstrap import NewIfc4X3
 
+
+def _geometry_mapping_available() -> bool:
+    """True when the modular geometry-mapping plugins are present.
+
+    v0.9.0 evaluates segment endpoints through the geometry engine, which
+    loads per-schema ifcopenshell_geometry_mapping_* plugins at runtime. The
+    win64 v0.9.0alpha0 builds ship without them (IfcOpenShell#9301), so
+    geometry-dependent tests skip locally and run in CI where builds are
+    complete.
+    """
+    import pathlib
+
+    package_root = pathlib.Path(ifcopenshell.__file__).parent
+    return any(f.name.startswith("ifcopenshell_geometry_mapping_") for f in package_root.iterdir())
+
+
+requires_geometry_engine = pytest.mark.skipif(
+    not _geometry_mapping_available(),
+    reason="geometry mapping plugins unavailable (IfcOpenShell#9301); covered in CI",
+)
+
 pytestmark = pytest.mark.alignment
 
 
@@ -246,6 +267,24 @@ class TestClearPis(NewIfc4X3):
         assert alignment_count_after < alignment_count_before
         assert len(props.pis) == 0
 
+    def test_clear_pis_resolves_alignment_from_props_not_viewport(self):
+        """The alignment is resolved via props.active_alignment_id, so it is
+        deleted even when the viewport's active object is something else
+        (typically a segment curve after PI editing)."""
+        alignment, alignment_obj = create_empty_alignment()
+        ifc_file = tool.Ifc.get()
+        bpy.context.view_layer.objects.active = None
+
+        props = get_alignment_props()
+        bpy.ops.civil.add_pi()
+
+        alignment_count_before = len(ifc_file.by_type("IfcAlignment"))
+        bpy.ops.civil.clear_pis()
+
+        assert len(ifc_file.by_type("IfcAlignment")) < alignment_count_before
+        assert props.active_alignment_id == 0
+        assert props.active_alignment_name == ""
+
 
 class TestRecalculatePis(NewIfc4X3):
     """Tests for CIVIL_OT_recalculate_pis (civil.recalculate_pis)."""
@@ -269,6 +308,7 @@ class TestRecalculatePis(NewIfc4X3):
         assert props.pis[0].length_to_next == pytest.approx(500.0, abs=1.0)
         assert props.pis[1].length_to_next == pytest.approx(500.0, abs=1.0)
 
+    @requires_geometry_engine
     def test_recalculate_with_active_alignment_updates_ifc(self):
         """When an active alignment exists, recalculate should update IFC segments."""
         alignment, alignment_obj = create_empty_alignment()
@@ -296,6 +336,7 @@ class TestRecalculatePis(NewIfc4X3):
         assert len(segments) >= 2
 
 
+@requires_geometry_engine
 class TestCreateAlignmentByPi(NewIfc4X3):
     """Tests for CIVIL_OT_create_alignment_by_pi (civil.create_alignment_by_pi).
 
@@ -514,6 +555,7 @@ class TestAddVerticalToAlignment(NewIfc4X3):
 # ===========================================================================
 
 
+@requires_geometry_engine
 class TestEndToEndAlignmentCreation(NewIfc4X3):
     """Full workflow: create alignment, add PIs, create IFC, validate."""
 
@@ -639,6 +681,7 @@ class TestEndToEndAlignmentCreation(NewIfc4X3):
         assert len(ifc_file.by_type("IfcAlignmentVertical")) == 1
 
 
+@requires_geometry_engine
 class TestEndToEndIfcRoundtrip(NewIfc4X3):
     """IFC save/reload roundtrip validation."""
 
