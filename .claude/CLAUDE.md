@@ -92,19 +92,29 @@ tool.Blender.validate_shader_batch_data() / .scale_font_size()
 
 ## Testing
 
-> ### ⚠ 0.9.0 test environment status (2026-08-14)
+> ### 0.9.0 test environment status (2026-08-15) — geometry engine LIVE
 >
-> The 0.9 modular SWIG wrapper IS installed (from the official
-> `v0.9.0alpha0-83fc219` win64 build + schema plugin DLLs lifted from the
-> BonsaiViewer zip). Core, tool, and operator tests all run on 0.9.0.
+> The full 0.9 native runtime is **built locally** and installed in
+> `src/ifcopenshell-python/ifcopenshell/`: 59 DLLs including the eight
+> `ifcopenshell_geometry_mapping_*.dll` that the official win64 alpha
+> artifacts omit (upstream **#9301**; fix PR **#9305** open). Nothing is
+> geometry-gated any more — the `requires_geometry_engine` skipif marks
+> stay in place but all evaluate true, so the suites run with **zero
+> skips**: 503 alignment (tool + operator), 121 core, 110 API.
 >
-> **Still blocked locally:** anything touching the geometry engine fails
-> with `No geometry mapping registered` — the win64 alpha artifacts ship
-> no `ifcopenshell_geometry_mapping_*.dll` (upstream issue **#9301**).
-> Geometry-dependent tests carry a `requires_geometry_engine` skipif and
-> run in CI instead. When #9301 ships fixed artifacts: re-download the
-> python-311 win64 zip, copy the mapping DLLs into
-> `src/ifcopenshell-python/ifcopenshell/`, and the skips disappear.
+> Build inputs kept for rebuilds: `_deps/`, `_deps-vs2022-x64-installed/`,
+> `_installed-vs2022-x64/` (the built runtime, source of the copied DLLs).
+> Toolchain: VS2022 Build Tools v143; deps from the public
+> `IfcOpenShell/build-outputs@windows-x64` LFS cache. The previous official
+> runtime is backed up at
+> `%USERPROFILE%\ifcopenshell-runtime-backups\83fc219-official\`.
+>
+> **TODO when #9305 merges:** swap back to official artifacts — download the
+> next `ifcopenshell-python-311-v0.9.0alpha0-<sha>-win64.zip`, replace the
+> DLLs + `.pyd` + `ifcopenshell_wrapper.py` in the package dir, re-run the
+> three suites. Rationale: bit-parity with what reviewers and CI actually
+> run, so a local pass means the same thing everywhere. Keep the local build
+> until that swap is verified green.
 >
 > **Operator tests under `test/bim/` need two extra plugins** (see the
 > canonical command below): `-p saikei_parse_fix -p pytest_bdd.plugin`.
@@ -116,7 +126,11 @@ tool.Blender.validate_shader_batch_data() / .scale_font_size()
 >
 > **Signal to watch:** `.github/workflows/ci-bonsai-daily.yml` still reads
 > `branches: [v0.8.0]` — no 0.9.0 nightly yet; PR-triggered CI is the
-> geometry-test signal.
+> second geometry-test signal (local is now the first).
+>
+> **Note for reviewers on other platforms:** linux64/pyodide artifacts were
+> always complete, so geometry works there out of the box; only win64 needs
+> the local build (or #9305's artifacts).
 
 Run from `src/bonsai/`.
 
