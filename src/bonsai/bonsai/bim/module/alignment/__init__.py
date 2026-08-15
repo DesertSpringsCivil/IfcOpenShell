@@ -41,7 +41,6 @@ classes = (
     # Operators - Creation
     operator.CIVIL_OT_create_alignment_by_pis,
     operator.CIVIL_OT_create_alignment_by_pi,
-    operator.CIVIL_OT_import_alignment_csv,
     # Operators - Stationing
     operator.CIVIL_OT_add_stationing_referent,
     operator.CIVIL_OT_name_segments,

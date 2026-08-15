@@ -202,6 +202,33 @@ class TestExitPiEditMode:
 # ---------------------------------------------------------------------------
 
 
+class TestImportAlignmentCsv:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.import_alignment_csv(ifc, alignment, filepath="pis.csv")
+
+    def test_imports_and_builds_hierarchy_for_parent_only(self, ifc, alignment):
+        ifc.get().should_be_called().will_return("ifc_file")
+        alignment.create_alignment_from_csv("pis.csv").should_be_called().will_return("parent")
+        alignment.create_hierarchy_for_alignment("parent").should_be_called()
+        alignment.get_child_alignments("parent").should_be_called().will_return([])
+        alignment.create_objects_for_referents("parent").should_be_called()
+        result = subject.import_alignment_csv(ifc, alignment, filepath="pis.csv")
+        assert result == "parent"
+
+    def test_builds_hierarchy_for_each_aggregated_child(self, ifc, alignment):
+        ifc.get().should_be_called().will_return("ifc_file")
+        alignment.create_alignment_from_csv("pis.csv").should_be_called().will_return("parent")
+        alignment.create_hierarchy_for_alignment("parent").should_be_called()
+        alignment.get_child_alignments("parent").should_be_called().will_return(["child_a", "child_b"])
+        alignment.create_hierarchy_for_alignment("child_a").should_be_called()
+        alignment.create_hierarchy_for_alignment("child_b").should_be_called()
+        alignment.create_objects_for_referents("parent").should_be_called()
+        result = subject.import_alignment_csv(ifc, alignment, filepath="pis.csv")
+        assert result == "parent"
+
+
 class TestAddVerticalToAlignment:
     def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
         ifc.get().should_be_called().will_return(None)

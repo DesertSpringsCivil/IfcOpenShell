@@ -728,3 +728,43 @@ class TestEndToEndIfcRoundtrip(NewIfc4X3):
 # Station formatting is tool-layer now (tool.Alignment.format_station wrapping
 # ifcopenshell.util.alignment.station_as_string) — see TestFormatStation in
 # test/tool/test_alignment.py.
+
+
+@requires_geometry_engine
+class TestImportAlignmentCsv(NewIfc4X3):
+    """bim.import_alignment_csv — the single, merged CSV import path.
+
+    CSV rows use full X,Y,R (or D,Z,L) triples: the first and last R/L values
+    are placeholders per the API's create_from_csv contract.
+    """
+
+    def _write_csv(self, tmp_path, rows):
+        path = tmp_path / "alignment.csv"
+        path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        return str(path)
+
+    def test_import_sets_active_alignment_and_builds_hierarchy(self, tmp_path):
+        filepath = self._write_csv(tmp_path, ["0,0,0,1000,0,300,2000,800,0"])
+        result = bpy.ops.bim.import_alignment_csv("EXEC_DEFAULT", filepath=filepath)
+        assert result == {"FINISHED"}
+
+        props = get_alignment_props()
+        assert props.active_alignment_id != 0
+        alignment = tool.Ifc.get().by_id(props.active_alignment_id)
+        assert alignment.is_a("IfcAlignment")
+        assert tool.Ifc.get_object(alignment) is not None
+
+    def test_import_with_vertical_row_creates_vertical_layout(self, tmp_path):
+        filepath = self._write_csv(
+            tmp_path,
+            [
+                "0,0,0,1000,0,300,2000,800,0",
+                "0,100,0,500,110,200,1000,105,0",
+            ],
+        )
+        result = bpy.ops.bim.import_alignment_csv("EXEC_DEFAULT", filepath=filepath)
+        assert result == {"FINISHED"}
+
+        props = get_alignment_props()
+        alignment = tool.Ifc.get().by_id(props.active_alignment_id)
+        assert align_api.get_vertical_layout(alignment) is not None

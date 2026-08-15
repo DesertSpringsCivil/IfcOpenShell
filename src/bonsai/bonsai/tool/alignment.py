@@ -1472,6 +1472,58 @@ class Alignment:
         return obj
 
     @classmethod
+    def create_alignment_from_csv(cls, filepath: str) -> "ifcopenshell.entity_instance":
+        """Create alignment(s) from a CSV file via the alignment API.
+
+        The CSV format (see ifcopenshell.api.alignment.create_from_csv) is one
+        horizontal row (X,Y,R triples) followed by any number of vertical rows
+        (D,Z,L triples) — extra verticals become aggregated child alignments.
+        Per IFC 4.1.5.1 alignments cannot be contained in spatial structures,
+        so the imported alignment is referenced into every IfcSite instead.
+        """
+        import ifcopenshell.api.alignment as align_api
+        import ifcopenshell.api.spatial
+
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create_from_csv(ifc_file, filepath)
+        for site in ifc_file.by_type("IfcSite"):
+            ifcopenshell.api.spatial.reference_structure(
+                ifc_file, products=[alignment], relating_structure=site
+            )
+        return alignment
+
+    @classmethod
+    def get_child_alignments(cls, alignment: "ifcopenshell.entity_instance") -> list:
+        """Return child IfcAlignments aggregated under ``alignment``.
+
+        Per IFC CT 4.1.4.4.1.2, an alignment reusing one horizontal for
+        several verticals aggregates a child IfcAlignment per extra vertical.
+        Returns [] for the common single-vertical case.
+        """
+        children = []
+        for rel in alignment.IsDecomposedBy or []:
+            for related in rel.RelatedObjects:
+                if related.is_a("IfcAlignment"):
+                    children.append(related)
+        return children
+
+    @classmethod
+    def create_objects_for_referents(cls, alignment: "ifcopenshell.entity_instance") -> int:
+        """Create empty objects for IfcReferents nested on ``alignment``.
+
+        Returns the number of referent objects created.
+        """
+        count = 0
+        for rel in alignment.IsNestedBy or []:
+            for referent in rel.RelatedObjects:
+                if referent.is_a("IfcReferent"):
+                    referent_obj = bpy.data.objects.new(tool.Loader.get_name(referent), None)
+                    tool.Geometry.link(referent, referent_obj)
+                    tool.Collector.assign(referent_obj, should_clean_users_collection=False)
+                    count += 1
+        return count
+
+    @classmethod
     def create_hierarchy_for_alignment(cls, alignment: "ifcopenshell.entity_instance") -> Optional[bpy.types.Object]:
         """Create the full Blender object hierarchy for an alignment.
 

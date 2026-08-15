@@ -51,7 +51,7 @@ class AlignmentTool(WorkSpaceTool):
 def _draw_header(layout):
     """Compact icon-only layout for the tool header bar."""
     row = layout.row(align=True)
-    row.operator("civil.import_alignment_csv", text="", icon="IMPORT")
+    row.operator("bim.import_alignment_csv", text="", icon="IMPORT")
     row.operator("civil.pick_pi_from_viewport", text="", icon="EYEDROPPER")
     row.separator()
     row.operator("civil.recalculate_pis", text="", icon="FILE_REFRESH")
@@ -63,7 +63,7 @@ def _draw_sidebar(layout):
     col = layout.column(align=True)
     col.label(text="Horizontal Alignment", icon="CURVE_DATA")
     col.operator("civil.create_alignment_by_pis", icon="ADD")
-    col.operator("civil.import_alignment_csv", icon="IMPORT")
+    col.operator("bim.import_alignment_csv", icon="IMPORT")
     col.separator()
     col.operator("civil.pick_pi_from_viewport", icon="EYEDROPPER")
     col.operator("civil.enter_pi_edit_mode", text="Edit PIs", icon="EDITMODE_HLT")

@@ -1318,6 +1318,11 @@ class Alignment:
     def remove_3d_alignment_object(cls, alignment): pass
     # Stationing
     def format_station(cls, station): pass
+    # CSV import
+    def create_alignment_from_csv(cls, filepath): pass
+    def create_hierarchy_for_alignment(cls, alignment): pass
+    def get_child_alignments(cls, alignment): pass
+    def create_objects_for_referents(cls, alignment): pass
 
 
 @interface

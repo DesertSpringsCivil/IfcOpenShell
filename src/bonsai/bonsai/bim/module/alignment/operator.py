@@ -39,69 +39,26 @@ from bonsai.bim.ifc import IfcStore
 class ImportAlignmentCSV(bpy.types.Operator, tool.Ifc.Operator, ImportHelper):
     bl_idname = "bim.import_alignment_csv"
     bl_label = "Import Alignment CSV"
-    bl_description = " Import alignment from the provided .csv file."
+    bl_description = (
+        "Import alignment(s) from a .csv file — one horizontal row (X,Y,R "
+        "triples) plus any number of vertical rows (D,Z,L triples)"
+    )
     bl_options = {"REGISTER", "UNDO"}
     filename_ext = ".csv"
     filter_glob: bpy.props.StringProperty(default="*.csv", options={"HIDDEN"})
 
     @classmethod
     def poll(cls, context):
-        ifc_file = tool.Ifc.get()
-        if ifc_file is None:
-            cls.poll_message_set("No IFC file is loaded.")
-            return False
-        elif ifc_file.schema != "IFC4X3":
-            cls.poll_message_set("Schema must be IFC4x3.")
-            return False
-        return True
+        return poll_ifc4x3(cls, context)
 
     def _execute(self, context):
-        self.file = tool.Ifc.get()
         start = time.time()
-        alignment = ifcopenshell.api.alignment.create_from_csv(self.file, self.filepath)
+        props = context.scene.CivilAlignmentProperties
 
-        # IFC 4.1.5.1 alignments cannot be contained in spatial structures, but can be referenced into them
-        sites = self.file.by_type("IfcSite")
-        for site in sites:
-            ifcopenshell.api.spatial.reference_structure(self.file, products=[alignment], relating_structure=site)
+        alignment = core.import_alignment_csv(tool.Ifc, tool.Alignment, filepath=self.filepath)
 
-        # process the generated IfcReferent for the alignment
-        for rel in alignment.IsNestedBy:
-            for referent in rel.RelatedObjects:
-                if referent.is_a("IfcReferent"):
-                    referent_obj = bpy.data.objects.new(tool.Loader.get_name(referent), None)
-                    tool.Geometry.link(referent, referent_obj)
-                    tool.Collector.assign(referent_obj, should_clean_users_collection=False)
-
-        # an alignment can be an aggregation of multiple child alignments (ie. multiple verticals for a single horizontal)
-        # get all the alignment curves
-        curves = []
-        for rel in alignment.IsDecomposedBy:
-            for agg in rel.RelatedObjects:
-                if agg.is_a("IfcAlignment"):
-                    curves.append(ifcopenshell.api.alignment.get_curve(agg))  # 3D curve
-
-        # if there aren't any curves from aggregation, then there is only a single vertical or no vertical
-        if len(curves) == 0:
-            curves.append(ifcopenshell.api.alignment.get_curve(alignment))
-
-        settings = ifcopenshell.geom.settings()
-        for curve in curves:
-            shape = ifcopenshell.geom.create_shape(settings, curve)
-
-            # create a new Blender mesh
-            mesh_name = tool.Loader.get_mesh_name_from_shape(shape)
-            mesh = bpy.data.meshes.new(mesh_name)
-            m = tool.Loader.convert_geometry_to_mesh(shape, mesh)
-
-            # create a new Blender object
-            alignment_obj = bpy.data.objects.new(tool.Loader.get_name(alignment), m)
-
-            # link the blender object to with the alignment element
-            tool.Geometry.link(alignment, alignment_obj)
-
-            # assign the object to the blender collections
-            tool.Collector.assign(alignment_obj, should_clean_users_collection=False)
+        props.active_alignment_name = alignment.Name or "Imported Alignment"
+        props.active_alignment_id = alignment.id()
 
         self.report({"INFO"}, "Imported in %s seconds" % (time.time() - start))
 
@@ -955,35 +912,10 @@ class CIVIL_OT_create_alignment_by_pi(Operator, tool.Ifc.Operator):
             )
 
 
-class CIVIL_OT_import_alignment_csv(Operator, tool.Ifc.Operator, ImportHelper):
-    """Import alignment from CSV file"""
-
-    bl_idname = "civil.import_alignment_csv"
-    bl_label = "Import Alignment CSV"
-    bl_description = "Import alignment definition from a CSV file"
-    bl_options = {"REGISTER", "UNDO"}
-
-    filename_ext = ".csv"
-    filter_glob: StringProperty(default="*.csv", options={"HIDDEN"})
-
-    @classmethod
-    def poll(cls, context):
-        return poll_ifc4x3(cls, context)
-
-    def _execute(self, context):
-        ifc = tool.Ifc.get()
-        props = context.scene.CivilAlignmentProperties
-
-        alignment = ifcopenshell.api.alignment.create_from_csv(ifc, self.filepath)
-
-        # Create full Blender hierarchy (alignment + layouts + segments)
-        obj = tool.Alignment.create_hierarchy_for_alignment(alignment)
-
-        props.active_alignment_name = alignment.Name or "Imported Alignment"
-        props.active_alignment_id = alignment.id()
-
-        self.report({"INFO"}, f"Imported alignment from {self.filepath}")
-        return {"FINISHED"}
+# CSV import lives on the single upstream operator id `bim.import_alignment_csv`
+# (class ImportAlignmentCSV above) — it now routes through
+# core.import_alignment_csv, which builds the Saikei viewport hierarchy for the
+# parent and any aggregated child alignments.
 
 
 # =============================================================================
