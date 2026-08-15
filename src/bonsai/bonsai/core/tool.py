@@ -1330,6 +1330,12 @@ class Alignment:
     def create_hierarchy_for_alignment(cls, alignment): pass
     def get_child_alignments(cls, alignment): pass
     def create_objects_for_referents(cls, alignment): pass
+    # Cant (spec Section 3)
+    def get_cant_layout(cls, alignment): pass
+    def add_cant_layout(cls, alignment, rail_head_distance): pass
+    def remove_cant_layout(cls, alignment): pass
+    def write_cant_segments(cls, alignment, points): pass
+    def get_horizontal_extent_semantic(cls, alignment): pass
 
 
 @interface

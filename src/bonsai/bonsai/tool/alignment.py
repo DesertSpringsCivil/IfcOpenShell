@@ -2862,3 +2862,771 @@ class Alignment:
         if obj := tool.Blender.get_active_object():
             if (element := tool.Ifc.get_entity(obj)) and element.is_a("IfcAlignment"):
                 return element
+
+    # =========================================================================
+    # Cant — IFC API Wrappers (spec Section 3)
+    # =========================================================================
+    # "Adding cant is what marks an alignment as rail" (spec 3.1). A cant
+    # layout requires both a horizontal AND a vertical layout to already
+    # exist: the geometry engine needs an IfcGradientCurve to use as the
+    # BaseCurve of the IfcSegmentedReferenceCurve that add_cant_layout
+    # produces (see ifcopenshell.api.alignment.add_cant_layout's docstring).
+
+    @classmethod
+    def get_cant_layout(cls, alignment: "ifcopenshell.entity_instance"):
+        """Get the IfcAlignmentCant layout from an alignment, or None."""
+        import ifcopenshell.api.alignment as align_api
+
+        return align_api.get_cant_layout(alignment)
+
+    @classmethod
+    def add_cant_layout(
+        cls, alignment: "ifcopenshell.entity_instance", rail_head_distance: float = 1.0
+    ) -> "ifcopenshell.entity_instance":
+        """Add a new IfcAlignmentCant layout to an alignment (spec 3.1).
+
+        Wraps ifcopenshell.api.alignment.add_cant_layout, which requires both
+        a horizontal AND a vertical layout to already exist (enforced by
+        core.alignment.add_cant_to_alignment before this is called) and
+        extends the alignment's geometric representation from
+        IfcGradientCurve to IfcSegmentedReferenceCurve when one exists.
+
+        Args:
+            alignment: The IfcAlignment entity
+            rail_head_distance: Distance between rail heads (model units),
+                assigned to IfcAlignmentCant.RailHeadDistance — the API uses
+                it to convert cant height (a vertical offset between the two
+                rails) into the rotation angle of the track cross-section
+                about the alignment axis for the geometric representation.
+
+        Returns:
+            The newly created IfcAlignmentCant entity (including its
+            mandatory zero-length terminator segment).
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        ifc_file = tool.Ifc.get()
+        return align_api.add_cant_layout(ifc_file, alignment, rail_head_distance=rail_head_distance)
+
+    @classmethod
+    def remove_cant_layout(cls, alignment: "ifcopenshell.entity_instance") -> None:
+        """Remove the cant layout, reverting the alignment's representation
+        from IfcSegmentedReferenceCurve back to IfcGradientCurve (spec 3.6).
+
+        Mirrors remove_vertical_layout in structure. Cant has no CT
+        4.1.4.4.1.2-style "reuse" concept — add_cant_layout's docstring notes
+        IFC 4.3 defines no such template for cant — so there is always at
+        most one cant layout, nested directly under `alignment`.
+
+        Removes, in order:
+        1. The cant layout's real segments (both halves — geometric
+           IfcCurveSegments and semantic IfcAlignmentSegments).
+        2. Blender objects for those segments and the layout's own object.
+        3. The terminator's semantic IfcAlignmentSegment.
+        4. The "Axis"/Curve3D representation's IfcSegmentedReferenceCurve —
+           repointing Items back at its BaseCurve (the IfcGradientCurve
+           add_cant_layout reused, which must NOT be deleted) before
+           deep-removing the wrapper, so the gradient curve is recognized as
+           still referenced and survives.
+        5. The IfcAlignmentCant entity itself.
+        6. Any stale 3D-centerline helper object (defensive — cant does not
+           currently affect the D3 centerline sampler, but this keeps the
+           cleanup symmetric with remove_vertical_layout).
+
+        Does nothing if the alignment has no cant layout.
+        """
+        import ifcopenshell.api.alignment as align_api
+        import ifcopenshell.api.root
+        import ifcopenshell.util.element
+        import ifcopenshell.util.representation
+
+        ifc_file = tool.Ifc.get()
+
+        cant_layout = align_api.get_cant_layout(alignment)
+        if cant_layout is None:
+            return
+
+        # 1-2) Real segments (geometric + semantic) and their Blender objects.
+        cls.clear_layout_segments(cant_layout)
+        cls.remove_layout_segment_objects(cant_layout)
+        layout_obj = tool.Ifc.get_object(cant_layout)
+        if layout_obj:
+            cls._remove_blender_object(layout_obj)
+
+        # 3) The terminator's semantic IfcAlignmentSegment.
+        for rel in getattr(cant_layout, "IsNestedBy", []) or []:
+            for segment in list(rel.RelatedObjects or []):
+                if segment.is_a("IfcAlignmentSegment"):
+                    ifcopenshell.api.root.remove_product(ifc_file, product=segment)
+
+        # 4) Revert the "Axis"/"Curve3D" representation: IfcSegmentedReferenceCurve -> its BaseCurve.
+        for representation in list(ifcopenshell.util.representation.get_representations_iter(alignment)):
+            if representation.RepresentationIdentifier == "Axis" and representation.RepresentationType == "Curve3D":
+                items = list(representation.Items or [])
+                for item in items:
+                    if item.is_a("IfcSegmentedReferenceCurve"):
+                        base_curve = item.BaseCurve
+                        representation.Items = tuple(base_curve if it is item else it for it in items)
+                        ifcopenshell.util.element.remove_deep2(ifc_file, item)
+                        break
+
+        # 5) The layout entity itself (unnests it from the alignment).
+        ifcopenshell.api.root.remove_product(ifc_file, product=cant_layout)
+
+        # 6) Stale 3D centerline helper.
+        cls.remove_3d_alignment_object(alignment)
+
+    @classmethod
+    def get_horizontal_extent_semantic(cls, alignment: "ifcopenshell.entity_instance") -> float:
+        """Total length (model units) of the horizontal alignment domain,
+        computed purely from IfcAlignmentHorizontalSegment.SegmentLength
+        design parameters — no geometry engine evaluation.
+
+        The cant table's station-range validation
+        (``core.alignment.update_cant_segments``) must work even where
+        map_shape/evaluate is unavailable (the win64 packaging gap,
+        IfcOpenShell#9301). ``get_alignment_length`` is *already* purely
+        semantic (it sums SegmentLength design parameters and never calls
+        the geometry engine) — this is a thin, purpose-dedicated alias so the
+        cant extent check has an explicit, geometry-engine-free contract that
+        does not depend on ``get_alignment_length`` staying that way if it is
+        ever extended for D3/evaluation purposes.
+
+        Returns:
+            Total horizontal length, or 0.0 if there is no horizontal layout.
+        """
+        return cls.get_alignment_length(alignment) or 0.0
+
+    @classmethod
+    def back_calculate_cant_points_from_layout(cls, alignment: "ifcopenshell.entity_instance") -> List[dict]:
+        """Reverse-engineer the cant point table from IFC
+        IfcAlignmentCantSegment design parameters — semantic only, no
+        geometry engine (mirrors ``back_calculate_pvis_from_vertical``'s
+        pattern for the vertical layout).
+
+        Used by the profile view's cant band (spec 3.4) to redraw straight
+        from IFC without depending on the ``props.cant_points`` UI
+        collection, so the band works even if the Cant Editor panel has
+        never been opened this session.
+
+        Returns:
+            List of dicts: ``{"station", "cant_left", "cant_right",
+            "transition_type"}``, one per point (segment boundary) — in the
+            same convention as ``write_cant_segments`` (a point's
+            transition_type carries its value INTO the next point; the last
+            point's is unused). Empty list if the alignment has no cant
+            layout or no real segments.
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        cant_layout = align_api.get_cant_layout(alignment)
+        if cant_layout is None:
+            return []
+
+        segments = align_api.get_layout_segments(cant_layout)
+        real_segments = [seg for seg in segments if not cls.is_zero_length_segment(seg)]
+        if not real_segments:
+            return []
+
+        points = []
+        for segment in real_segments:
+            dp = segment.DesignParameters
+            points.append(
+                {
+                    "station": float(dp.StartDistAlong),
+                    "cant_left": float(dp.StartCantLeft),
+                    "cant_right": float(dp.StartCantRight),
+                    "transition_type": dp.PredefinedType,
+                }
+            )
+
+        last_dp = real_segments[-1].DesignParameters
+        end_left = last_dp.EndCantLeft if last_dp.EndCantLeft is not None else last_dp.StartCantLeft
+        end_right = last_dp.EndCantRight if last_dp.EndCantRight is not None else last_dp.StartCantRight
+        points.append(
+            {
+                "station": float(last_dp.StartDistAlong) + float(last_dp.HorizontalLength),
+                "cant_left": float(end_left),
+                "cant_right": float(end_right),
+                "transition_type": last_dp.PredefinedType,  # unused — no outgoing segment
+            }
+        )
+        return points
+
+    @classmethod
+    def write_cant_segments(cls, alignment: "ifcopenshell.entity_instance", points: list) -> None:
+        """Write the cant table to IFC as IfcAlignmentCantSegments (spec 3.2).
+
+        ``points`` is an ordered list of dicts: ``{"station", "cant_left",
+        "cant_right", "transition_type"}``. Points mark STATIONS where cant
+        VALUES are defined; each CONSECUTIVE PAIR of points becomes one
+        IfcAlignmentCantSegment. The convention — not obvious from the IFC
+        schema, so documented here and in ``CivilCantPointProperties``: a
+        point's ``transition_type`` is the type of the segment that carries
+        its value INTO the NEXT point — i.e. ``points[i]["transition_type"]``
+        governs the segment ``[points[i], points[i + 1]]``. The LAST point's
+        ``transition_type`` is unused (there is no "next" segment for it).
+
+        Note on CONSTANTCANT: the geometric mapping for CONSTANTCANT segments
+        (``_map_alignment_cant_segment._map_constant_cant``) only reads the
+        segment's *start* cant values — the end values are written to IFC
+        (per the schema, and so a later transition-type edit does not lose
+        data) but are not swept for a still-CONSTANTCANT segment. If the
+        table's next point has different cant values, the rendered geometry
+        will hold flat at the start value and then jump at the segment
+        boundary; ``sample_cant_profile`` mirrors this so the display band is
+        honest about it.
+
+        Clears the cant layout's existing real segments first (mirrors
+        ``layout_by_pi_method`` / ``layout_vertical_by_pvi_method``'s "clear
+        then rebuild" idiom), then calls ``create_layout_segment`` for each
+        consecutive pair. The mandatory zero-length terminator is preserved
+        and repositioned automatically by
+        ``create_layout_segment``/``_add_segment_to_layout``.
+
+        Args:
+            alignment: The IfcAlignment entity (must already have a cant
+                layout)
+            points: Ordered cant point list, strictly increasing station
+                (validated by ``core.alignment.update_cant_segments`` before
+                this is called)
+
+        Raises:
+            ValueError: If the alignment has no cant layout.
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        ifc_file = tool.Ifc.get()
+        cant_layout = align_api.get_cant_layout(alignment)
+        if cant_layout is None:
+            raise ValueError(f"Alignment #{alignment.id()} has no cant layout")
+
+        cls.clear_layout_segments(cant_layout)
+
+        for current, following in zip(points, points[1:]):
+            design_parameters = ifc_file.createIfcAlignmentCantSegment(
+                StartDistAlong=float(current["station"]),
+                HorizontalLength=float(following["station"]) - float(current["station"]),
+                StartCantLeft=float(current["cant_left"]),
+                EndCantLeft=float(following["cant_left"]),
+                StartCantRight=float(current["cant_right"]),
+                EndCantRight=float(following["cant_right"]),
+                PredefinedType=current.get("transition_type", "LINEARTRANSITION"),
+            )
+            align_api.create_layout_segment(ifc_file, cant_layout, design_parameters)
+
+    # =========================================================================
+    # Cant — Rotation Reference (spec 3.3)
+    # =========================================================================
+    # "Recorded, not assumed": the rotation reference (which rail — low,
+    # centerline, or high — the cant rotation is measured about) is persisted
+    # for save/reopen round-trip and downstream tooling to read, but has NO
+    # geometry consequence yet. The geometric representation always applies
+    # cant per RailHeadDistance exactly as authored by the alignment API;
+    # this flag does not currently change the sweep.
+
+    @classmethod
+    def set_cant_rotation_reference(cls, cant_layout: "ifcopenshell.entity_instance", rotation_reference: str) -> None:
+        """Persist the cant rotation reference as Pset_SaikeiCant.RotationReference.
+
+        IFC 4.3 has no standard pset for which rail the cant rotation is
+        measured about, so it rides in a Saikei pset on the IfcAlignmentCant
+        entity for save/reopen round-trip (mirrors
+        ``set_design_criteria``'s pset pattern on IfcAlignment).
+        """
+        import ifcopenshell.api.pset
+        import ifcopenshell.util.element
+
+        ifc_file = tool.Ifc.get()
+        existing = ifcopenshell.util.element.get_pset(cant_layout, "Pset_SaikeiCant", should_inherit=False)
+        if existing:
+            pset_entity = ifc_file.by_id(existing["id"])
+        else:
+            pset_entity = ifcopenshell.api.pset.add_pset(ifc_file, product=cant_layout, name="Pset_SaikeiCant")
+        ifcopenshell.api.pset.edit_pset(
+            ifc_file, pset=pset_entity, properties={"RotationReference": rotation_reference}
+        )
+
+    @classmethod
+    def get_cant_rotation_reference(cls, cant_layout: "ifcopenshell.entity_instance") -> Optional[str]:
+        """Return the persisted cant rotation reference, or None when never set."""
+        import ifcopenshell.util.element
+
+        pset = ifcopenshell.util.element.get_pset(cant_layout, "Pset_SaikeiCant", should_inherit=False)
+        if pset and pset.get("RotationReference"):
+            return str(pset["RotationReference"])
+        return None
+
+    # =========================================================================
+    # Cant — Pure Math (spec 3.2)
+    # =========================================================================
+
+    # Standard gravity, m/s^2 (ISO 80000-3 / NIST). Used for both metric and
+    # imperial equilibrium-cant derivations via a single SI-consistent
+    # formula — see cant_equilibrium.
+    GRAVITY_MPS2 = 9.80665
+
+    # Source: EN 13803-1:2017 "Railway applications — Track — Track alignment
+    # design parameters — Track gauges 1435 mm and wider", plain line, normal
+    # limits. Transcribed as ADVISORY defaults (never blocking — see
+    # compute_cant_checks); the engineer of record may override every value
+    # via CivilAlignmentProperties.cant_limit_*. Exact figures vary by
+    # edition/national annex — treat these as reasonable ballpark defaults,
+    # not a substitute for the governing standard.
+    #
+    # All values use the SAME internal convention as the rest of this module:
+    # length-valued limits in metres (Blender's LENGTH-property convention —
+    # see AlignmentPI.radius for the same pattern), rate-valued limits
+    # (gradient/twist) as dimensionless length-per-length ratios rather than
+    # a display-scaled mm/m or in/ft number, so a limit compares directly
+    # against compute_cant_checks()'s raw ratio without unit conversion at
+    # check time (mm/m and in/ft are NOT numerically comparable to the same
+    # threshold — see cant_gradient/twist's docstrings). The published EN
+    # 13803 figures are in mm and mm/m; the comments below show that
+    # conversion.
+    EN13803_DEFAULT_LIMITS = {
+        "max_applied_cant": 0.160,  # 160 mm
+        "max_deficiency": 0.153,  # 153 mm
+        "max_excess": 0.110,  # 110 mm
+        "max_cant_gradient": 0.00225,  # 2.25 mm/m == 0.00225 m/m
+        "max_twist": 0.003,  # 3 mm/m == 0.003 m/m (see twist()'s docstring
+        # for the MVP simplification: twist rate is computed identically to
+        # cant gradient here, i.e. no separate fixed measurement base length)
+    }
+
+    @classmethod
+    def cant_equilibrium(cls, speed: float, radius: float, gauge: float, is_imperial: bool = False) -> float:
+        """Equilibrium cant E_eq = gauge * v^2 / (g * radius) — the applied
+        cant at which centripetal acceleration exactly balances the lateral
+        gravity component contributed by the rail cant (no net lateral force
+        on passengers/cargo at ``speed``).
+
+        ``gauge`` and ``radius`` (and the returned E_eq) must share the SAME
+        length unit for the formula to be dimensionally correct; this module
+        always passes them in METRES (Blender's internal LENGTH-property
+        convention — see AlignmentPI.radius for the same pattern), so ``g``
+        below is the standard 9.80665 m/s^2 and ``speed`` is converted to
+        m/s internally. Only ``speed``'s convention needs ``is_imperial`` to
+        pick the right velocity conversion — matching
+        ``CivilAlignmentProperties.design_speed`` and
+        ``Alignment.is_imperial_project()``:
+
+        - Metric (``is_imperial=False``): ``speed`` is km/h ->
+          v(m/s) = speed / 3.6.
+        - Imperial (``is_imperial=True``): ``speed`` is mph ->
+          v(m/s) = speed * 0.44704 (1 mph = 0.44704 m/s, exact by definition).
+
+        Using ONE SI-consistent formula for both conventions (rather than two
+        separate empirical mm/inch constants) keeps gauge/radius/E_eq in
+        whatever length unit the caller is working in.
+
+        Returns 0.0 for non-positive radius, speed, or gauge (straight track,
+        no speed, or no gauge has no equilibrium cant to compute).
+        """
+        if radius is None or radius <= 0 or speed is None or speed <= 0 or not gauge or gauge <= 0:
+            return 0.0
+        speed_mps = (speed * 0.44704) if is_imperial else (speed / 3.6)
+        return gauge * speed_mps**2 / (cls.GRAVITY_MPS2 * radius)
+
+    @classmethod
+    def cant_gradient(cls, delta_cant: float, length: float, is_imperial: bool = False) -> float:
+        """Cant gradient (rate of change of applied cant along a transition),
+        expressed per the project's display convention:
+
+        - Metric (``is_imperial=False``): millimetres per metre of
+          transition length — ``delta_cant / length * 1000``.
+        - Imperial (``is_imperial=True``): inches per foot of transition
+          length — ``delta_cant / length * 12``.
+
+        Because the ratio ``delta_cant / length`` is unit-independent (both
+        are passed in the same internal metres, so any length-unit
+        conversion cancels out of the ratio), the two display conventions
+        are simply a different scale factor (1000 vs 12) on the same
+        underlying ratio — NOT a value that can be compared directly against
+        a limit expressed in the other convention (2.25 mm/m is a much
+        gentler gradient than a numeric "2.25" would mean as in/ft). Limit
+        checks in ``compute_cant_checks`` therefore compare the RAW ratio,
+        not this display-scaled value — see ``EN13803_DEFAULT_LIMITS``.
+
+        Returns 0.0 for non-positive length.
+        """
+        if length is None or length <= 0:
+            return 0.0
+        ratio = delta_cant / length
+        return ratio * 12.0 if is_imperial else ratio * 1000.0
+
+    @classmethod
+    def twist(
+        cls, delta_cant: float, length: float, speed: Optional[float] = None, is_imperial: bool = False
+    ) -> Tuple[float, float]:
+        """Track twist: the rate of change of cross-level (applied cant)
+        along a transition.
+
+        MVP simplification: this module computes twist identically to
+        ``cant_gradient`` (the rate of change of applied cant over the
+        transition length) — EN 13803 formally measures twist over a fixed
+        base length (e.g. 3 m) rather than instantaneously along the whole
+        transition, which is out of scope for this pass; see
+        ``EN13803_DEFAULT_LIMITS``'s comment.
+
+        Returns a tuple ``(twist_per_length, twist_per_time_mm_s)``:
+
+        - ``twist_per_length``: same display convention as
+          ``cant_gradient`` — mm/m (metric) or in/ft (imperial).
+        - ``twist_per_time_mm_s``: millimetres of cant change PER SECOND
+          (always mm, regardless of ``is_imperial`` — this is the
+          conventional railway ride-comfort criterion unit) experienced by a
+          vehicle traversing the transition at ``speed`` (km/h metric, mph
+          imperial — same convention as ``cant_equilibrium``). ``0.0`` when
+          ``speed`` is ``None`` or non-positive.
+        """
+        twist_per_length = cls.cant_gradient(delta_cant, length, is_imperial)
+        if not speed or speed <= 0 or not length or length <= 0:
+            return twist_per_length, 0.0
+        speed_mps = (speed * 0.44704) if is_imperial else (speed / 3.6)
+        if speed_mps <= 0:
+            return twist_per_length, 0.0
+        time_through_transition = length / speed_mps
+        if time_through_transition <= 0:
+            return twist_per_length, 0.0
+        delta_cant_mm = abs(delta_cant) * 1000.0
+        twist_per_time_mm_s = delta_cant_mm / time_through_transition
+        return twist_per_length, twist_per_time_mm_s
+
+    @classmethod
+    def radius_at_station(cls, alignment: "ifcopenshell.entity_instance", station: float) -> float:
+        """Curvature radius at ``station``, walked purely from the horizontal
+        layout's IfcAlignmentHorizontalSegment design parameters
+        (SegmentLength, StartRadiusOfCurvature, EndRadiusOfCurvature) — NO
+        geometry engine evaluation, so this works even where map_shape/
+        evaluate is unavailable (the win64 packaging gap, IfcOpenShell#9301).
+
+        NOTE: unlike IfcAlignmentVerticalSegment / IfcAlignmentCantSegment,
+        IfcAlignmentHorizontalSegment has NO ``StartDistAlong`` attribute (it
+        instead carries an absolute ``StartPoint``/``StartDirection``) — so
+        "distance along" for the horizontal layout is not stored per segment
+        and must be accumulated by summing ``SegmentLength`` in nested order,
+        exactly like ``get_alignment_length``/``get_horizontal_extent_semantic``.
+        ``station`` uses that same 0-based distance-along convention (station
+        0 = the start of the first real segment).
+
+        - LINE segments: no curvature (returns 0.0 — "infinite" radius).
+        - CIRCULARARC segments: constant radius = StartRadiusOfCurvature.
+        - Spiral/transition segments (CLOTHOID etc.): the true curvature
+          varies continuously along the spiral — for a clothoid, curvature
+          (1/R) is exactly LINEAR in arc length. This is approximated (exact,
+          for a true clothoid) by linearly interpolating CURVATURE (1/R, not
+          R directly) between the segment's start and end radius over the
+          local distance-along, then inverting back to a radius. A bounding
+          radius of ``None``/0 is treated as zero curvature (an infinite
+          radius, i.e. the spiral end tangent to a straight).
+
+        Returns 0.0 if the station falls before the first segment, after the
+        last, within a LINE segment, or if the alignment has no horizontal
+        layout.
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        h_layout = align_api.get_horizontal_layout(alignment)
+        if h_layout is None:
+            return 0.0
+
+        distance_along = 0.0
+        for segment in align_api.get_layout_segments(h_layout):
+            if cls.is_zero_length_segment(segment):
+                continue
+            dp = getattr(segment, "DesignParameters", None)
+            if dp is None or not dp.is_a("IfcAlignmentHorizontalSegment"):
+                continue
+            length = float(dp.SegmentLength)
+            if length <= 0:
+                continue
+            start = distance_along
+            distance_along += length
+            if not (start - 1e-9 <= station <= distance_along + 1e-9):
+                continue
+
+            predefined_type = dp.PredefinedType
+            if predefined_type == "LINE":
+                return 0.0
+
+            start_radius = dp.StartRadiusOfCurvature
+            end_radius = dp.EndRadiusOfCurvature
+            if predefined_type == "CIRCULARARC":
+                return abs(float(start_radius)) if start_radius else 0.0
+
+            # Transition / spiral: interpolate CURVATURE (1/R) linearly
+            # along the segment's local distance, then invert to radius.
+            local = max(0.0, min(1.0, (station - start) / length))
+            start_curvature = 1.0 / abs(float(start_radius)) if start_radius else 0.0
+            end_curvature = 1.0 / abs(float(end_radius)) if end_radius else 0.0
+            curvature = start_curvature + (end_curvature - start_curvature) * local
+            return (1.0 / curvature) if abs(curvature) > 1e-12 else 0.0
+
+        return 0.0
+
+    @classmethod
+    def compute_cant_checks(
+        cls,
+        points: list,
+        index: int,
+        alignment: "ifcopenshell.entity_instance",
+        gauge: float,
+        limits: dict,
+        design_speed: float,
+    ) -> dict:
+        """Computed values + limit violations for the cant segment running
+        from ``points[index]`` to ``points[index + 1]`` (spec 3.2 — a
+        point's transition_type carries its value INTO the next point, so
+        this is the segment ``points[index]`` governs).
+
+        Args:
+            points: Ordered list of dicts with "station", "cant_left",
+                "cant_right", "transition_type", "design_speed" (0 = inherit
+                ``design_speed``) — see ``CivilCantPointProperties``.
+            index: Index of the governing point; requires a "next" point, so
+                valid range is ``0 <= index < len(points) - 1`` (mirrors how
+                the vertical PVI table has no Grade row after the last PVI).
+            alignment: The IfcAlignment entity (radius is looked up via
+                ``radius_at_station`` at the segment's START station).
+            gauge: Track gauge (model units — metres), fed to
+                ``cant_equilibrium``.
+            limits: Dict shaped like ``EN13803_DEFAULT_LIMITS`` (possibly
+                user-overridden) — a limit is skipped (never flagged) if its
+                key is missing.
+            design_speed: Alignment-level fallback design speed, used when
+                the point's own "design_speed" is 0/unset.
+
+        Returns:
+            A dict with keys "radius", "applied_left", "applied_right",
+            "applied" (= applied_right - applied_left, the actual
+            superelevation — see ``write_cant_segments``'s note on how the
+            geometry engine derives cant from the left/right pair),
+            "equilibrium", "deficiency" (>= 0, E_eq - applied when
+            under-canted, else 0), "excess" (>= 0, applied - E_eq when
+            over-canted, else 0), "gradient", "twist_per_length",
+            "twist_per_time", and "violations" (list of limit-name strings
+            from ``limits`` that are exceeded).
+
+            Returns an all-zero dict with no violations when ``index`` is
+            out of the valid range.
+        """
+        zero_result = {
+            "radius": 0.0,
+            "applied_left": 0.0,
+            "applied_right": 0.0,
+            "applied": 0.0,
+            "equilibrium": 0.0,
+            "deficiency": 0.0,
+            "excess": 0.0,
+            "gradient": 0.0,
+            "twist_per_length": 0.0,
+            "twist_per_time": 0.0,
+            "violations": [],
+        }
+        if not (0 <= index < len(points) - 1):
+            return zero_result
+
+        point = points[index]
+        next_point = points[index + 1]
+        station = float(point["station"])
+        is_imperial = cls.is_imperial_project()
+
+        speed = float(point.get("design_speed") or 0.0) or float(design_speed or 0.0)
+
+        radius = cls.radius_at_station(alignment, station)
+        applied_left = float(point["cant_left"])
+        applied_right = float(point["cant_right"])
+        applied = applied_right - applied_left
+
+        equilibrium = 0.0
+        if speed > 0 and radius > 0 and gauge:
+            equilibrium = cls.cant_equilibrium(speed, radius, gauge, is_imperial)
+        deficiency = max(0.0, equilibrium - applied)
+        excess = max(0.0, applied - equilibrium)
+
+        next_applied = float(next_point["cant_right"]) - float(next_point["cant_left"])
+        delta_cant = next_applied - applied
+        length = float(next_point["station"]) - station
+        gradient = cls.cant_gradient(delta_cant, length, is_imperial)
+        twist_per_length, twist_per_time = cls.twist(delta_cant, length, speed, is_imperial)
+        raw_rate_ratio = (delta_cant / length) if length > 0 else 0.0
+
+        violations = []
+        if limits:
+            if "max_applied_cant" in limits and abs(applied) > limits["max_applied_cant"]:
+                violations.append("max_applied_cant")
+            if "max_deficiency" in limits and deficiency > limits["max_deficiency"]:
+                violations.append("max_deficiency")
+            if "max_excess" in limits and excess > limits["max_excess"]:
+                violations.append("max_excess")
+            if "max_cant_gradient" in limits and abs(raw_rate_ratio) > limits["max_cant_gradient"]:
+                violations.append("max_cant_gradient")
+            if "max_twist" in limits and abs(raw_rate_ratio) > limits["max_twist"]:
+                violations.append("max_twist")
+
+        return {
+            "radius": radius,
+            "applied_left": applied_left,
+            "applied_right": applied_right,
+            "applied": applied,
+            "equilibrium": equilibrium,
+            "deficiency": deficiency,
+            "excess": excess,
+            "gradient": gradient,
+            "twist_per_length": twist_per_length,
+            "twist_per_time": twist_per_time,
+            "violations": violations,
+        }
+
+    # =========================================================================
+    # Cant — Profile Sampling (spec 3.4, display-only)
+    # =========================================================================
+
+    @staticmethod
+    def _ramp_linear(xi: float) -> float:
+        """LINEARTRANSITION: f(xi) = xi — constant-rate straight-line ramp
+        (nonzero slope at both ends)."""
+        return xi
+
+    @staticmethod
+    def _ramp_bloss(xi: float) -> float:
+        """BLOSSCURVE: the cubic "smoothstep" ramp
+        f(xi) = 3*xi^2 - 2*xi^3 — zero slope AND zero curvature at both ends
+        (the classic S-curve transition). Matches the coefficients used by
+        ``ifcopenshell.api.alignment._map_alignment_cant_segment._map_bloss_curve``
+        (a0=Ds, a1=0, a2=3f, a3=-2f -> y = Ds + f*(3*xi^2 - 2*xi^3))."""
+        return 3.0 * xi**2 - 2.0 * xi**3
+
+    @staticmethod
+    def _ramp_cosine(xi: float) -> float:
+        """COSINECURVE: f(xi) = 0.5 * (1 - cos(pi * xi)) — a half-cosine
+        "raised cosine" ramp, zero slope at both ends."""
+        return 0.5 * (1.0 - math.cos(math.pi * xi))
+
+    @staticmethod
+    def _ramp_sine(xi: float) -> float:
+        """SINECURVE: f(xi) = xi - sin(2*pi*xi) / (2*pi) — zero slope AND
+        zero curvature at both ends (a full sine-wave period subtracted from
+        the linear ramp)."""
+        return xi - math.sin(2.0 * math.pi * xi) / (2.0 * math.pi)
+
+    @staticmethod
+    def _ramp_helmert(xi: float) -> float:
+        """HELMERTCURVE: the standard two-parabola ("Helmert") ramp — a
+        rising parabola on the first half and a mirrored falling-complement
+        parabola on the second half, meeting at the midpoint with continuous
+        (matching) slope::
+
+            f(xi) = 2*xi^2                for 0 <= xi <= 0.5
+            f(xi) = 1 - 2*(1 - xi)^2      for 0.5 <  xi <= 1
+
+        Zero slope at both ends; slope is continuous at the midpoint but
+        curvature flips sign there — the defining trait of a Helmert
+        (parabolic) transition, as opposed to Bloss's fully continuous
+        curvature."""
+        if xi <= 0.5:
+            return 2.0 * xi**2
+        return 1.0 - 2.0 * (1.0 - xi) ** 2
+
+    @classmethod
+    def _ramp_for_transition_type(cls, transition_type: str, xi: float) -> float:
+        """Dispatch to the normalized ramp f(xi) for a cant transition type.
+
+        ``xi`` is clamped to [0, 1] before dispatch. CONSTANTCANT returns
+        0.0 — callers should special-case CONSTANTCANT to hold the segment's
+        start value rather than using this ramp at all (see
+        ``sample_cant_profile``); 0.0 is a safe default should it ever be
+        called directly for CONSTANTCANT.
+
+        VIENNESEBEND approximates with the Bloss ramp (spec 3.4) — the true
+        Viennese Bend is a 7th-order polynomial spiral with no simple
+        closed-form normalized ramp; Bloss is visually close and shares its
+        zero-slope, zero-curvature endpoints.
+        """
+        xi = max(0.0, min(1.0, xi))
+        if transition_type == "LINEARTRANSITION":
+            return cls._ramp_linear(xi)
+        if transition_type == "HELMERTCURVE":
+            return cls._ramp_helmert(xi)
+        if transition_type in ("BLOSSCURVE", "VIENNESEBEND"):
+            return cls._ramp_bloss(xi)
+        if transition_type == "COSINECURVE":
+            return cls._ramp_cosine(xi)
+        if transition_type == "SINECURVE":
+            return cls._ramp_sine(xi)
+        if transition_type == "CONSTANTCANT":
+            return 0.0
+        return cls._ramp_linear(xi)
+
+    @classmethod
+    def sample_cant_profile(cls, points: list, stations) -> List[Tuple[float, float, float]]:
+        """Sample applied cant (left, right) at each of ``stations`` by
+        walking the piecewise-defined cant table ``points`` (spec 3.2/3.4 —
+        a point's transition_type carries its value INTO the next point;
+        same convention as ``write_cant_segments``).
+
+        Display-only approximation (spec 3.4): each of the seven
+        IfcAlignmentCant transition types is reproduced here via its
+        STANDARD textbook normalized ramp function f(xi), xi in [0, 1] — NOT
+        by re-deriving IfcOpenShell's internal
+        IfcSecondOrderPolynomialSpiral / clothoid / etc. arc-length
+        parameterization, which the geometry engine uses for the
+        authoritative swept geometry. The two should look visually identical
+        for any well-formed transition; this sampler exists purely to draw
+        the cant band overlay without needing the geometry engine.
+
+        CONSTANTCANT holds the segment's START value flat across the whole
+        segment (mirroring ``_map_constant_cant``, which never reads the end
+        cant values) — see ``write_cant_segments``'s note on the resulting
+        jump if the next point's values differ.
+
+        Args:
+            points: Ordered list of cant point dicts (see
+                ``write_cant_segments``). Sorted defensively by station.
+            stations: Iterable of station values to sample. Stations outside
+                the points' station range are clamped to the nearest
+                endpoint's values.
+
+        Returns:
+            List of ``(station, applied_left, applied_right)`` tuples, one
+            per input station, in the same order as ``stations``.
+        """
+        stations = list(stations)
+        if len(points) < 2:
+            return [(float(s), 0.0, 0.0) for s in stations]
+
+        ordered = sorted(points, key=lambda p: p["station"])
+        first, last = ordered[0], ordered[-1]
+
+        result: List[Tuple[float, float, float]] = []
+        for raw_station in stations:
+            station = float(raw_station)
+            if station <= first["station"]:
+                result.append((station, float(first["cant_left"]), float(first["cant_right"])))
+                continue
+            if station >= last["station"]:
+                result.append((station, float(last["cant_left"]), float(last["cant_right"])))
+                continue
+
+            for start_point, end_point in zip(ordered, ordered[1:]):
+                if start_point["station"] <= station <= end_point["station"]:
+                    length = end_point["station"] - start_point["station"]
+                    xi = (station - start_point["station"]) / length if length > 0 else 0.0
+                    transition_type = start_point.get("transition_type", "LINEARTRANSITION")
+
+                    if transition_type == "CONSTANTCANT":
+                        left = float(start_point["cant_left"])
+                        right = float(start_point["cant_right"])
+                    else:
+                        ramp = cls._ramp_for_transition_type(transition_type, xi)
+                        left = float(start_point["cant_left"]) + ramp * (
+                            float(end_point["cant_left"]) - float(start_point["cant_left"])
+                        )
+                        right = float(start_point["cant_right"]) + ramp * (
+                            float(end_point["cant_right"]) - float(start_point["cant_right"])
+                        )
+                    result.append((station, left, right))
+                    break
+
+        return result

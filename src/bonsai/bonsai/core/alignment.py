@@ -608,3 +608,164 @@ def visualize_3d_alignment(
     if alignment_tool.get_horizontal_layout(alignment) is None:
         raise ValueError(f"Alignment '{alignment.Name}' has no horizontal layout")
     return alignment_tool.create_3d_alignment_object(alignment, distance_interval)
+
+
+# =============================================================================
+# Cant (spec Section 3)
+# =============================================================================
+# Adding cant is what marks an alignment as rail (spec 3.1). A cant layout
+# requires both a horizontal AND a vertical layout to exist first — the
+# geometry engine needs an IfcGradientCurve to use as the BaseCurve of the
+# IfcSegmentedReferenceCurve cant produces (see
+# ifcopenshell.api.alignment.add_cant_layout's docstring).
+
+
+def add_cant_to_alignment(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+    rail_head_distance: float = 1.0,
+):
+    """Add a cant layout to an existing horizontal + vertical alignment.
+
+    Business rules:
+    1. Alignment must exist and be an IfcAlignment.
+    2. Horizontal layout must exist (cant requires horizontal).
+    3. Vertical layout must exist (cant requires vertical — the API's
+       IfcSegmentedReferenceCurve wraps the vertical's IfcGradientCurve).
+    4. Alignment must not already have a cant layout (one cant max).
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment
+        rail_head_distance: Distance between rail heads, used to convert
+            cant height to a rotation angle for the geometric representation
+
+    Returns:
+        The newly created IfcAlignmentCant entity
+
+    Raises:
+        ValueError: If alignment doesn't exist, is wrong type, has no
+            horizontal or vertical layout, or already has a cant layout
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    try:
+        alignment = ifc_file.by_id(alignment_id)
+    except RuntimeError:
+        raise ValueError(f"Alignment with ID {alignment_id} not found")
+
+    if not alignment.is_a("IfcAlignment"):
+        raise ValueError(f"Entity {alignment_id} is not an IfcAlignment")
+
+    if alignment_tool.get_horizontal_layout(alignment) is None:
+        raise ValueError(f"Alignment '{alignment.Name}' has no horizontal layout — add horizontal first")
+
+    if alignment_tool.get_vertical_layout(alignment) is None:
+        raise ValueError(
+            f"Alignment '{alignment.Name}' has no vertical layout — add vertical first (cant requires vertical)"
+        )
+
+    if alignment_tool.get_cant_layout(alignment) is not None:
+        raise ValueError(f"Alignment '{alignment.Name}' already has a cant layout")
+
+    return alignment_tool.add_cant_layout(alignment, rail_head_distance)
+
+
+def update_cant_segments(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+    points: list,
+) -> bool:
+    """Write the cant table (points) to IFC as IfcAlignmentCantSegments.
+
+    Business rules:
+    1. Alignment must exist and be an IfcAlignment.
+    2. Alignment must have a cant layout.
+    3. At least 2 cant points are required (one segment minimum).
+    4. Point stations must be strictly increasing (non-monotonic refused —
+       consecutive points define a segment, so equal/reversed stations would
+       produce a degenerate or negative-length segment).
+    5. Points must fall within the horizontal alignment's extent, computed
+       semantically (no geometry engine) via
+       ``alignment_tool.get_horizontal_extent_semantic``.
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment
+        points: Ordered list of dicts with "station", "cant_left",
+            "cant_right", "transition_type" (the type carried INTO the next
+            point — see ``tool.Alignment.write_cant_segments``)
+
+    Returns:
+        True if successful
+
+    Raises:
+        ValueError: If validation fails
+    """
+    ifc_file = ifc_tool.get()
+    if ifc_file is None:
+        raise ValueError("No IFC file loaded")
+
+    try:
+        alignment = ifc_file.by_id(alignment_id)
+    except RuntimeError:
+        raise ValueError(f"Alignment with ID {alignment_id} not found")
+
+    if not alignment.is_a("IfcAlignment"):
+        raise ValueError(f"Entity {alignment_id} is not an IfcAlignment")
+
+    if alignment_tool.get_cant_layout(alignment) is None:
+        raise ValueError(f"Alignment '{alignment.Name}' has no cant layout")
+
+    if len(points) < 2:
+        raise ValueError("At least 2 cant points are required")
+
+    for previous, current in zip(points, points[1:]):
+        if current["station"] <= previous["station"]:
+            raise ValueError("Cant point stations must be strictly increasing")
+
+    extent = alignment_tool.get_horizontal_extent_semantic(alignment)
+    first_station = points[0]["station"]
+    last_station = points[-1]["station"]
+    if first_station < -1e-6 or last_station > extent + 1e-6:
+        raise ValueError(f"Cant points must fall within the alignment's horizontal extent (0 to {extent:.3f})")
+
+    alignment_tool.write_cant_segments(alignment, points)
+    return True
+
+
+def delete_cant_layout(
+    ifc_tool: "type[tool.Ifc]",
+    alignment_tool: "type[tool.Alignment]",
+    alignment_id: int,
+) -> bool:
+    """Delete the cant layout, reverting the alignment's representation to
+    horizontal + vertical only (spec 3.6).
+
+    Business rules:
+    1. The alignment must exist and be an IfcAlignment.
+    2. The alignment must currently have a cant layout.
+
+    Args:
+        ifc_tool: The IFC tool class
+        alignment_tool: The Alignment tool class
+        alignment_id: The IFC ID of the alignment
+
+    Returns:
+        True if successful.
+
+    Raises:
+        ValueError: If the alignment doesn't exist, is the wrong type, or has
+            no cant layout.
+    """
+    alignment = _resolve_alignment(ifc_tool, alignment_id)
+    if alignment_tool.get_cant_layout(alignment) is None:
+        raise ValueError(f"Alignment '{alignment.Name}' has no cant layout")
+    alignment_tool.remove_cant_layout(alignment)
+    return True
