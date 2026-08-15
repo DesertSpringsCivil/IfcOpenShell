@@ -712,7 +712,7 @@ class CIVIL_PT_cant_editor(Panel):
     bl_options = {"DEFAULT_CLOSED"}
 
     # Lightweight rehydration cache (spec 3.3): reload the persisted
-    # rotation reference from Pset_SaikeiCant once per alignment switch,
+    # rotation reference from SaikeiCivil_Cant once per alignment switch,
     # not on every draw() call. Plain Python class attribute, not a bpy
     # property — mirrors the decorator classes' class-level state pattern.
     _loaded_for_id = 0

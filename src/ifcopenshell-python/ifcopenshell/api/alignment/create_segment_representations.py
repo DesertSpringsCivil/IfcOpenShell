@@ -33,6 +33,10 @@ def create_segment_representations(
     expectation that there is a 1-to-1 relationship between IfcAlignmentSegment and IfcCurveSegment.
     That is, no Helmert curves in the alignment which have a 1-to-2 relationship
 
+    IFC 4.4 WATCH (bSI IFC4.x-development PR #1113, TM11): the drafted 4.4 WHERE rule allows only
+    RepresentationIdentifier="Axis" on IfcAlignment — the FootPrint identifier handling here (and the
+    Axis->FootPrint rename in add_vertical_layout) will need a schema-versioned switch if it lands as written.
+
     :param alignment: The alignment to create segment representations.
     """
     expected_type = "IfcAlignment"

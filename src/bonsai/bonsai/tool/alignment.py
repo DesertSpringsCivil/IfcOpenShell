@@ -605,7 +605,7 @@ class Alignment:
 
     @classmethod
     def set_design_criteria(cls, alignment: "ifcopenshell.entity_instance", design_speed: float) -> None:
-        """Persist design criteria on the alignment as Pset_SaikeiDesignCriteria.
+        """Persist design criteria on the alignment as SaikeiCivil_DesignCriteria.
 
         IFC 4.3 has no standard pset for alignment design criteria, so the
         design speed rides in a Saikei pset for save/reopen round-trip.
@@ -614,11 +614,11 @@ class Alignment:
         import ifcopenshell.util.element
 
         ifc_file = tool.Ifc.get()
-        existing = ifcopenshell.util.element.get_pset(alignment, "Pset_SaikeiDesignCriteria", should_inherit=False)
+        existing = ifcopenshell.util.element.get_pset(alignment, "SaikeiCivil_DesignCriteria", should_inherit=False)
         if existing:
             pset_entity = ifc_file.by_id(existing["id"])
         else:
-            pset_entity = ifcopenshell.api.pset.add_pset(ifc_file, product=alignment, name="Pset_SaikeiDesignCriteria")
+            pset_entity = ifcopenshell.api.pset.add_pset(ifc_file, product=alignment, name="SaikeiCivil_DesignCriteria")
         ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset_entity, properties={"DesignSpeed": float(design_speed)})
 
     @classmethod
@@ -626,7 +626,7 @@ class Alignment:
         """Return the persisted design speed, or None when never set."""
         import ifcopenshell.util.element
 
-        pset = ifcopenshell.util.element.get_pset(alignment, "Pset_SaikeiDesignCriteria", should_inherit=False)
+        pset = ifcopenshell.util.element.get_pset(alignment, "SaikeiCivil_DesignCriteria", should_inherit=False)
         if pset and pset.get("DesignSpeed") is not None:
             return float(pset["DesignSpeed"])
         return None
@@ -3482,7 +3482,7 @@ class Alignment:
 
     @classmethod
     def set_cant_rotation_reference(cls, cant_layout: "ifcopenshell.entity_instance", rotation_reference: str) -> None:
-        """Persist the cant rotation reference as Pset_SaikeiCant.RotationReference.
+        """Persist the cant rotation reference as SaikeiCivil_Cant.RotationReference.
 
         IFC 4.3 has no standard pset for which rail the cant rotation is
         measured about, so it rides in a Saikei pset on the IfcAlignmentCant
@@ -3493,11 +3493,11 @@ class Alignment:
         import ifcopenshell.util.element
 
         ifc_file = tool.Ifc.get()
-        existing = ifcopenshell.util.element.get_pset(cant_layout, "Pset_SaikeiCant", should_inherit=False)
+        existing = ifcopenshell.util.element.get_pset(cant_layout, "SaikeiCivil_Cant", should_inherit=False)
         if existing:
             pset_entity = ifc_file.by_id(existing["id"])
         else:
-            pset_entity = ifcopenshell.api.pset.add_pset(ifc_file, product=cant_layout, name="Pset_SaikeiCant")
+            pset_entity = ifcopenshell.api.pset.add_pset(ifc_file, product=cant_layout, name="SaikeiCivil_Cant")
         ifcopenshell.api.pset.edit_pset(
             ifc_file, pset=pset_entity, properties={"RotationReference": rotation_reference}
         )
@@ -3507,7 +3507,7 @@ class Alignment:
         """Return the persisted cant rotation reference, or None when never set."""
         import ifcopenshell.util.element
 
-        pset = ifcopenshell.util.element.get_pset(cant_layout, "Pset_SaikeiCant", should_inherit=False)
+        pset = ifcopenshell.util.element.get_pset(cant_layout, "SaikeiCivil_Cant", should_inherit=False)
         if pset and pset.get("RotationReference"):
             return str(pset["RotationReference"])
         return None
@@ -4004,7 +4004,7 @@ class Alignment:
     # ifcopenshell.api.alignment.update_key_point_referents deliberately has
     # no such lookup of its own -- see its docstring -- callers are expected
     # to track and pass the nest back in themselves.
-    _NEST_TRACKING_PSET = "Pset_SaikeiAlignment"
+    _NEST_TRACKING_PSET = "SaikeiCivil_Alignment"
     _KEY_POINT_NEST_PROP = "KeyPointNestId"
     _EVENTS_NEST_PROP = "EventsNestId"
 
@@ -4013,7 +4013,7 @@ class Alignment:
         cls, entity: "ifcopenshell.entity_instance", prop_name: str
     ) -> Optional["ifcopenshell.entity_instance"]:
         """Return the IfcRelNests previously recorded on ``entity`` under
-        ``prop_name`` (Pset_SaikeiAlignment), or None if never set or stale
+        ``prop_name`` (SaikeiCivil_Alignment), or None if never set or stale
         (e.g. deleted since it was recorded)."""
         import ifcopenshell.util.element
 
@@ -4305,7 +4305,7 @@ class Alignment:
         fallback otherwise) -- that function hardcodes
         ``PredefinedType="STATION"`` so it cannot be reused directly for an
         event referent. Nested into a DEDICATED events ``IfcRelNests``
-        (tracked via ``Pset_SaikeiAlignment.EventsNestId`` on the alignment,
+        (tracked via ``SaikeiCivil_Alignment.EventsNestId`` on the alignment,
         alongside the per-layout key-point nest tracking above) -- not the
         stationing nest (``get_stationing_nest`` filters to
         ``PredefinedType=="STATION"`` only, so an event referent nested
@@ -4325,7 +4325,7 @@ class Alignment:
             name: Referent name; auto-generated from the formatted station
                 and event type when blank.
             value: Optional payload value (e.g. target superelevation or
-                width), recorded in ``Pset_SaikeiEvent.Value`` when given.
+                width), recorded in ``SaikeiCivil_Event.Value`` when given.
 
         Returns:
             The created IfcReferent.
@@ -4392,7 +4392,7 @@ class Alignment:
         ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset_stationing, properties={"Station": float(station)})
 
         if value is not None:
-            pset_event = ifcopenshell.api.pset.add_pset(ifc_file, product=referent, name="Pset_SaikeiEvent")
+            pset_event = ifcopenshell.api.pset.add_pset(ifc_file, product=referent, name="SaikeiCivil_Event")
             ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset_event, properties={"Value": float(value)})
 
         nest = cls._get_tracked_nest(alignment, cls._EVENTS_NEST_PROP)
@@ -4409,7 +4409,7 @@ class Alignment:
     @classmethod
     def remove_referent(cls, alignment: "ifcopenshell.entity_instance", referent_id: int) -> None:
         """Delete a referent entity (spec 4.1, "Deletable"): its
-        Pset_Stationing / Pset_SaikeiEvent property sets, its
+        Pset_Stationing / SaikeiCivil_Event property sets, its
         ObjectPlacement (if exclusively owned by it), and finally the
         referent itself. Mirrors the alignment API's own (private,
         non-exported) ``_remove_referent`` cleanup used internally by
@@ -4456,12 +4456,12 @@ class Alignment:
     # nested IfcAlignmentHorizontal/Vertical/Cant to walk.
     #
     # "Updates with the parent" (spec 1.7) is implemented as a resync funnel:
-    # the offset's recorded spec (Pset_SaikeiOffset) is the source of truth,
+    # the offset's recorded spec (SaikeiCivil_Offset) is the source of truth,
     # and resync_offset_alignments() rebuilds the IfcPointByDistanceExpression
     # table from it against the parent's CURRENT curve + extent every time
     # commit_layout_change() runs for the parent.
 
-    _OFFSET_PSET = "Pset_SaikeiOffset"
+    _OFFSET_PSET = "SaikeiCivil_Offset"
 
     @classmethod
     def get_curve_for_alignment(cls, alignment: "ifcopenshell.entity_instance"):
@@ -4541,7 +4541,7 @@ class Alignment:
         cls, offset_alignment: "ifcopenshell.entity_instance", parent: "ifcopenshell.entity_instance", offset_spec: dict
     ) -> None:
         """Persist ``offset_spec`` (plus the parent's GlobalId) on
-        ``offset_alignment`` as Pset_SaikeiOffset -- IFC 4.3 has no standard
+        ``offset_alignment`` as SaikeiCivil_Offset -- IFC 4.3 has no standard
         pset for an offset's design intent, so this rides in a Saikei pset,
         both for save/reopen round-trip and as the source of truth
         ``resync_offset_alignments`` rebuilds from (mirrors
@@ -4571,7 +4571,7 @@ class Alignment:
 
     @classmethod
     def get_offset_spec(cls, offset_alignment: "ifcopenshell.entity_instance") -> Optional[dict]:
-        """Return the recorded offset spec (Pset_SaikeiOffset), reshaped
+        """Return the recorded offset spec (SaikeiCivil_Offset), reshaped
         back into the same dict shape ``_build_offset_points``/
         ``create_offset_alignment`` accept (plus ``parent_global_id``), or
         None if ``offset_alignment`` was never authored as an offset (or the
@@ -4598,7 +4598,7 @@ class Alignment:
 
     @classmethod
     def find_offset_children(cls, parent: "ifcopenshell.entity_instance") -> List["ifcopenshell.entity_instance"]:
-        """Return every IfcAlignment in the file whose Pset_SaikeiOffset
+        """Return every IfcAlignment in the file whose SaikeiCivil_Offset
         records ``parent`` as its ParentGlobalId (spec 1.7's "listed as its
         child" set) -- offset alignments are NOT IfcRelAggregates children
         of the parent (they have their own top-level GlobalId, per
@@ -4625,7 +4625,7 @@ class Alignment:
         ``offset_spec`` via ``_build_offset_points``, authors the bare
         IfcAlignment through ``align_api.create_as_offset_curve`` (parent's
         start station honored, same as every other create path), records
-        ``offset_spec`` as Pset_SaikeiOffset for the resync funnel, and
+        ``offset_spec`` as SaikeiCivil_Offset for the resync funnel, and
         parents the new alignment's Blender object under the parent's own
         object so it shows as the parent's child in the outliner.
 

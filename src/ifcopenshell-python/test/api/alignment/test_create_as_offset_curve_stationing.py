@@ -86,5 +86,81 @@ def test_create_as_offset_curve_default_start_station_is_zero():
     assert ifcopenshell.util.element.get_pset(referent, name="Pset_Stationing", prop="Station") == 0.0
 
 
+def _make_file_with_basis():
+    file = ifcopenshell.file(schema="IFC4X3")
+    file.createIfcProject(GlobalId=ifcopenshell.guid.new(), Name="Test")
+    length = ifcopenshell.api.unit.add_si_unit(file, unit_type="LENGTHUNIT")
+    ifcopenshell.api.unit.assign_unit(file, units=[length])
+    basis_alignment = ifcopenshell.api.alignment.create(file, "Basis", include_geometry=True)
+    return file, ifcopenshell.api.alignment.get_curve(basis_alignment)
+
+
+def test_create_as_offset_curve_referent_name_includes_alignment_name():
+    # "<alignment name> <station>" convention, matching create() and
+    # create_as_polyline() after upstream 307836049.
+    file, basis_curve = _make_file_with_basis()
+    offsets = [
+        file.createIfcPointByDistanceExpression(
+            DistanceAlong=file.createIfcLengthMeasure(0.0), OffsetLateral=10.0, BasisCurve=basis_curve
+        ),
+    ]
+    offset_alignment = ifcopenshell.api.alignment.create_as_offset_curve(file, "Offset", offsets, start_station=1000.0)
+    referent = ifcopenshell.api.alignment.get_stationing_nest(file, offset_alignment).RelatedObjects[0]
+    assert referent.Name == "Offset 1+000.000"
+
+
+def test_create_as_offset_curve_refuses_mixed_basis_curves():
+    # Proposed rule from bSI IFC4.x-development #733: all offsets must share
+    # one BasisCurve.
+    file, basis_curve = _make_file_with_basis()
+    other_alignment = ifcopenshell.api.alignment.create(file, "Other", include_geometry=True)
+    other_curve = ifcopenshell.api.alignment.get_curve(other_alignment)
+    offsets = [
+        file.createIfcPointByDistanceExpression(
+            DistanceAlong=file.createIfcLengthMeasure(0.0), OffsetLateral=10.0, BasisCurve=basis_curve
+        ),
+        file.createIfcPointByDistanceExpression(
+            DistanceAlong=file.createIfcLengthMeasure(100.0), OffsetLateral=10.0, BasisCurve=other_curve
+        ),
+    ]
+    try:
+        ifcopenshell.api.alignment.create_as_offset_curve(file, "Offset", offsets)
+        raise AssertionError("expected ValueError for mixed basis curves")
+    except ValueError as e:
+        assert "#733" in str(e)
+
+
+def test_create_as_offset_curve_refuses_non_composite_basis():
+    # Proposed rule from bSI IFC4.x-development #733: basis restricted to the
+    # composite alignment curve types.
+    file, _ = _make_file_with_basis()
+    polyline = file.createIfcPolyline(
+        Points=[file.createIfcCartesianPoint((0.0, 0.0)), file.createIfcCartesianPoint((100.0, 0.0))]
+    )
+    offsets = [
+        file.createIfcPointByDistanceExpression(
+            DistanceAlong=file.createIfcLengthMeasure(0.0), OffsetLateral=10.0, BasisCurve=polyline
+        ),
+    ]
+    try:
+        ifcopenshell.api.alignment.create_as_offset_curve(file, "Offset", offsets)
+        raise AssertionError("expected ValueError for non-composite basis")
+    except ValueError as e:
+        assert "IfcCompositeCurve" in str(e)
+
+
+def test_create_as_offset_curve_refuses_empty_offsets():
+    file, _ = _make_file_with_basis()
+    try:
+        ifcopenshell.api.alignment.create_as_offset_curve(file, "Offset", [])
+        raise AssertionError("expected ValueError for empty offsets")
+    except ValueError:
+        pass
+
+
 test_create_as_offset_curve_honors_start_station_with_a_stationing_referent()
 test_create_as_offset_curve_default_start_station_is_zero()
+test_create_as_offset_curve_referent_name_includes_alignment_name()
+test_create_as_offset_curve_refuses_mixed_basis_curves()
+test_create_as_offset_curve_refuses_non_composite_basis()
+test_create_as_offset_curve_refuses_empty_offsets()

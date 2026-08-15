@@ -42,9 +42,31 @@ def create_as_offset_curve(
     :param file:
     :param name: name assigned to IfcAlignment.Name
     :param offsets: offsets from the basis curve that defines the offset curve, expected to be IfcPointByDistanceExpression.
+        All offsets must reference the same BasisCurve, and that basis must be
+        an IfcCompositeCurve (which includes IfcGradientCurve and
+        IfcSegmentedReferenceCurve) — the rules proposed in buildingSMART
+        IFC4.x-development #733, adopted early so authored files stay valid
+        under the likely future constraints.
     :param start_station: station value at the start of the alignment
     :return: Returns an IfcAlignment
     """
+    if not offsets:
+        raise ValueError("At least one offset point is required")
+
+    # Proposed WHERE rules from bSI IFC4.x-development #733, validated at
+    # authoring time: one shared basis curve, restricted to the composite
+    # alignment curve types.
+    basis_curves = {offset.BasisCurve for offset in offsets}
+    if len(basis_curves) != 1:
+        raise ValueError("All offsets must reference the same BasisCurve (bSI IFC4.x-development #733)")
+    basis_curve = next(iter(basis_curves))
+    if basis_curve is None or not basis_curve.is_a("IfcCompositeCurve"):
+        found = basis_curve.is_a() if basis_curve is not None else "None"
+        raise ValueError(
+            "BasisCurve must be an IfcCompositeCurve, IfcGradientCurve, or "
+            f"IfcSegmentedReferenceCurve, got {found} (bSI IFC4.x-development #733)"
+        )
+
     alignment = file.createIfcAlignment(
         GlobalId=ifcopenshell.guid.new(),
         Name=name,
@@ -52,8 +74,10 @@ def create_as_offset_curve(
 
     _create_offset_curve_representation(file, alignment, offsets)
 
-    # establish the alignment's stationing scheme, same as create() does for start_station
-    referent_name = ifcopenshell.util.alignment.station_as_string(file, start_station)
+    # establish the alignment's stationing scheme, same as create() does for
+    # start_station — including the "<alignment name> <station>" naming
+    # convention introduced upstream (307836049)
+    referent_name = f"{name} {ifcopenshell.util.alignment.station_as_string(file, start_station)}"
     ifcopenshell.api.alignment.add_stationing_referent(file, referent_name, alignment, 0.0, start_station)
 
     # IFC 4.1.4.1.1 Alignment Aggregation To Project

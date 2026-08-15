@@ -125,6 +125,10 @@ def add_vertical_layout(file: ifcopenshell.file, parent_alignment: entity_instan
         # RepresentationIdentifier="Axis" and RepresentationType="Curve3D" for the 2.5D curve.
         # Since the alignment is transitioning from horizontal only to horizontal+vertical, the
         # RepresentationIdentifier must change from "Axis" to "FootPrint"
+        # IFC 4.4 WATCH (bSI IFC4.x-development PR #1113, TM11): the drafted 4.4
+        # WHERE rule allows ONLY RepresentationIdentifier="Axis" (Curve2D or
+        # Curve3D) on IfcAlignment — if it lands as written, this FootPrint
+        # rename becomes a schema-versioned switch (4.3: FootPrint; 4.4: Axis).
         representations = ifcopenshell.util.representation.get_representations_iter(parent_alignment)
         for representation in representations:
             if representation.RepresentationIdentifier == "Axis" and representation.RepresentationType == "Curve2D":
