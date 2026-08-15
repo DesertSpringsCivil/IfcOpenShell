@@ -25,9 +25,12 @@ alignment-related operations, such as PI editing.
 import bpy
 import blf
 import gpu
+import math
 import bonsai.tool as tool
 from bpy.types import SpaceView3D
+from bpy_extras.view3d_utils import location_3d_to_region_2d
 from gpu_extras.batch import batch_for_shader
+from bonsai.tool.alignment import ProfileViewTransform
 
 
 class PIEditDecorator:
@@ -49,13 +52,18 @@ class PIEditDecorator:
     # References to PI empty objects
     pi_empties = []
 
+    # Whether to draw tangent-slide grab handles (spec 1.3, "T" key)
+    show_tangent_handles = False
+
     # Colors
     COLOR_TANGENT_LINE = (1.0, 0.9, 0.2, 1.0)  # Yellow for tangent lines
     COLOR_HUD_TEXT = (1.0, 1.0, 1.0, 1.0)  # White for HUD text
     COLOR_EDIT_MODE_BG = (0.2, 0.4, 0.8, 0.8)  # Blue tint for edit mode indicator
+    COLOR_TANGENT_HANDLE = (1.0, 0.3, 0.85, 1.0)  # Magenta for tangent-slide handles
 
     # Drawing parameters
     LINE_WIDTH = 2.5
+    HANDLE_POINT_SIZE = 11.0
 
     @classmethod
     def install(cls, context, pi_empties):
@@ -76,9 +84,7 @@ class PIEditDecorator:
             SpaceView3D.draw_handler_add(handler.draw_tangent_lines_3d, (context,), "WINDOW", "POST_VIEW")
         )
         # POST_PIXEL for 2D screen-space drawing (HUD)
-        cls.handlers.append(
-            SpaceView3D.draw_handler_add(handler.draw_hud, (context,), "WINDOW", "POST_PIXEL")
-        )
+        cls.handlers.append(SpaceView3D.draw_handler_add(handler.draw_hud, (context,), "WINDOW", "POST_PIXEL"))
         cls.is_installed = True
 
     @classmethod
@@ -92,6 +98,7 @@ class PIEditDecorator:
         cls.handlers = []
         cls.is_installed = False
         cls.pi_empties = []
+        cls.show_tangent_handles = False
 
     @classmethod
     def update_positions(cls, pi_empties):
@@ -101,6 +108,11 @@ class PIEditDecorator:
             pi_empties: Updated list of PI EMPTY objects
         """
         cls.pi_empties = pi_empties
+
+    @classmethod
+    def set_tangent_handles_visible(cls, visible: bool):
+        """Toggle drawing of tangent-slide grab handles (spec 1.3, "T" key)."""
+        cls.show_tangent_handles = visible
 
     def draw_batch_3d(self, shader_type, content_pos, color, indices=None):
         """Draw a batch of 3D primitives using GPU shader.
@@ -150,6 +162,25 @@ class PIEditDecorator:
         # Draw lines
         self.draw_batch_3d("LINES", positions, self.COLOR_TANGENT_LINE, edges)
 
+        # Tangent-slide grab handles (spec 1.3, "T" key) — one per tangent
+        # chord midpoint, shown only while tangent-slide mode is armed.
+        if PIEditDecorator.show_tangent_handles and len(positions) >= 2:
+            midpoints = [
+                (
+                    (positions[i][0] + positions[i + 1][0]) / 2.0,
+                    (positions[i][1] + positions[i + 1][1]) / 2.0,
+                    (positions[i][2] + positions[i + 1][2]) / 2.0,
+                )
+                for i in range(len(positions) - 1)
+            ]
+            if tool.Blender.validate_shader_batch_data(midpoints, None):
+                gpu.state.point_size_set(self.HANDLE_POINT_SIZE)
+                shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+                batch = batch_for_shader(shader, "POINTS", {"pos": midpoints})
+                shader.bind()
+                shader.uniform_float("color", self.COLOR_TANGENT_HANDLE)
+                batch.draw(shader)
+
         # Restore state
         gpu.state.blend_set("NONE")
         gpu.state.depth_test_set("NONE")
@@ -182,6 +213,11 @@ class PIEditDecorator:
             f"PIs: {valid_count}",
             "",
             "G: Move selected PI",
+            "I: Insert PI on tangent",
+            "X: Delete nearest PI",
+            "C: Add curve   Alt+C: Delete curve",
+            "T: Tangent slide" + (" (ON)" if PIEditDecorator.show_tangent_handles else ""),
+            "",
             "ENTER: Apply changes",
             "ESC: Cancel",
         ]
@@ -189,5 +225,614 @@ class PIEditDecorator:
         for i, line in enumerate(instructions):
             blf.position(font_id, margin, y_pos - (i * line_height), 0)
             blf.draw(font_id, line)
+
+        blf.disable(font_id, blf.SHADOW)
+
+
+class ProfileViewDecorator:
+    """2D profile-view overlay (D2): a station-vs-elevation plot at the bottom
+    of the 3D viewport.
+
+    Shows the existing-ground (terrain) profile, the design profile, PVI
+    markers, and a labelled grid — the visualization engineers actually use to
+    design vertical alignments. Drawn in POST_PIXEL (window pixel space, origin
+    bottom-left), following Bonsai's drawing-decoration idiom.
+
+    Profile data is sampled from the tool layer on install / ``refresh`` and
+    cached on the class; the screen transform is rebuilt every frame so the
+    plot follows viewport resizing. The interactive editor reads the same
+    cached transform via ``current_transform`` to map mouse -> (station, elev).
+    """
+
+    is_installed = False
+    handlers = []
+
+    # Live configuration (set on install)
+    alignment_id = 0
+    terrain_name = ""
+    interval = 10.0
+    panel_height = 260
+    # 0 = auto-fit; > 0 locks vertical scale to N× the horizontal scale.
+    vertical_exaggeration = 0.0
+
+    # Cached sampled data (data space: lists of (station, elevation))
+    design_points = []
+    terrain_points = []
+    pvi_points = []
+
+    # Formatted station labels keyed by rounded station — populated lazily
+    # during draw so the (unit-dependent) formatter runs once per tick value,
+    # not once per frame. Cleared on refresh().
+    station_labels = {}
+
+    # Live edit preview (tangent polyline through the PVIs being dragged); when
+    # set, it is drawn over the design profile. None when not editing.
+    preview_points = None
+
+    # Last transform built during draw — used by the interactive PVI editor to
+    # convert mouse position to (station, elevation).
+    current_transform = None
+
+    # ---- Cant band (spec 3.4, display-only) ----
+    # When the alignment has a cant layout with >= 2 points, the panel rect
+    # splits into the profile (upper) and a cant band (lower), sharing
+    # MARGIN_LEFT/RIGHT and the station axis. Cached on refresh(); read-only
+    # config (design_speed/track_gauge/cant_limit_max_applied) is set
+    # externally by install()/CIVIL_OT_refresh_profile_view, mirroring how
+    # vertical_exaggeration is threaded through.
+    has_cant = False
+    cant_points_data = []  # [{"station","cant_left","cant_right","transition_type"}, ...]
+    design_speed = 0.0
+    track_gauge = 1.435
+    cant_limit_max_applied = 0.160
+    CANT_BAND_FRACTION = 0.30  # lower ~30% of the panel height
+    CANT_BAND_MIN_HEIGHT = 70
+
+    # Layout (pixels)
+    MARGIN_LEFT = 64
+    MARGIN_RIGHT = 24
+    MARGIN_BOTTOM = 28
+    PADDING_TOP = 26
+
+    # Colors (RGBA)
+    COLOR_BG = (0.08, 0.09, 0.11, 0.86)
+    COLOR_FRAME = (0.50, 0.50, 0.55, 1.0)
+    COLOR_GRID = (0.24, 0.26, 0.30, 1.0)
+    COLOR_TERRAIN = (0.70, 0.45, 0.22, 1.0)  # brown
+    COLOR_DESIGN = (0.20, 0.80, 0.95, 1.0)  # cyan
+    COLOR_PVI = (1.0, 0.85, 0.15, 1.0)  # yellow
+    COLOR_TEXT = (0.88, 0.88, 0.90, 1.0)
+    COLOR_CANT_LEFT = (0.95, 0.55, 0.15, 1.0)  # orange
+    COLOR_CANT_RIGHT = (0.35, 0.75, 1.0, 1.0)  # light blue
+    COLOR_CANT_EQUILIBRIUM = (0.85, 0.85, 0.20, 1.0)  # yellow — equilibrium cant
+    COLOR_CANT_ZERO = (0.55, 0.55, 0.58, 1.0)
+    COLOR_CANT_LIMIT = (0.9, 0.3, 0.3, 0.45)  # faint red
+
+    @classmethod
+    def install(
+        cls,
+        context,
+        alignment_id,
+        terrain_obj,
+        interval,
+        panel_height,
+        vertical_exaggeration=0.0,
+        design_speed=0.0,
+        track_gauge=1.435,
+        cant_limit_max_applied=0.160,
+    ):
+        if cls.is_installed:
+            cls.uninstall()
+        cls.alignment_id = alignment_id
+        cls.terrain_name = terrain_obj.name if terrain_obj else ""
+        cls.interval = interval
+        cls.panel_height = panel_height
+        cls.vertical_exaggeration = vertical_exaggeration
+        cls.design_speed = design_speed
+        cls.track_gauge = track_gauge
+        cls.cant_limit_max_applied = cant_limit_max_applied
+        cls.refresh()
+        handler = cls()
+        cls.handlers.append(SpaceView3D.draw_handler_add(handler.draw_profile, (context,), "WINDOW", "POST_PIXEL"))
+        cls.is_installed = True
+
+    @classmethod
+    def uninstall(cls):
+        for handler in cls.handlers:
+            try:
+                SpaceView3D.draw_handler_remove(handler, "WINDOW")
+            except ValueError:
+                pass
+        cls.handlers = []
+        cls.is_installed = False
+        cls.current_transform = None
+        cls.preview_points = None
+
+    @classmethod
+    def refresh(cls):
+        """Re-sample the design + terrain profiles, PVI markers, and (when
+        present) the cant point table — all from IFC."""
+        cls.design_points = []
+        cls.terrain_points = []
+        cls.pvi_points = []
+        cls.station_labels = {}
+        cls.has_cant = False
+        cls.cant_points_data = []
+
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None or not cls.alignment_id:
+            return
+        try:
+            alignment = ifc_file.by_id(cls.alignment_id)
+        except RuntimeError:
+            return
+        if not alignment.is_a("IfcAlignment"):
+            return
+
+        cls.design_points = tool.Alignment.sample_design_profile(alignment, cls.interval)
+
+        terrain_obj = bpy.data.objects.get(cls.terrain_name) if cls.terrain_name else None
+        if terrain_obj is not None:
+            cls.terrain_points = tool.Alignment.sample_terrain_profile(alignment, terrain_obj, cls.interval)
+
+        if tool.Alignment.get_vertical_layout(alignment) is not None:
+            try:
+                pvis = tool.Alignment.back_calculate_pvis_from_vertical(alignment)
+                cls.pvi_points = [(p["station"], p["elevation"]) for p in pvis]
+            except (ValueError, KeyError):
+                cls.pvi_points = []
+
+        if tool.Alignment.get_cant_layout(alignment) is not None:
+            cant_points = tool.Alignment.back_calculate_cant_points_from_layout(alignment)
+            if len(cant_points) >= 2:
+                cls.has_cant = True
+                cls.cant_points_data = cant_points
+
+    # ------------------------------------------------------------------ draw
+
+    def draw_profile(self, context):
+        region = context.region
+        if region is None:
+            return
+        cls = ProfileViewDecorator
+        panel_h = max(int(cls.panel_height), 120)
+        width = region.width
+
+        gpu.state.blend_set("ALPHA")
+        self._draw_quad(0, 0, width, panel_h, cls.COLOR_BG)
+        self._draw_text(cls.MARGIN_LEFT, panel_h - 19, "Profile View — Station vs Elevation", cls.COLOR_TEXT, size=12)
+
+        # When cant data is present, split the panel into the profile band
+        # (upper ~70%) and a cant band (lower ~30%), sharing MARGIN_LEFT/
+        # RIGHT and the station axis (spec 3.4). show_cant is also re-checked
+        # after the profile transform is known — an empty/too-thin cant band
+        # is silently skipped rather than drawn broken.
+        show_cant = cls.has_cant and len(cls.cant_points_data) >= 2
+        cant_band_h = 0
+        if show_cant:
+            cant_band_h = max(cls.CANT_BAND_MIN_HEIGHT, int(panel_h * cls.CANT_BAND_FRACTION))
+            if panel_h - cant_band_h < 120:
+                # Not enough room left for a usable profile band — skip the cant band.
+                cant_band_h = 0
+                show_cant = False
+
+        rect_x = cls.MARGIN_LEFT
+        rect_y = cant_band_h + cls.MARGIN_BOTTOM
+        rect_w = width - cls.MARGIN_LEFT - cls.MARGIN_RIGHT
+        rect_h = panel_h - cant_band_h - cls.MARGIN_BOTTOM - cls.PADDING_TOP
+        if rect_w < 80 or rect_h < 40:
+            gpu.state.blend_set("NONE")
+            return
+
+        transform = tool.Alignment.build_profile_view_transform(
+            cls.design_points,
+            cls.terrain_points,
+            rect_x,
+            rect_y,
+            rect_w,
+            rect_h,
+            vertical_exaggeration=cls.vertical_exaggeration,
+        )
+        cls.current_transform = transform
+        if transform is None:
+            self._draw_text(
+                rect_x + 10,
+                rect_y + rect_h / 2,
+                "No profile data — add a vertical alignment or designate terrain, then Refresh.",
+                cls.COLOR_TEXT,
+            )
+            gpu.state.blend_set("NONE")
+            return
+
+        self._draw_grid(region, transform)
+        self._draw_frame(region, transform)
+
+        if len(cls.terrain_points) >= 2:
+            verts = [(*transform.data_to_screen(s, e), 0.0) for (s, e) in cls.terrain_points]
+            self._draw_lines(region, verts, [(i, i + 1) for i in range(len(verts) - 1)], cls.COLOR_TERRAIN, 2.0)
+
+        if len(cls.design_points) >= 2:
+            verts = [(*transform.data_to_screen(s, e), 0.0) for (s, e) in cls.design_points]
+            self._draw_lines(region, verts, [(i, i + 1) for i in range(len(verts) - 1)], cls.COLOR_DESIGN, 2.5)
+
+        # Live edit preview (tangent polyline through the dragged PVIs).
+        if cls.preview_points and len(cls.preview_points) >= 2:
+            verts = [(*transform.data_to_screen(s, e), 0.0) for (s, e) in cls.preview_points]
+            self._draw_lines(region, verts, [(i, i + 1) for i in range(len(verts) - 1)], (1.0, 0.3, 0.8, 1.0), 1.5)
+
+        pvi_verts = [(*transform.data_to_screen(s, e), 0.0) for (s, e) in cls.pvi_points]
+        self._draw_points(pvi_verts, cls.COLOR_PVI, 9.0)
+        for (station, elevation), vert in zip(cls.pvi_points, pvi_verts):
+            self._draw_text(vert[0] + 6, vert[1] + 7, f"{elevation:.2f}", cls.COLOR_PVI, size=10)
+
+        # Legend
+        legend_x = rect_x + rect_w - 150
+        legend_y = rect_y + rect_h - 14
+        self._draw_text(legend_x, legend_y, "— Design", cls.COLOR_DESIGN, size=10)
+        if cls.terrain_points:
+            self._draw_text(legend_x, legend_y - 15, "— Terrain", cls.COLOR_TERRAIN, size=10)
+
+        if show_cant:
+            self._draw_cant_band(region, rect_x, rect_w, cant_band_h, transform)
+
+        gpu.state.blend_set("NONE")
+
+    def _draw_cant_band(self, region, rect_x, rect_w, band_h, station_transform):
+        """Draw the cant band (spec 3.4): applied cant L/R + equilibrium cant
+        polylines, a zero line, and faint max-applied-cant limit lines.
+        Display-only — shares MARGIN_LEFT/RIGHT and the station axis with
+        the profile band above via ``station_transform``.
+        """
+        cls = ProfileViewDecorator
+        rect_y = cls.MARGIN_BOTTOM
+        rect_h = band_h - cls.MARGIN_BOTTOM - 16
+        if rect_w < 80 or rect_h < 30:
+            return
+
+        stations = self._linspace(station_transform.station_min, station_transform.station_max, 60)
+        samples = tool.Alignment.sample_cant_profile(cls.cant_points_data, stations)
+
+        alignment = None
+        ifc_file = tool.Ifc.get()
+        if ifc_file is not None and cls.alignment_id:
+            try:
+                alignment = ifc_file.by_id(cls.alignment_id)
+            except RuntimeError:
+                alignment = None
+
+        equilibrium_points = []
+        if alignment is not None:
+            is_imperial = tool.Alignment.is_imperial_project()
+            for station in stations:
+                radius = tool.Alignment.radius_at_station(alignment, station)
+                e_eq = tool.Alignment.cant_equilibrium(cls.design_speed, radius, cls.track_gauge, is_imperial)
+                equilibrium_points.append((station, e_eq))
+
+        applied_lefts = [s[1] for s in samples]
+        applied_rights = [s[2] for s in samples]
+        equilibrium_values = [p[1] for p in equilibrium_points]
+        limit = cls.cant_limit_max_applied
+        all_values = applied_lefts + applied_rights + equilibrium_values + [0.0, limit, -limit]
+        cant_min, cant_max = min(all_values), max(all_values)
+        pad = ((cant_max - cant_min) or 0.01) * 0.15
+        cant_min -= pad
+        cant_max += pad
+
+        cant_transform = ProfileViewTransform(
+            station_min=station_transform.station_min,
+            station_max=station_transform.station_max,
+            elevation_min=cant_min,
+            elevation_max=cant_max,
+            rect_x=rect_x,
+            rect_y=rect_y,
+            rect_width=rect_w,
+            rect_height=rect_h,
+        )
+
+        self._draw_grid(region, cant_transform)
+        self._draw_frame(region, cant_transform)
+        self._draw_text(rect_x, rect_y + rect_h - 14, "Cant — applied vs equilibrium", cls.COLOR_TEXT, size=11)
+
+        zx0, zy0 = cant_transform.data_to_screen(cant_transform.station_min, 0.0)
+        zx1, zy1 = cant_transform.data_to_screen(cant_transform.station_max, 0.0)
+        self._draw_lines(region, [(zx0, zy0, 0.0), (zx1, zy1, 0.0)], [(0, 1)], cls.COLOR_CANT_ZERO, 1.0)
+
+        for limit_value in (limit, -limit):
+            lx0, ly0 = cant_transform.data_to_screen(cant_transform.station_min, limit_value)
+            lx1, ly1 = cant_transform.data_to_screen(cant_transform.station_max, limit_value)
+            self._draw_lines(region, [(lx0, ly0, 0.0), (lx1, ly1, 0.0)], [(0, 1)], cls.COLOR_CANT_LIMIT, 1.0)
+
+        if len(samples) >= 2:
+            left_verts = [(*cant_transform.data_to_screen(s, left), 0.0) for s, left, right in samples]
+            self._draw_lines(
+                region, left_verts, [(i, i + 1) for i in range(len(left_verts) - 1)], cls.COLOR_CANT_LEFT, 2.0
+            )
+            right_verts = [(*cant_transform.data_to_screen(s, right), 0.0) for s, left, right in samples]
+            self._draw_lines(
+                region, right_verts, [(i, i + 1) for i in range(len(right_verts) - 1)], cls.COLOR_CANT_RIGHT, 2.0
+            )
+
+        if len(equilibrium_points) >= 2:
+            eq_verts = [(*cant_transform.data_to_screen(s, e), 0.0) for s, e in equilibrium_points]
+            self._draw_lines(
+                region, eq_verts, [(i, i + 1) for i in range(len(eq_verts) - 1)], cls.COLOR_CANT_EQUILIBRIUM, 1.5
+            )
+
+        legend_x = rect_x + rect_w - 190
+        legend_y = rect_y + rect_h - 14
+        self._draw_text(legend_x, legend_y, "— Left", cls.COLOR_CANT_LEFT, size=9)
+        self._draw_text(legend_x + 55, legend_y, "— Right", cls.COLOR_CANT_RIGHT, size=9)
+        self._draw_text(legend_x + 120, legend_y, "— E_eq", cls.COLOR_CANT_EQUILIBRIUM, size=9)
+
+    @staticmethod
+    def _linspace(start, stop, count):
+        """Return ``count`` evenly spaced values from ``start`` to ``stop``
+        inclusive. Returns ``[start]`` for a degenerate (empty/zero-span)
+        range."""
+        if count <= 1 or stop <= start:
+            return [start]
+        step = (stop - start) / (count - 1)
+        return [start + i * step for i in range(count)]
+
+    # --------------------------------------------------------------- helpers
+
+    def _draw_grid(self, region, transform):
+        cls = ProfileViewDecorator
+        station_step = self._nice_step(transform.station_max - transform.station_min, 8)
+        elevation_step = self._nice_step(transform.elevation_max - transform.elevation_min, 5)
+
+        verts = []
+        indices = []
+        if station_step:
+            station = math.ceil(transform.station_min / station_step) * station_step
+            while station <= transform.station_max + 1e-9:
+                px, _ = transform.data_to_screen(station, transform.elevation_min)
+                base = len(verts)
+                verts.append((px, transform.rect_y, 0.0))
+                verts.append((px, transform.rect_y + transform.rect_height, 0.0))
+                indices.append((base, base + 1))
+                self._draw_text(px - 14, transform.rect_y - 15, self._station_label(station), cls.COLOR_TEXT, size=9)
+                station += station_step
+        if elevation_step:
+            elevation = math.ceil(transform.elevation_min / elevation_step) * elevation_step
+            while elevation <= transform.elevation_max + 1e-9:
+                _, py = transform.data_to_screen(transform.station_min, elevation)
+                base = len(verts)
+                verts.append((transform.rect_x, py, 0.0))
+                verts.append((transform.rect_x + transform.rect_width, py, 0.0))
+                indices.append((base, base + 1))
+                self._draw_text(transform.rect_x - 52, py - 4, self._fmt(elevation), cls.COLOR_TEXT, size=9)
+                elevation += elevation_step
+        self._draw_lines(region, verts, indices, cls.COLOR_GRID, 1.0)
+
+    def _draw_frame(self, region, transform):
+        x0, y0 = transform.rect_x, transform.rect_y
+        x1, y1 = transform.rect_x + transform.rect_width, transform.rect_y + transform.rect_height
+        verts = [(x0, y0, 0.0), (x1, y0, 0.0), (x1, y1, 0.0), (x0, y1, 0.0)]
+        self._draw_lines(region, verts, [(0, 1), (1, 2), (2, 3), (3, 0)], ProfileViewDecorator.COLOR_FRAME, 1.5)
+
+    def _draw_lines(self, region, verts, indices, color, width=1.0):
+        if len(verts) < 2 or not indices:
+            return
+        shader = gpu.shader.from_builtin("POLYLINE_UNIFORM_COLOR")
+        shader.bind()
+        shader.uniform_float("viewportSize", (region.width, region.height))
+        shader.uniform_float("lineWidth", width)
+        batch = batch_for_shader(shader, "LINES", {"pos": verts}, indices=indices)
+        shader.uniform_float("color", color)
+        batch.draw(shader)
+
+    def _draw_quad(self, x0, y0, x1, y1, color):
+        verts = [(x0, y0, 0.0), (x1, y0, 0.0), (x1, y1, 0.0), (x0, y1, 0.0)]
+        shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+        batch = batch_for_shader(shader, "TRIS", {"pos": verts}, indices=[(0, 1, 2), (0, 2, 3)])
+        shader.bind()
+        shader.uniform_float("color", color)
+        batch.draw(shader)
+
+    def _draw_points(self, verts, color, size=8.0):
+        if not verts:
+            return
+        gpu.state.point_size_set(size)
+        shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+        batch = batch_for_shader(shader, "POINTS", {"pos": verts})
+        shader.bind()
+        shader.uniform_float("color", color)
+        batch.draw(shader)
+
+    def _draw_text(self, x, y, text, color, size=11):
+        font_id = 0
+        blf.size(font_id, tool.Blender.scale_font_size(size))
+        blf.color(font_id, *color)
+        blf.position(font_id, x, y, 0)
+        blf.draw(font_id, text)
+
+    @staticmethod
+    def _nice_step(span, target_count):
+        """Return a 1/2/5 x 10^n step giving roughly ``target_count`` divisions."""
+        if span <= 0 or target_count <= 0:
+            return 0.0
+        raw = span / target_count
+        magnitude = 10 ** math.floor(math.log10(raw)) if raw > 0 else 1.0
+        normalized = raw / magnitude
+        if normalized < 1.5:
+            nice = 1.0
+        elif normalized < 3.0:
+            nice = 2.0
+        elif normalized < 7.0:
+            nice = 5.0
+        else:
+            nice = 10.0
+        return nice * magnitude
+
+    @classmethod
+    def _station_label(cls, station):
+        """Project-notation station label, cached per tick value."""
+        key = round(station, 4)
+        label = cls.station_labels.get(key)
+        if label is None:
+            try:
+                label = tool.Alignment.format_station(station)
+            except Exception:
+                label = cls._fmt(station)
+            cls.station_labels[key] = label
+        return label
+
+    @staticmethod
+    def _fmt(value):
+        return f"{value:.0f}" if abs(value) >= 100 else f"{value:.1f}"
+
+
+class StationTickDecorator:
+    """Station tick + label overlay (spec 4.1): perpendicular tick marks and
+    station-notation labels drawn along the active alignment at
+    ``CivilAlignmentProperties.station_interval`` spacing, toggled by
+    ``show_station_labels``.
+
+    Viewport decoration only — never model data (mirrors ProfileViewDecorator's
+    framing docstring). Ticks are sampled from ``tool.Alignment.
+    get_station_ticks`` (which itself degrades to ``[]`` without the
+    geometry engine — spec 4.1's "Geometry-graceful" requirement) and
+    cached on the class; ``tool.Alignment.commit_layout_change`` calls
+    ``refresh()`` whenever this decorator is installed, so a live PI/PVI/
+    cant edit keeps ticks in sync with whatever segments actually landed on
+    IFC.
+
+    Simplification vs spec 4.1 ("toggled per alignment; any number may
+    display at once"): this first pass ties the toggle + cache to the
+    single ACTIVE alignment (``CivilAlignmentProperties.active_alignment_id``),
+    like every other Saikei viewport overlay (profile view, cant band).
+    Multi-alignment simultaneous display is a straightforward extension —
+    key the cache by alignment id instead of a single alignment_id/ticks
+    pair — deferred as out of scope for this pass. Likewise, switching the
+    active alignment while the overlay is on does not automatically
+    re-target it (the same limitation ProfileViewDecorator has); re-toggle
+    ``show_station_labels`` or trigger a commit to refresh onto the new
+    alignment.
+    """
+
+    is_installed = False
+    handlers = []
+
+    alignment_id = 0
+    interval = 100.0
+
+    # Cached ticks: [(position_xyz, direction_xyz, station), ...] — see
+    # tool.Alignment.get_station_ticks for the exact contract.
+    ticks = []
+
+    # Half-length of each tick mark, in Blender viewport units (metres).
+    TICK_HALF_LENGTH = 3.0
+
+    COLOR_TICK = (0.9, 0.9, 0.2, 1.0)
+    COLOR_LABEL = (0.95, 0.95, 0.95, 1.0)
+
+    @classmethod
+    def install(cls, context, alignment_id, interval):
+        if cls.is_installed:
+            cls.uninstall()
+        cls.alignment_id = alignment_id
+        cls.interval = interval
+        cls.refresh()
+        handler = cls()
+        cls.handlers.append(SpaceView3D.draw_handler_add(handler.draw_ticks_3d, (context,), "WINDOW", "POST_VIEW"))
+        cls.handlers.append(SpaceView3D.draw_handler_add(handler.draw_labels, (context,), "WINDOW", "POST_PIXEL"))
+        cls.is_installed = True
+
+    @classmethod
+    def uninstall(cls):
+        for handler in cls.handlers:
+            try:
+                SpaceView3D.draw_handler_remove(handler, "WINDOW")
+            except ValueError:
+                pass
+        cls.handlers = []
+        cls.is_installed = False
+        cls.ticks = []
+
+    @classmethod
+    def refresh(cls):
+        """Re-sample ticks from IFC for ``alignment_id`` at ``interval``.
+
+        Silently leaves ``ticks`` empty (never raises) when there is no IFC
+        file, no active alignment, the alignment no longer exists, or the
+        geometry engine is unavailable — ``tool.Alignment.get_station_ticks``
+        already degrades gracefully for all of those.
+        """
+        cls.ticks = []
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None or not cls.alignment_id:
+            return
+        try:
+            alignment = ifc_file.by_id(cls.alignment_id)
+        except RuntimeError:
+            return
+        if not alignment.is_a("IfcAlignment"):
+            return
+        cls.ticks = tool.Alignment.get_station_ticks(alignment, cls.interval)
+
+    def draw_ticks_3d(self, context):
+        cls = StationTickDecorator
+        if not cls.ticks:
+            return
+
+        verts = []
+        indices = []
+        for position, direction, _station in cls.ticks:
+            perp_x, perp_y = -direction[1], direction[0]
+            length = math.hypot(perp_x, perp_y)
+            if length < 1e-9:
+                # Vertical tangent (straight up/down) — no plan-view
+                # perpendicular to draw a tick along; skip it.
+                continue
+            perp_x, perp_y = perp_x / length, perp_y / length
+            half = cls.TICK_HALF_LENGTH
+            base = len(verts)
+            verts.append((position[0] - perp_x * half, position[1] - perp_y * half, position[2]))
+            verts.append((position[0] + perp_x * half, position[1] + perp_y * half, position[2]))
+            indices.append((base, base + 1))
+
+        if not tool.Blender.validate_shader_batch_data(verts, indices):
+            return
+
+        gpu.state.blend_set("ALPHA")
+        gpu.state.depth_test_set("LESS_EQUAL")
+        gpu.state.depth_mask_set(False)
+
+        shader = gpu.shader.from_builtin("POLYLINE_UNIFORM_COLOR")
+        shader.bind()
+        region = context.region
+        shader.uniform_float("viewportSize", (region.width, region.height))
+        shader.uniform_float("lineWidth", 1.5)
+        batch = batch_for_shader(shader, "LINES", {"pos": verts}, indices=indices)
+        shader.uniform_float("color", cls.COLOR_TICK)
+        batch.draw(shader)
+
+        gpu.state.blend_set("NONE")
+        gpu.state.depth_test_set("NONE")
+        gpu.state.depth_mask_set(True)
+
+    def draw_labels(self, context):
+        cls = StationTickDecorator
+        if not cls.ticks:
+            return
+        region = context.region
+        rv3d = context.region_data
+        if region is None or rv3d is None:
+            return
+
+        font_id = 0
+        blf.size(font_id, tool.Blender.scale_font_size(11))
+        blf.enable(font_id, blf.SHADOW)
+        blf.shadow(font_id, 5, 0, 0, 0, 1)
+        blf.color(font_id, *cls.COLOR_LABEL)
+
+        for position, _direction, station in cls.ticks:
+            screen = location_3d_to_region_2d(region, rv3d, position)
+            if screen is None:
+                continue  # behind the camera / off-screen
+            label = tool.Alignment.format_station(station)
+            blf.position(font_id, screen[0] + 4, screen[1] + 4, 0)
+            blf.draw(font_id, label)
 
         blf.disable(font_id, blf.SHADOW)
