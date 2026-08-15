@@ -830,7 +830,11 @@ class Alignment:
         return end_gradient > start_gradient
 
     @classmethod
-    def back_calculate_pvis_from_vertical(cls, alignment: "ifcopenshell.entity_instance") -> List[dict]:
+    def back_calculate_pvis_from_vertical(
+        cls,
+        alignment: "ifcopenshell.entity_instance",
+        vertical_layout: Optional["ifcopenshell.entity_instance"] = None,
+    ) -> List[dict]:
         """Reverse-engineer PVI positions from IFC vertical alignment segments.
 
         Reconstructs the original PVI table from CONSTANTGRADIENT and
@@ -839,7 +843,16 @@ class Alignment:
         elevation = BVC_elevation + g1 * (L/2).
 
         Args:
-            alignment: The IfcAlignment entity
+            alignment: The IfcAlignment entity (used to resolve the default
+                vertical layout when ``vertical_layout`` is None, and for
+                error messages).
+            vertical_layout: Explicit IfcAlignmentVertical to read from
+                (spec 2.1's multi-vertical selector) -- lets a caller target
+                a design-alternative vertical nested on a CHILD alignment,
+                which ``align_api.get_vertical_layout(alignment)`` (a
+                first-match scan of ``alignment``'s own nest) would never
+                find. None (the default) preserves the original behavior:
+                resolve the vertical nested directly on ``alignment``.
 
         Returns:
             List of dicts, each containing:
@@ -848,11 +861,12 @@ class Alignment:
             - "curve_length": float — vertical curve length (0 for endpoints)
 
         Raises:
-            ValueError: If alignment has no vertical layout or no real segments
+            ValueError: If no vertical layout can be resolved, or it has no
+                real segments
         """
         import ifcopenshell.api.alignment as align_api
 
-        v_layout = align_api.get_vertical_layout(alignment)
+        v_layout = vertical_layout if vertical_layout is not None else align_api.get_vertical_layout(alignment)
         if v_layout is None:
             raise ValueError(f"Alignment #{alignment.id()} has no vertical layout")
 
@@ -4061,18 +4075,28 @@ class Alignment:
         if one is currently installed, so station ticks stay in sync with
         the segments that were just (re)written.
 
+        Also resyncs every offset alignment recorded against ``alignment``
+        (spec 1.7's "Updates with the parent") via
+        ``resync_offset_alignments`` -- purely semantic (no geometry engine
+        needed), so it always runs, unlike the key-point referent loop
+        above.
+
         Returns:
             Total count of key-point referents (re)created across all
             layouts that were successfully processed (0 if none were, e.g.
-            no geometry engine available anywhere).
+            no geometry engine available anywhere). Does NOT include the
+            offset-alignment resync count -- see ``resync_offset_alignments``
+            directly if that count is needed.
         """
         import ifcopenshell.api.alignment as align_api
 
         ifc_file = tool.Ifc.get()
         total = 0
 
-        for get_layout in (cls.get_horizontal_layout, cls.get_vertical_layout, cls.get_cant_layout):
-            layout = get_layout(alignment)
+        layouts_to_process = [cls.get_horizontal_layout(alignment), cls.get_cant_layout(alignment)]
+        layouts_to_process.extend(cls.get_vertical_layouts(alignment))
+
+        for layout in layouts_to_process:
             if layout is None:
                 continue
             existing_nest = cls._get_tracked_nest(layout, cls._KEY_POINT_NEST_PROP)
@@ -4090,6 +4114,8 @@ class Alignment:
         tick_decorator = alignment_decorator.StationTickDecorator
         if tick_decorator.is_installed:
             tick_decorator.refresh()
+
+        cls.resync_offset_alignments(alignment)
 
         return total
 
@@ -4417,3 +4443,548 @@ class Alignment:
             ifcopenshell.util.element.remove_deep2(ifc_file, object_placement)
 
         ifc_file.remove(referent)
+
+    # =========================================================================
+    # Offset Alignments (spec 1.7)
+    # =========================================================================
+    # An offset alignment is a bare IfcAlignment whose ONLY representation is
+    # an IfcOffsetCurveByDistances riding on the parent's current curve
+    # (whatever align_api.get_curve(parent) returns -- IfcCompositeCurve for
+    # horizontal-only, IfcGradientCurve once a vertical exists, etc). It has
+    # no layouts of its own (no PI/PVI table), so create_hierarchy_for_
+    # alignment degrades gracefully to just the root Empty -- there are no
+    # nested IfcAlignmentHorizontal/Vertical/Cant to walk.
+    #
+    # "Updates with the parent" (spec 1.7) is implemented as a resync funnel:
+    # the offset's recorded spec (Pset_SaikeiOffset) is the source of truth,
+    # and resync_offset_alignments() rebuilds the IfcPointByDistanceExpression
+    # table from it against the parent's CURRENT curve + extent every time
+    # commit_layout_change() runs for the parent.
+
+    _OFFSET_PSET = "Pset_SaikeiOffset"
+
+    @classmethod
+    def get_curve_for_alignment(cls, alignment: "ifcopenshell.entity_instance"):
+        """Return ``alignment``'s top-level geometric representation curve
+        (IfcPolyLine/IfcIndexedPolyCurve/IfcCompositeCurve/IfcGradientCurve/
+        IfcSegmentedReferenceCurve/IfcOffsetCurveByDistances, depending on
+        what's present), or None. Thin wrapper over ``align_api.get_curve``
+        so core never has to import ``ifcopenshell.api`` directly.
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        return align_api.get_curve(alignment)
+
+    @classmethod
+    def _build_offset_points(
+        cls,
+        ifc_file: "ifcopenshell.file",
+        basis_curve: "ifcopenshell.entity_instance",
+        offset_spec: dict,
+        extent: float,
+    ) -> List["ifcopenshell.entity_instance"]:
+        """Build the ``IfcPointByDistanceExpression`` list an
+        ``IfcOffsetCurveByDistances`` needs, from an offset spec dict and
+        the parent's CURRENT horizontal extent (spec 1.7).
+
+        ``offset_spec`` is ``{"mode": "CONSTANT", "offset": float}`` or
+        ``{"mode": "TAPER", "start_offset": float, "end_offset": float,
+        "station_from": float, "station_to": float}`` -- "station" here
+        follows the same convention as the cant point table
+        (``write_cant_segments``): a 0-based DISTANCE-ALONG the alignment,
+        not a true engineering station offset by start_station.
+
+        CONSTANT produces two points holding the same offset across the
+        whole extent. TAPER produces up to four points -- ``(0,
+        start_offset)``, ``(station_from, start_offset)``, ``(station_to,
+        end_offset)``, ``(extent, end_offset)`` -- a flat run, a linear
+        ramp, then another flat run; ``station_from``/``station_to`` are
+        clamped into ``[0, extent]`` and consecutive points at the same
+        station are merged (keeping the later value) so a taper that
+        touches either end of the extent doesn't emit a duplicate
+        DistanceAlong.
+        """
+        mode = offset_spec.get("mode", "CONSTANT")
+        if mode == "TAPER":
+            start_offset = float(offset_spec.get("start_offset", 0.0))
+            end_offset = float(offset_spec.get("end_offset", 0.0))
+            station_from = max(0.0, min(float(offset_spec.get("station_from", 0.0)), extent))
+            station_to = max(station_from, min(float(offset_spec.get("station_to", extent)), extent))
+            raw_points = [
+                (0.0, start_offset),
+                (station_from, start_offset),
+                (station_to, end_offset),
+                (extent, end_offset),
+            ]
+        else:
+            offset = float(offset_spec.get("offset", 0.0))
+            raw_points = [(0.0, offset), (extent, offset)]
+
+        merged: List[Tuple[float, float]] = []
+        for station, offset_value in raw_points:
+            if merged and abs(merged[-1][0] - station) < 1e-9:
+                merged[-1] = (station, offset_value)
+            else:
+                merged.append((station, offset_value))
+
+        return [
+            ifc_file.createIfcPointByDistanceExpression(
+                DistanceAlong=ifc_file.createIfcLengthMeasure(station),
+                OffsetLateral=offset_value,
+                BasisCurve=basis_curve,
+            )
+            for station, offset_value in merged
+        ]
+
+    @classmethod
+    def _write_offset_pset(
+        cls, offset_alignment: "ifcopenshell.entity_instance", parent: "ifcopenshell.entity_instance", offset_spec: dict
+    ) -> None:
+        """Persist ``offset_spec`` (plus the parent's GlobalId) on
+        ``offset_alignment`` as Pset_SaikeiOffset -- IFC 4.3 has no standard
+        pset for an offset's design intent, so this rides in a Saikei pset,
+        both for save/reopen round-trip and as the source of truth
+        ``resync_offset_alignments`` rebuilds from (mirrors
+        ``set_design_criteria``'s pset-upsert pattern).
+        """
+        import ifcopenshell.api.pset
+
+        ifc_file = tool.Ifc.get()
+        mode = offset_spec.get("mode", "CONSTANT")
+        properties = {"ParentGlobalId": parent.GlobalId, "Mode": mode}
+        if mode == "TAPER":
+            properties.update(
+                StartOffset=float(offset_spec.get("start_offset", 0.0)),
+                EndOffset=float(offset_spec.get("end_offset", 0.0)),
+                StationFrom=float(offset_spec.get("station_from", 0.0)),
+                StationTo=float(offset_spec.get("station_to", 0.0)),
+            )
+        else:
+            properties["Offset"] = float(offset_spec.get("offset", 0.0))
+
+        existing = ifcopenshell.util.element.get_pset(offset_alignment, cls._OFFSET_PSET, should_inherit=False)
+        if existing:
+            pset_entity = ifc_file.by_id(existing["id"])
+        else:
+            pset_entity = ifcopenshell.api.pset.add_pset(ifc_file, product=offset_alignment, name=cls._OFFSET_PSET)
+        ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset_entity, properties=properties)
+
+    @classmethod
+    def get_offset_spec(cls, offset_alignment: "ifcopenshell.entity_instance") -> Optional[dict]:
+        """Return the recorded offset spec (Pset_SaikeiOffset), reshaped
+        back into the same dict shape ``_build_offset_points``/
+        ``create_offset_alignment`` accept (plus ``parent_global_id``), or
+        None if ``offset_alignment`` was never authored as an offset (or the
+        pset is missing/incomplete).
+        """
+        import ifcopenshell.util.element
+
+        pset = ifcopenshell.util.element.get_pset(offset_alignment, cls._OFFSET_PSET, should_inherit=False)
+        if not pset or "Mode" not in pset or "ParentGlobalId" not in pset:
+            return None
+
+        mode = pset["Mode"]
+        spec: dict = {"mode": mode, "parent_global_id": pset["ParentGlobalId"]}
+        if mode == "TAPER":
+            spec.update(
+                start_offset=float(pset.get("StartOffset", 0.0)),
+                end_offset=float(pset.get("EndOffset", 0.0)),
+                station_from=float(pset.get("StationFrom", 0.0)),
+                station_to=float(pset.get("StationTo", 0.0)),
+            )
+        else:
+            spec["offset"] = float(pset.get("Offset", 0.0))
+        return spec
+
+    @classmethod
+    def find_offset_children(cls, parent: "ifcopenshell.entity_instance") -> List["ifcopenshell.entity_instance"]:
+        """Return every IfcAlignment in the file whose Pset_SaikeiOffset
+        records ``parent`` as its ParentGlobalId (spec 1.7's "listed as its
+        child" set) -- offset alignments are NOT IfcRelAggregates children
+        of the parent (they have their own top-level GlobalId, per
+        ``create_as_offset_curve``), so this is a pset scan, not a
+        decomposition walk.
+        """
+        ifc_file = tool.Ifc.get()
+        parent_guid = parent.GlobalId
+        children = []
+        for candidate in ifc_file.by_type("IfcAlignment"):
+            if candidate == parent:
+                continue
+            spec = cls.get_offset_spec(candidate)
+            if spec and spec.get("parent_global_id") == parent_guid:
+                children.append(candidate)
+        return children
+
+    @classmethod
+    def create_offset_alignment(
+        cls, parent: "ifcopenshell.entity_instance", name: str, offset_spec: dict
+    ) -> "ifcopenshell.entity_instance":
+        """Create an offset alignment riding on ``parent``'s current curve
+        (spec 1.7). Builds the IfcPointByDistanceExpression table from
+        ``offset_spec`` via ``_build_offset_points``, authors the bare
+        IfcAlignment through ``align_api.create_as_offset_curve`` (parent's
+        start station honored, same as every other create path), records
+        ``offset_spec`` as Pset_SaikeiOffset for the resync funnel, and
+        parents the new alignment's Blender object under the parent's own
+        object so it shows as the parent's child in the outliner.
+
+        Args:
+            parent: The alignment being offset from -- must already have a
+                curve (validated by ``core.create_offset_alignment``).
+            name: Name for the new IfcAlignment.
+            offset_spec: See ``_build_offset_points``'s docstring for shape.
+
+        Returns:
+            The newly created (offset) IfcAlignment entity.
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        ifc_file = tool.Ifc.get()
+        basis_curve = align_api.get_curve(parent)
+        extent = cls.get_horizontal_extent_semantic(parent)
+        points = cls._build_offset_points(ifc_file, basis_curve, offset_spec, extent)
+
+        start_station = cls.get_alignment_start_station(parent)
+        offset_alignment = align_api.create_as_offset_curve(ifc_file, name, points, start_station=start_station)
+
+        cls._write_offset_pset(offset_alignment, parent, offset_spec)
+
+        # Offset alignments have no layouts -- create_hierarchy_for_alignment
+        # degrades gracefully to just the root Empty (no Horizontal/Vertical/
+        # Cant children to walk). Parent it under the parent's own object so
+        # it appears as the parent's child in the outliner.
+        offset_obj = cls.create_hierarchy_for_alignment(offset_alignment)
+        parent_obj = tool.Ifc.get_object(parent)
+        if offset_obj and parent_obj:
+            offset_obj.parent = parent_obj
+            if parent_obj.users_collection:
+                target_collection = parent_obj.users_collection[0]
+                for collection in list(offset_obj.users_collection):
+                    if collection != target_collection:
+                        collection.objects.unlink(offset_obj)
+                if offset_obj.name not in target_collection.objects:
+                    target_collection.objects.link(offset_obj)
+
+        return offset_alignment
+
+    @classmethod
+    def resync_offset_alignments(cls, parent: "ifcopenshell.entity_instance") -> int:
+        """Rebuild every offset alignment recorded against ``parent`` so it
+        tracks the parent's CURRENT curve and extent (spec 1.7: "Updates
+        with the parent"). Called from ``commit_layout_change`` so every
+        PI/PVI/cant write that succeeds also refreshes any offsets.
+
+        A plain PI recalculation keeps the SAME curve entity (only its
+        Segments are replaced by ``clear_layout_segments`` / the layout
+        API), so an offset's BasisCurve reference stays valid on its own in
+        that case. But ``align_api.get_curve(parent)`` can start returning a
+        DIFFERENT top-level entity -- e.g. adding a vertical layout wraps
+        the old IfcCompositeCurve in a new IfcGradientCurve -- so this always
+        re-fetches the parent's current curve and repoints, even when that
+        turns out to be a no-op.
+
+        Purely semantic: only constructs entities and mutates attributes, no
+        geometry engine evaluation, so it works even under the win64
+        packaging gap (IfcOpenShell#9301).
+
+        Returns:
+            Number of offset alignments resynced (0 if ``parent`` has none,
+            or its curve is currently unavailable).
+        """
+        import ifcopenshell.util.element
+
+        current_curve = cls.get_curve_for_alignment(parent)
+        if current_curve is None:
+            return 0
+
+        children = cls.find_offset_children(parent)
+        if not children:
+            return 0
+
+        ifc_file = tool.Ifc.get()
+        extent = cls.get_horizontal_extent_semantic(parent)
+
+        count = 0
+        for offset_alignment in children:
+            spec = cls.get_offset_spec(offset_alignment)
+            if spec is None:
+                continue
+            curve = cls.get_curve_for_alignment(offset_alignment)
+            if curve is None or not curve.is_a("IfcOffsetCurveByDistances"):
+                continue
+
+            old_points = list(curve.OffsetValues or [])
+            new_points = cls._build_offset_points(ifc_file, current_curve, spec, extent)
+
+            curve.BasisCurve = current_curve
+            curve.OffsetValues = new_points
+
+            for old_point in old_points:
+                if old_point not in new_points:
+                    ifcopenshell.util.element.remove_deep2(ifc_file, old_point)
+
+            count += 1
+        return count
+
+    # =========================================================================
+    # Convert Curve to Alignment (spec 1.8)
+    # =========================================================================
+
+    @classmethod
+    def extract_polyline_from_curve(
+        cls, obj: "bpy.types.Object", sample_resolution: Optional[int] = None
+    ) -> List[Tuple[float, float, float]]:
+        """Extract an ordered polyline (world-space XYZ) approximating a
+        Blender CURVE object's shape (spec 1.8). Only the FIRST spline is
+        used -- a multi-spline curve object is not a single alignment
+        candidate.
+
+        POLY splines are read directly (their control points ARE the
+        polyline). BEZIER/NURBS splines are sampled via Blender's own
+        curve-to-mesh evaluation (respecting the spline's own
+        ``resolution_u``, optionally overridden by ``sample_resolution`` for
+        the duration of this call) -- dependency-light (no separate spline
+        math), producing a faithful polyline for the RDP simplification step
+        that follows.
+
+        Args:
+            obj: A Blender CURVE object with at least one spline.
+            sample_resolution: Optional override for ``resolution_u`` on
+                every spline of ``obj`` for the duration of this extraction
+                (restored afterward). None uses the curve's own settings.
+
+        Returns:
+            List of (x, y, z) world-space tuples, in curve point order.
+            Empty list if ``obj`` is not a CURVE or has no splines/points.
+        """
+        if obj is None or obj.type != "CURVE" or not obj.data.splines:
+            return []
+
+        spline = obj.data.splines[0]
+
+        if spline.type == "POLY":
+            return [tuple(obj.matrix_world @ point.co.to_3d()) for point in spline.points]
+
+        original_resolutions = None
+        if sample_resolution is not None:
+            original_resolutions = [s.resolution_u for s in obj.data.splines]
+            for s in obj.data.splines:
+                s.resolution_u = max(1, int(sample_resolution))
+
+        try:
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+            obj_eval = obj.evaluated_get(depsgraph)
+            mesh = obj_eval.to_mesh()
+            points = [tuple(obj.matrix_world @ vertex.co) for vertex in mesh.vertices]
+            obj_eval.to_mesh_clear()
+        finally:
+            if original_resolutions is not None:
+                for s, resolution in zip(obj.data.splines, original_resolutions):
+                    s.resolution_u = resolution
+
+        return points
+
+    @classmethod
+    def simplify_polyline(cls, points: List[Tuple[float, float]], tolerance: float) -> List[Tuple[float, float]]:
+        """Ramer-Douglas-Peucker polyline simplification (spec 1.8) over 2D
+        ``(x, y)`` points -- pure math, no IFC/Blender dependency.
+
+        Recursively keeps the point with the greatest perpendicular
+        distance from the chord between the current segment's endpoints,
+        as long as that distance exceeds ``tolerance``; splits at that point
+        and recurses on both halves. The first and last points are always
+        kept.
+
+        Args:
+            points: Ordered (x, y) points.
+            tolerance: Maximum perpendicular deviation allowed for a point
+                to be dropped, in the same units as ``points``.
+
+        Returns:
+            The simplified point list (a subset of ``points``, same order).
+            Returned as-is (a shallow copy) if there are fewer than 3 points
+            or ``tolerance <= 0``.
+        """
+        if len(points) < 3 or tolerance <= 0.0:
+            return list(points)
+
+        def _perpendicular_distance(point, start, end) -> float:
+            x, y = point
+            x1, y1 = start
+            x2, y2 = end
+            dx, dy = x2 - x1, y2 - y1
+            if dx == 0.0 and dy == 0.0:
+                return math.hypot(x - x1, y - y1)
+            t = ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy)
+            proj_x, proj_y = x1 + t * dx, y1 + t * dy
+            return math.hypot(x - proj_x, y - proj_y)
+
+        def _rdp(subset: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+            if len(subset) < 3:
+                return subset
+            start, end = subset[0], subset[-1]
+            max_distance = -1.0
+            split_index = 0
+            for i in range(1, len(subset) - 1):
+                distance = _perpendicular_distance(subset[i], start, end)
+                if distance > max_distance:
+                    max_distance = distance
+                    split_index = i
+            if max_distance > tolerance:
+                left = _rdp(subset[: split_index + 1])
+                right = _rdp(subset[split_index:])
+                return left[:-1] + right
+            return [start, end]
+
+        return _rdp(list(points))
+
+    @classmethod
+    def count_distinct_points(cls, points: List[Tuple[float, float]], epsilon: float = 1e-6) -> int:
+        """Count points in ``points`` that are NOT within ``epsilon`` of the
+        immediately preceding KEPT point -- a minimal 2D coincidence filter
+        (spec 1.8) used to validate a simplified polyline has enough
+        distinct PIs to build an alignment from.
+        """
+        if not points:
+            return 0
+        count = 1
+        last = points[0]
+        for point in points[1:]:
+            if math.hypot(point[0] - last[0], point[1] - last[1]) > epsilon:
+                count += 1
+                last = point
+        return count
+
+    @classmethod
+    def convert_points_to_alignment(cls, name: str, points_xy: list) -> "ifcopenshell.entity_instance":
+        """Create a new all-tangent horizontal alignment from 2D points
+        (spec 1.8), via the same create + layout_by_pi_method path
+        ``create_alignment``/``_build_alignment_from_active_pis`` use. Every
+        PI is a plain tangent point (radius 0.0) -- users add curves
+        afterward in the PI editor.
+
+        ``points_xy`` are Blender WORLD-SPACE (x, y) coordinates (Z already
+        discarded per spec 1.1's XY-plane rule). They are converted to local
+        IFC coordinates through the SAME round trip the PI picker uses
+        (``_transfer_polyline_to_pis`` / ``_build_alignment_from_active_pis``
+        in ``bim.module.alignment.operator``): world -> unit_scale -> local
+        -> ``tool.Georeference.xyz2enh`` -> global E/N -> ``auto_enh2xyz`` ->
+        local again -- so a curve-derived alignment lands in exactly the
+        frame an interactively-picked one would, including in a
+        georeferenced project where that round trip is not a no-op.
+
+        Args:
+            name: Name for the new IfcAlignment.
+            points_xy: Ordered (x, y) world-space points, at least 2.
+
+        Returns:
+            The newly created IfcAlignment entity.
+        """
+        import ifcopenshell.api.alignment as align_api
+        import ifcopenshell.util.geolocation
+        import ifcopenshell.util.unit
+
+        ifc_file = tool.Ifc.get()
+        unit_scale = ifcopenshell.util.unit.calculate_unit_scale(ifc_file)
+
+        hpoints = []
+        for x, y in points_xy:
+            local = (x / unit_scale, y / unit_scale, 0.0)
+            enh = tool.Georeference.xyz2enh(local)
+            local_back = ifcopenshell.util.geolocation.auto_enh2xyz(ifc_file, float(enh[0]), float(enh[1]), 0.0)
+            hpoints.append([float(local_back[0]), float(local_back[1])])
+
+        alignment = cls.create_alignment(name)
+        h_layout = align_api.get_horizontal_layout(alignment)
+
+        radii = [0.0] * max(0, len(hpoints) - 2)
+        cls.layout_by_pi_method(h_layout, hpoints, radii)
+
+        alignment_obj = tool.Ifc.get_object(alignment)
+        layout_obj = tool.Ifc.get_object(h_layout)
+        if not layout_obj and alignment_obj:
+            layout_obj = cls.create_object_for_layout(h_layout, alignment_obj)
+        if layout_obj:
+            cls.create_objects_for_layout_segments(h_layout, layout_obj)
+
+        cls.commit_layout_change(alignment)
+        return alignment
+
+    # =========================================================================
+    # Multi-Vertical Selector (spec 2.1)
+    # =========================================================================
+
+    @classmethod
+    def get_vertical_layouts(cls, alignment: "ifcopenshell.entity_instance") -> list:
+        """Return EVERY IfcAlignmentVertical associated with ``alignment``
+        -- the one nested directly on it (if any) followed by one per
+        aggregated child alignment (CT 4.1.4.4.1.2's design alternatives).
+        Thin wrapper over ``align_api.get_vertical_layouts`` (plural) so
+        the multi-vertical selector (spec 2.1) has a single list to
+        populate from, unlike ``get_vertical_layout`` (singular) which only
+        ever finds the first/default one.
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        return align_api.get_vertical_layouts(alignment)
+
+    @classmethod
+    def add_alternative_vertical(cls, alignment: "ifcopenshell.entity_instance") -> "ifcopenshell.entity_instance":
+        """Add a second (or subsequent) vertical layout as a DESIGN
+        ALTERNATIVE (spec 2.1) -- a distinct action from the first add: an
+        existing vertical is never silently replaced. Delegates the actual
+        CT 4.1.4.4.1.1 -> 4.1.4.4.1.2 migration (moving any vertical
+        currently nested directly on ``alignment`` onto its own new child
+        alignment, then nesting the NEW vertical onto another new child) to
+        ``align_api.add_vertical_layout`` -- see its docstring for the exact
+        mechanics.
+
+        After the API call, gives every newly-aggregated child alignment a
+        full Blender object hierarchy (mirrors how CSV multi-vertical import
+        already does this via ``create_hierarchy_for_alignment`` per child),
+        and re-parents any layout object that pre-existed under the OLD
+        root (the migrated first vertical keeps its entity id and Blender
+        linkage -- only its IFC nest target changed) onto its new child's
+        object, so the outliner reflects the new structure.
+
+        Args:
+            alignment: The (parent) IfcAlignment entity. Must already have a
+                horizontal layout AND at least one vertical layout --
+                enforced by ``core.alignment.add_alternative_vertical``, not
+                here.
+
+        Returns:
+            The newly created IfcAlignmentVertical entity (including its
+            mandatory zero-length terminator segment).
+        """
+        import ifcopenshell.api.alignment as align_api
+
+        ifc_file = tool.Ifc.get()
+        before_children = set(cls.get_child_alignments(alignment))
+
+        vertical_layout = align_api.add_vertical_layout(ifc_file, alignment)
+
+        after_children = cls.get_child_alignments(alignment)
+        new_children = [child for child in after_children if child not in before_children]
+
+        for child in new_children:
+            child_obj = cls.create_hierarchy_for_alignment(child)
+            if child_obj is None:
+                continue
+            child_vertical = align_api.get_vertical_layout(child)
+            if child_vertical is None:
+                continue
+            layout_obj = tool.Ifc.get_object(child_vertical)
+            if layout_obj is None or layout_obj.parent is child_obj:
+                continue
+            layout_obj.parent = child_obj
+            if child_obj.users_collection:
+                target_collection = child_obj.users_collection[0]
+                for collection in list(layout_obj.users_collection):
+                    if collection != target_collection:
+                        collection.objects.unlink(layout_obj)
+                if layout_obj.name not in target_collection.objects:
+                    target_collection.objects.link(layout_obj)
+
+        return vertical_layout
