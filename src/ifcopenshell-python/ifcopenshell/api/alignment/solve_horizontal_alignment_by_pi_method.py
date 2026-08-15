@@ -128,9 +128,93 @@ def compute_horizontal_segment_end(segment: HorizontalSegmentDefinition) -> tupl
     )
 
 
+def _normalize_pi_curve(
+    curve: Union[float, Sequence[float], dict[str, Union[float, bool]]],
+) -> tuple[float, float, float, bool]:
+    """
+    Normalizes one element of the PI method solver's radii sequence into
+    (radius, entry_length, exit_length, join_next).
+
+    Accepted forms:
+
+        R - radius of a circular curve
+
+        (R, Lin, Lout) - radius with entry/exit clothoid spiral transition lengths
+
+        {"radius": R, "lin": Lin, "lout": Lout, "join_next": bool} - the same R, Lin, Lout (lin and
+        lout default to 0.0) plus an optional flag joining this curve directly to the curve at the
+        next PI at a shared tangency point (a compound or reverse curve junction). See
+        solve_horizontal_alignment_by_pi_method for the join_next semantics.
+
+    :param curve: one element of radii
+    :return: (radius, entry_length, exit_length, join_next)
+    """
+    if isinstance(curve, dict):
+        unknown_keys = set(curve) - {"radius", "lin", "lout", "join_next"}
+        if unknown_keys:
+            raise ValueError(f"unrecognized keys in a radii dict element: {sorted(unknown_keys)}")
+        if "radius" not in curve:
+            raise ValueError("a radii dict element must include 'radius'")
+        radius = float(curve["radius"])
+        entry_length = float(curve.get("lin", 0.0))
+        exit_length = float(curve.get("lout", 0.0))
+        join_next = bool(curve.get("join_next", False))
+    elif isinstance(curve, (int, float)):
+        radius = float(curve)
+        entry_length = 0.0
+        exit_length = 0.0
+        join_next = False
+    else:
+        if len(curve) != 3:
+            raise ValueError(
+                "each radii element should be a radius R, a (R, Lin, Lout) sequence, or a "
+                "{'radius', 'lin', 'lout', 'join_next'} dict"
+            )
+        radius, entry_length, exit_length = (float(v) for v in curve)
+        join_next = False
+
+    if radius == 0.0 and (entry_length != 0.0 or exit_length != 0.0):
+        raise ValueError("spiral transition lengths require a non-zero radius")
+
+    return radius, entry_length, exit_length, join_next
+
+
+def _check_pi_join_closure(
+    previous_tangent_out: float, tangent_in: float, pi_to_pi_distance: float, pi_number: int
+) -> None:
+    """
+    Validates that the tangent length claimed by a join_next curve on its shared leg, plus the
+    tangent length claimed by the curve at the next PI, sum to exactly the PI-to-PI distance so the
+    two curves meet at a single shared tangency point (a PCC or PRC) with no intermediate tangent
+    run. Raises ValueError, stating the computed excess or shortfall and the PIs involved, when the
+    curves cannot close this way.
+
+    :param previous_tangent_out: tangent length the join_next curve claims on the shared leg
+    :param tangent_in: tangent length the curve at the next PI claims on the shared leg
+    :param pi_to_pi_distance: distance between the two PIs
+    :param pi_number: 1-based number of the PI whose curve is the join target (the second of the pair)
+    """
+    total_tangent = previous_tangent_out + tangent_in
+    tolerance = 1.0e-9 * pi_to_pi_distance
+    excess = total_tangent - pi_to_pi_distance
+    if abs(excess) <= tolerance:
+        return
+    if excess > 0.0:
+        raise ValueError(
+            f"compound/reverse curves at PI {pi_number - 1}-{pi_number} cannot close: tangent runs "
+            f"T1+T2 = {total_tangent:.6g} exceed the {pi_to_pi_distance:.6g} PI-to-PI distance by "
+            f"{excess:.6g}; reduce the radius or spiral lengths at PI {pi_number - 1} or PI {pi_number}"
+        )
+    raise ValueError(
+        f"compound/reverse curves at PI {pi_number - 1}-{pi_number} cannot close: tangent runs "
+        f"T1+T2 = {total_tangent:.6g} fall short of the {pi_to_pi_distance:.6g} PI-to-PI distance "
+        f"by {-excess:.6g}; increase the radius or spiral lengths at PI {pi_number - 1} or PI {pi_number}"
+    )
+
+
 def solve_horizontal_alignment_by_pi_method(
     hpoints: Sequence[Sequence[float]],
-    radii: Sequence[Union[float, Sequence[float]]],
+    radii: Sequence[Union[float, Sequence[float], dict[str, Union[float, bool]]]],
     cants: Optional[Sequence[float]] = None,
 ) -> list[HorizontalSegmentDefinition]:
     """
@@ -142,7 +226,7 @@ def solve_horizontal_alignment_by_pi_method(
     layout, or consume the returned definitions directly, for example to preview an alignment in
     an interactive editor before committing it to a file.
 
-    Each element of radii defines the transition at the corresponding PI and is either:
+    Each element of radii defines the transition at the corresponding PI and is one of:
 
         R - radius of a circular curve (tangent runs connect directly to the circular curve), or
 
@@ -152,6 +236,22 @@ def solve_horizontal_alignment_by_pi_method(
         circular curve are continuous in position and direction. Lin and Lout can be 0.0 for a
         spiral-less connection on that end of the curve.
 
+        {"radius": R, "lin": Lin, "lout": Lout, "join_next": bool} - a dict accepting the same R,
+        Lin, Lout as above (lin and lout default to 0.0), plus an optional join_next flag. When
+        join_next is True, the curve at this PI connects directly to the curve at the NEXT PI at a
+        shared tangency point, with no intermediate tangent run: a PCC (point of compound curvature)
+        when the two curves turn the same direction, a PRC (point of reverse curvature) when they
+        turn opposite directions. The shared tangent line is the chord between the two PIs; each
+        curve is solved against its own PI deflection as usual, and the solver additionally requires
+        that the two curves' tangent lengths on the shared leg sum to exactly the PI-to-PI distance
+        (within 1e-9 relative). Inputs that cannot close this way are refused with a ValueError
+        stating the excess or shortfall and the PIs involved, so the caller knows what to adjust.
+        Spiral transitions are not supported on the joined side of a join_next curve (the exit
+        spiral of the joining curve and the entry spiral of the joined-into curve must both be
+        0.0); spirals remain allowed on the outer, non-joined side of either curve. This is a
+        documented limitation of the v1 implementation: a true spiral-to-spiral transition at a
+        PCC/PRC junction is not supported.
+
     If cants is provided, each definition also carries the cant at the segment start and end,
     applied to the rail on the outside of the curve: zero cant on tangent runs, linearly varying
     cant over spiral transitions, and constant cant over circular curves. Because every horizontal
@@ -160,7 +260,7 @@ def solve_horizontal_alignment_by_pi_method(
     transition curves so the cant profile is continuous.
 
     :param hpoints: (X, Y) pairs denoting the location of the horizontal PIs, including start (POB) and end (POE).
-    :param radii: radius values to use for transition, optionally with spiral transition lengths
+    :param radii: radius values to use for transition, optionally with spiral transition lengths and/or join_next
     :param cants: cant values, one per PI curve, applied to the outer rail
     :return: list of segment definitions, in order, continuous in position and direction
     """
@@ -178,17 +278,30 @@ def solve_horizontal_alignment_by_pi_method(
     i = 1
     dist_along = 0.0  # distance along the horizontal alignment at the start of the next segment
 
+    previous_join_next = False  # True when the previous PI's curve joins directly into this one (PCC/PRC)
+    previous_tangent_out = 0.0  # that previous curve's tangent length claim on the shared leg
+
     for curve_index, curve in enumerate(radii):
-        if isinstance(curve, (int, float)):
-            radius = float(curve)
-            entry_length = 0.0
-            exit_length = 0.0
-        else:
-            if len(curve) != 3:
-                raise ValueError("each radii element should be a radius R or a (R, Lin, Lout) sequence")
-            radius, entry_length, exit_length = (float(v) for v in curve)
-            if radius == 0.0 and (entry_length != 0.0 or exit_length != 0.0):
-                raise ValueError("spiral transition lengths require a non-zero radius")
+        radius, entry_length, exit_length, join_next = _normalize_pi_curve(curve)
+        pi_number = curve_index + 1  # 1-based PI number, matching hpoints[pi_number]
+
+        if join_next and curve_index == len(radii) - 1:
+            raise ValueError(
+                f"PI {pi_number} has join_next=True but is the last PI curve; there is no next " "curve to join it to"
+            )
+        if previous_join_next and entry_length != 0.0:
+            raise ValueError(
+                f"PI {pi_number - 1}-{pi_number} is a compound/reverse curve junction (join_next); "
+                f"spiral transitions are not supported on the joined side of the curve at PI "
+                f"{pi_number} (its entry spiral length must be 0.0); use a spiral only on its "
+                "outer, non-joined side"
+            )
+        if join_next and exit_length != 0.0:
+            raise ValueError(
+                f"PI {pi_number} has join_next=True; spiral transitions are not supported on the "
+                "joined side of a compound/reverse curve junction (its exit spiral length must be "
+                "0.0); use a spiral only on its outer, non-joined side"
+            )
 
         cant = float(cants[curve_index]) if cants is not None else 0.0
         if cant != 0.0 and (entry_length == 0.0 or exit_length == 0.0):
@@ -212,9 +325,19 @@ def solve_horizontal_alignment_by_pi_method(
 
         delta = angleFT - angleBT
 
+        # true PI-to-PI distance for the leg shared with a join_next curve; distinct from lengthBT,
+        # which is measured from the previous curve's end point rather than from the previous PI
+        if previous_join_next:
+            prev_pi_x, prev_pi_y = hpoints[curve_index]
+            cur_pi_x, cur_pi_y = hpoints[curve_index + 1]
+            pi_to_pi_distance = math.hypot(cur_pi_x - prev_pi_x, cur_pi_y - prev_pi_y)
+
         if entry_length == 0.0 and exit_length == 0.0:
             # tangent runs connect directly to the circular curve
             tangent = abs(radius * math.tan(delta / 2))
+            tangent_out_this_curve = tangent  # symmetric: PI-to-PC equals PI-to-PT for a plain arc
+            if previous_join_next:
+                _check_pi_join_closure(previous_tangent_out, tangent, pi_to_pi_distance, pi_number)
 
             lc = abs(radius * delta)
 
@@ -228,8 +351,9 @@ def solve_horizontal_alignment_by_pi_method(
 
             tangent_run = lengthBT - tangent
 
-            # back tangent run
-            if 1.0e-03 < tangent_run:
+            # back tangent run; suppressed at a validated join_next junction, which places this
+            # curve's PC exactly at the previous curve's PT with no intermediate tangent run
+            if 1.0e-03 < tangent_run and not previous_join_next:
                 segments.append(
                     HorizontalSegmentDefinition(
                         start_point=(xBT, yBT),
@@ -301,11 +425,15 @@ def solve_horizontal_alignment_by_pi_method(
             # the forward tangent. this accounts for the inward shift of the circular curve.
             ts_to_pi = x - y / math.tan(delta)  # distance from TS to the PI, along the back tangent
             pi_to_st = y / math.sin(delta)  # distance from the PI to ST, along the forward tangent
+            tangent_out_this_curve = pi_to_st
+            if previous_join_next:
+                _check_pi_join_closure(previous_tangent_out, ts_to_pi, pi_to_pi_distance, pi_number)
 
             tangent_run = lengthBT - ts_to_pi
 
-            # back tangent run
-            if 1.0e-03 < tangent_run:
+            # back tangent run; suppressed at a validated join_next junction, which places this
+            # curve's TS/PC exactly at the previous curve's PT with no intermediate tangent run
+            if 1.0e-03 < tangent_run and not previous_join_next:
                 segments.append(
                     HorizontalSegmentDefinition(
                         start_point=(xBT, yBT),
@@ -399,6 +527,9 @@ def solve_horizontal_alignment_by_pi_method(
         yBT = yPT
         xPI = xFT
         yPI = yFT
+
+        previous_join_next = join_next
+        previous_tangent_out = tangent_out_this_curve
 
     # done processing radii
     # last tangent run

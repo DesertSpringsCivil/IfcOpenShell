@@ -65,7 +65,7 @@ def layout_horizontal_alignment_by_pi_method(
     file: ifcopenshell.file,
     layout: entity_instance,
     hpoints: Sequence[Sequence[float]],
-    radii: Sequence[Union[float, Sequence[float]]],
+    radii: Sequence[Union[float, Sequence[float], dict[str, Union[float, bool]]]],
     cant_layout: Optional[entity_instance] = None,
     cants: Optional[Sequence[float]] = None,
 ) -> None:
@@ -76,6 +76,14 @@ def layout_horizontal_alignment_by_pi_method(
     The geometry is computed by solve_horizontal_alignment_by_pi_method; see that function for the
     meaning of hpoints, radii, and cants. This function writes the resulting segment definitions to
     the layout.
+
+    Each element of radii is a radius R, a (R, Lin, Lout) sequence with spiral transition lengths,
+    or a {"radius": R, "lin": Lin, "lout": Lout, "join_next": bool} dict. join_next joins the curve
+    at that PI directly to the curve at the next PI, at a shared tangency point with no
+    intermediate tangent run: a PCC (point of compound curvature) or PRC (point of reverse
+    curvature) depending on whether the two curves turn the same or opposite directions. See
+    solve_horizontal_alignment_by_pi_method for the full join_next semantics, the tangency closure
+    requirement, and the documented limitation on spirals at the joined side of the junction.
 
     Optionally, a cant profile can be created alongside the horizontal layout. Cant segments are
     created one-for-one with the horizontal segments: zero cant on tangent runs (CONSTANTCANT),
@@ -88,7 +96,7 @@ def layout_horizontal_alignment_by_pi_method(
     :param file: file
     :param layout: An IfcAlignmentHorizontal layout
     :param hpoints: (X, Y) pairs denoting the location of the horizontal PIs, including start (POB) and end (POE).
-    :param radii: radius values to use for transition, optionally with spiral transition lengths
+    :param radii: radius values to use for transition, optionally with spiral transition lengths and/or join_next
     :param cant_layout: An IfcAlignmentCant layout to receive the cant segments. Required when cants is provided.
     :param cants: cant values, one per PI curve, applied to the outer rail. Required when cant_layout is provided.
     :return: None
