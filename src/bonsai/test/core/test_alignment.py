@@ -561,3 +561,183 @@ class TestDeletePiInEditMode:
         alignment.get_pi_edit_empties(1).should_be_called().will_return(["e0", "e1", "e2", "e3"])
         alignment.delete_pi_edit_empty(1, 1).should_be_called().will_return(True)
         subject.delete_pi_in_edit_mode(ifc, alignment, alignment_id=1, index=1)
+
+
+# ---------------------------------------------------------------------------
+# add_cant_to_alignment  (spec 3.1)
+# ---------------------------------------------------------------------------
+
+
+class TestAddCantToAlignment:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.add_cant_to_alignment(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_alignment_not_found(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        with pytest.raises(ValueError, match="not found"):
+            subject.add_cant_to_alignment(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.add_cant_to_alignment(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_no_horizontal_layout_exists(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_horizontal_layout(entity).should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="no horizontal layout"):
+            subject.add_cant_to_alignment(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_no_vertical_layout_exists(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_horizontal_layout(entity).should_be_called().will_return("h_layout")
+        alignment.get_vertical_layout(entity).should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="no vertical layout"):
+            subject.add_cant_to_alignment(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_cant_layout_already_exists(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_horizontal_layout(entity).should_be_called().will_return("h_layout")
+        alignment.get_vertical_layout(entity).should_be_called().will_return("v_layout")
+        alignment.get_cant_layout(entity).should_be_called().will_return("cant_layout")
+        with pytest.raises(ValueError, match="already has a cant layout"):
+            subject.add_cant_to_alignment(ifc, alignment, alignment_id=1)
+
+    def test_creates_and_returns_cant_layout(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_horizontal_layout(entity).should_be_called().will_return("h_layout")
+        alignment.get_vertical_layout(entity).should_be_called().will_return("v_layout")
+        alignment.get_cant_layout(entity).should_be_called().will_return(None)
+        alignment.add_cant_layout(entity, 1.75).should_be_called().will_return("new_cant_layout")
+        result = subject.add_cant_to_alignment(ifc, alignment, alignment_id=1, rail_head_distance=1.75)
+        assert result == "new_cant_layout"
+
+    def test_defaults_rail_head_distance_to_one(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_horizontal_layout(entity).should_be_called().will_return("h_layout")
+        alignment.get_vertical_layout(entity).should_be_called().will_return("v_layout")
+        alignment.get_cant_layout(entity).should_be_called().will_return(None)
+        alignment.add_cant_layout(entity, 1.0).should_be_called().will_return("new_cant_layout")
+        result = subject.add_cant_to_alignment(ifc, alignment, alignment_id=1)
+        assert result == "new_cant_layout"
+
+
+# ---------------------------------------------------------------------------
+# update_cant_segments  (spec 3.2)
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateCantSegments:
+    def _points(self, *stations):
+        return [
+            {"station": s, "cant_left": 0.0, "cant_right": 0.05, "transition_type": "LINEARTRANSITION"}
+            for s in stations
+        ]
+
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.update_cant_segments(ifc, alignment, alignment_id=1, points=self._points(0.0, 100.0))
+
+    def test_raises_when_alignment_not_found(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        with pytest.raises(ValueError, match="not found"):
+            subject.update_cant_segments(ifc, alignment, alignment_id=1, points=self._points(0.0, 100.0))
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.update_cant_segments(ifc, alignment, alignment_id=1, points=self._points(0.0, 100.0))
+
+    def test_raises_when_no_cant_layout(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_cant_layout(entity).should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="no cant layout"):
+            subject.update_cant_segments(ifc, alignment, alignment_id=1, points=self._points(0.0, 100.0))
+
+    def test_raises_when_fewer_than_two_points(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_cant_layout(entity).should_be_called().will_return("cant_layout")
+        with pytest.raises(ValueError, match="At least 2 cant points"):
+            subject.update_cant_segments(ifc, alignment, alignment_id=1, points=self._points(0.0))
+
+    def test_raises_when_stations_not_strictly_increasing(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_cant_layout(entity).should_be_called().will_return("cant_layout")
+        with pytest.raises(ValueError, match="strictly increasing"):
+            subject.update_cant_segments(ifc, alignment, alignment_id=1, points=self._points(100.0, 100.0))
+
+    def test_raises_when_stations_go_backwards(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_cant_layout(entity).should_be_called().will_return("cant_layout")
+        with pytest.raises(ValueError, match="strictly increasing"):
+            subject.update_cant_segments(ifc, alignment, alignment_id=1, points=self._points(100.0, 50.0))
+
+    def test_raises_when_points_extend_beyond_horizontal_extent(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_cant_layout(entity).should_be_called().will_return("cant_layout")
+        alignment.get_horizontal_extent_semantic(entity).should_be_called().will_return(500.0)
+        with pytest.raises(ValueError, match="horizontal extent"):
+            subject.update_cant_segments(ifc, alignment, alignment_id=1, points=self._points(0.0, 600.0))
+
+    def test_writes_segments_and_returns_true(self, ifc, alignment):
+        entity = make_alignment_entity()
+        points = self._points(0.0, 100.0, 300.0)
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_cant_layout(entity).should_be_called().will_return("cant_layout")
+        alignment.get_horizontal_extent_semantic(entity).should_be_called().will_return(500.0)
+        alignment.write_cant_segments(entity, points).should_be_called()
+        result = subject.update_cant_segments(ifc, alignment, alignment_id=1, points=points)
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# delete_cant_layout  (spec 3.6)
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteCantLayout:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.delete_cant_layout(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_alignment_not_found(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        with pytest.raises(ValueError, match="not found"):
+            subject.delete_cant_layout(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.delete_cant_layout(ifc, alignment, alignment_id=1)
+
+    def test_raises_when_no_cant_layout(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_cant_layout(entity).should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="no cant layout"):
+            subject.delete_cant_layout(ifc, alignment, alignment_id=1)
+
+    def test_removes_cant_layout(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_cant_layout(entity).should_be_called().will_return("cant_layout")
+        alignment.remove_cant_layout(entity).should_be_called()
+        result = subject.delete_cant_layout(ifc, alignment, alignment_id=1)
+        assert result is True

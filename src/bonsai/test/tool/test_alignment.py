@@ -2377,6 +2377,735 @@ class TestRemoveAlignmentEntity(NewIfc4X3):
             ifc_file.by_id(alignment_id)
 
 
+# ===========================================================================
+# Cant — Pure Math (spec 3.2, 3.4) — no bpy/IFC dependency
+# ===========================================================================
+# All of these are plain math on floats; NewFile is used only because the
+# module under test (bonsai.tool.alignment) imports bpy at module scope, same
+# as every other pure-math test class in this file (see
+# TestCalculateVerticalCurveLengthFromK etc. above).
+
+
+class TestCantEquilibrium(NewFile):
+    """Tests for Alignment.cant_equilibrium() — E_eq = gauge * v^2 / (g * radius)."""
+
+    def test_metric_hand_computed_value(self):
+        # Standard gauge 1.435 m, V=100 km/h, R=1000 m.
+        # v = 100/3.6 = 27.777... m/s
+        # E = 1.435 * 27.777...^2 / (9.80665 * 1000)
+        gauge, speed, radius = 1.435, 100.0, 1000.0
+        v_mps = speed / 3.6
+        expected = gauge * v_mps**2 / (subject.GRAVITY_MPS2 * radius)
+        result = subject.cant_equilibrium(speed, radius, gauge, is_imperial=False)
+        assert_close(result, expected, tol=1e-9)
+        # Sanity: known order of magnitude for this classic example (~113 mm).
+        assert_close(result, 0.11292, tol=5e-4)
+
+    def test_imperial_hand_computed_value(self):
+        # gauge/radius are ALWAYS metres internally (Blender LENGTH-property
+        # convention) regardless of is_imperial; only speed's unit convention
+        # changes (mph here). 1 mph = 0.44704 m/s exactly.
+        gauge, speed, radius = 1.4351, 60.0, 500.0
+        v_mps = speed * 0.44704
+        expected = gauge * v_mps**2 / (subject.GRAVITY_MPS2 * radius)
+        result = subject.cant_equilibrium(speed, radius, gauge, is_imperial=True)
+        assert_close(result, expected, tol=1e-9)
+
+    def test_metric_and_imperial_speed_conventions_differ_for_same_number(self):
+        # The same numeric speed means a different (slower) physical speed
+        # under is_imperial=True (mph) vs False (km/h) since 1 mph > 1 km/h,
+        # so the imperial call should give a LARGER equilibrium cant for
+        # otherwise-identical inputs.
+        metric_result = subject.cant_equilibrium(60.0, 500.0, 1.435, is_imperial=False)
+        imperial_result = subject.cant_equilibrium(60.0, 500.0, 1.435, is_imperial=True)
+        assert imperial_result > metric_result
+
+    def test_zero_for_non_positive_radius(self):
+        assert subject.cant_equilibrium(100.0, 0.0, 1.435) == 0.0
+        assert subject.cant_equilibrium(100.0, -50.0, 1.435) == 0.0
+
+    def test_zero_for_non_positive_speed(self):
+        assert subject.cant_equilibrium(0.0, 1000.0, 1.435) == 0.0
+
+    def test_zero_for_non_positive_gauge(self):
+        assert subject.cant_equilibrium(100.0, 1000.0, 0.0) == 0.0
+
+    def test_larger_radius_gives_smaller_equilibrium_cant(self):
+        tight = subject.cant_equilibrium(100.0, 500.0, 1.435)
+        wide = subject.cant_equilibrium(100.0, 2000.0, 1.435)
+        assert tight > wide
+
+
+class TestCantGradient(NewFile):
+    """Tests for Alignment.cant_gradient()."""
+
+    def test_metric_returns_mm_per_m(self):
+        # 0.1 m of cant change over 100 m -> 1 mm/m.
+        result = subject.cant_gradient(0.1, 100.0, is_imperial=False)
+        assert_close(result, 1.0)
+
+    def test_imperial_returns_in_per_ft(self):
+        # Same underlying ratio (0.1/100 = 0.001), scaled by 12 (in/ft) instead
+        # of 1000 (mm/m) -- NOT simply "12x the metric number".
+        result = subject.cant_gradient(0.1, 100.0, is_imperial=True)
+        assert_close(result, 0.012)
+
+    def test_zero_for_non_positive_length(self):
+        assert subject.cant_gradient(0.1, 0.0) == 0.0
+        assert subject.cant_gradient(0.1, -10.0) == 0.0
+
+    def test_negative_delta_gives_negative_gradient(self):
+        result = subject.cant_gradient(-0.1, 100.0)
+        assert result < 0.0
+
+
+class TestTwist(NewFile):
+    """Tests for Alignment.twist()."""
+
+    def test_per_length_matches_cant_gradient(self):
+        per_length, _ = subject.twist(0.1, 100.0, speed=None, is_imperial=False)
+        assert_close(per_length, subject.cant_gradient(0.1, 100.0, is_imperial=False))
+
+    def test_per_time_is_zero_without_speed(self):
+        _, per_time = subject.twist(0.1, 100.0, speed=None)
+        assert per_time == 0.0
+        _, per_time_zero_speed = subject.twist(0.1, 100.0, speed=0.0)
+        assert per_time_zero_speed == 0.0
+
+    def test_per_time_hand_computed_metric(self):
+        # 100 mm of cant change over 100 m, traversed at 36 km/h = 10 m/s.
+        # time = 100 / 10 = 10 s; twist = 100 mm / 10 s = 10 mm/s.
+        _, per_time = subject.twist(0.1, 100.0, speed=36.0, is_imperial=False)
+        assert_close(per_time, 10.0, tol=1e-6)
+
+    def test_per_time_scales_with_speed(self):
+        _, slow = subject.twist(0.1, 100.0, speed=36.0)
+        _, fast = subject.twist(0.1, 100.0, speed=72.0)
+        assert fast > slow
+
+
+class TestCantRampFunctions(NewFile):
+    """Tests for the normalized ramp functions f(xi) dispatched by
+    ``_ramp_for_transition_type`` — every ramp must satisfy f(0)=0, f(1)=1,
+    and be monotonically non-decreasing (spec 3.4)."""
+
+    RAMPS = {
+        "LINEARTRANSITION": subject._ramp_linear,
+        "BLOSSCURVE": subject._ramp_bloss,
+        "COSINECURVE": subject._ramp_cosine,
+        "SINECURVE": subject._ramp_sine,
+        "HELMERTCURVE": subject._ramp_helmert,
+    }
+
+    def test_endpoints_are_zero_and_one_for_every_ramp(self):
+        for name, ramp in self.RAMPS.items():
+            assert_close(ramp(0.0), 0.0, tol=1e-9), name
+            assert_close(ramp(1.0), 1.0, tol=1e-9), name
+
+    def test_symmetric_ramps_hit_half_at_midpoint(self):
+        # Linear, Bloss, Cosine, Sine, and Helmert are all point-symmetric
+        # about (0.5, 0.5) by construction.
+        for name, ramp in self.RAMPS.items():
+            assert_close(ramp(0.5), 0.5, tol=1e-9), name
+
+    def test_ramps_are_monotonically_non_decreasing(self):
+        samples = [i / 100.0 for i in range(101)]
+        for name, ramp in self.RAMPS.items():
+            values = [ramp(xi) for xi in samples]
+            for a, b in zip(values, values[1:]):
+                assert b >= a - 1e-9, f"{name} is not monotonic: {a} -> {b}"
+
+    def test_bloss_and_cosine_have_zero_end_slopes(self):
+        # Finite-difference slope near each end should be ~0 for these two
+        # (unlike linear, which has a constant nonzero slope everywhere).
+        eps = 1e-4
+        for ramp in (subject._ramp_bloss, subject._ramp_cosine, subject._ramp_sine, subject._ramp_helmert):
+            start_slope = (ramp(eps) - ramp(0.0)) / eps
+            end_slope = (ramp(1.0) - ramp(1.0 - eps)) / eps
+            assert abs(start_slope) < 0.01
+            assert abs(end_slope) < 0.01
+
+    def test_linear_has_constant_nonzero_slope(self):
+        assert_close(subject._ramp_linear(0.25), 0.25)
+        assert_close(subject._ramp_linear(0.75), 0.75)
+
+    def test_dispatch_by_transition_type_name(self):
+        assert subject._ramp_for_transition_type("LINEARTRANSITION", 0.5) == subject._ramp_linear(0.5)
+        assert subject._ramp_for_transition_type("HELMERTCURVE", 0.5) == subject._ramp_helmert(0.5)
+        assert subject._ramp_for_transition_type("BLOSSCURVE", 0.5) == subject._ramp_bloss(0.5)
+        assert subject._ramp_for_transition_type("COSINECURVE", 0.5) == subject._ramp_cosine(0.5)
+        assert subject._ramp_for_transition_type("SINECURVE", 0.5) == subject._ramp_sine(0.5)
+
+    def test_viennese_bend_approximates_with_bloss(self):
+        for xi in (0.0, 0.25, 0.5, 0.75, 1.0):
+            assert subject._ramp_for_transition_type("VIENNESEBEND", xi) == subject._ramp_bloss(xi)
+
+    def test_constant_cant_ramp_is_zero(self):
+        assert subject._ramp_for_transition_type("CONSTANTCANT", 0.5) == 0.0
+
+    def test_dispatch_clamps_xi_outside_zero_one(self):
+        assert subject._ramp_for_transition_type("LINEARTRANSITION", -0.5) == 0.0
+        assert subject._ramp_for_transition_type("LINEARTRANSITION", 1.5) == 1.0
+
+
+class TestSampleCantProfile(NewFile):
+    """Tests for Alignment.sample_cant_profile() — spec 3.4, display-only."""
+
+    def _linear_points(self):
+        return [
+            {"station": 0.0, "cant_left": 0.0, "cant_right": 0.0, "transition_type": "LINEARTRANSITION"},
+            {"station": 100.0, "cant_left": 0.0, "cant_right": 0.10, "transition_type": "LINEARTRANSITION"},
+        ]
+
+    def test_linear_ramp_midpoint_is_half(self):
+        samples = subject.sample_cant_profile(self._linear_points(), [50.0])
+        station, left, right = samples[0]
+        assert_close(station, 50.0)
+        assert_close(left, 0.0)
+        assert_close(right, 0.05)
+
+    def test_endpoints_match_table_values_exactly(self):
+        samples = subject.sample_cant_profile(self._linear_points(), [0.0, 100.0])
+        assert_close(samples[0][2], 0.0)
+        assert_close(samples[1][2], 0.10)
+
+    def test_clamps_stations_outside_range(self):
+        samples = subject.sample_cant_profile(self._linear_points(), [-50.0, 500.0])
+        assert_close(samples[0][2], 0.0)  # clamped to first point
+        assert_close(samples[1][2], 0.10)  # clamped to last point
+
+    def test_fewer_than_two_points_returns_zero_cant(self):
+        samples = subject.sample_cant_profile([], [0.0, 50.0])
+        assert samples == [(0.0, 0.0, 0.0), (50.0, 0.0, 0.0)]
+
+    def test_bloss_midpoint_matches_ramp_half(self):
+        points = [
+            {"station": 0.0, "cant_left": 0.0, "cant_right": 0.0, "transition_type": "BLOSSCURVE"},
+            {"station": 100.0, "cant_left": 0.0, "cant_right": 0.16, "transition_type": "BLOSSCURVE"},
+        ]
+        samples = subject.sample_cant_profile(points, [50.0])
+        assert_close(samples[0][2], 0.08, tol=1e-6)
+
+    def test_constant_cant_holds_start_value_flat_ignoring_next_point(self):
+        # Mirrors _map_constant_cant, which never reads End* -- the sampled
+        # profile should stay flat at the start value across the whole
+        # segment even when the next point differs.
+        points = [
+            {"station": 0.0, "cant_left": 0.0, "cant_right": 0.05, "transition_type": "CONSTANTCANT"},
+            {"station": 100.0, "cant_left": 0.0, "cant_right": 0.15, "transition_type": "CONSTANTCANT"},
+        ]
+        samples = subject.sample_cant_profile(points, [0.0, 25.0, 50.0, 75.0])
+        for station, left, right in samples:
+            assert_close(right, 0.05, tol=1e-9)
+
+    def test_multi_segment_walks_correct_segment(self):
+        points = [
+            {"station": 0.0, "cant_left": 0.0, "cant_right": 0.0, "transition_type": "LINEARTRANSITION"},
+            {"station": 100.0, "cant_left": 0.0, "cant_right": 0.10, "transition_type": "LINEARTRANSITION"},
+            {"station": 200.0, "cant_left": 0.0, "cant_right": 0.0, "transition_type": "LINEARTRANSITION"},
+        ]
+        samples = subject.sample_cant_profile(points, [150.0])
+        # Halfway through the second (descending) segment: 0.10 -> 0.0, so 0.05.
+        assert_close(samples[0][2], 0.05, tol=1e-9)
+
+
+class TestEN13803DefaultLimits(NewFile):
+    """Sanity checks for the transcribed EN 13803-1:2017 defaults."""
+
+    def test_all_five_limits_present_and_positive(self):
+        limits = subject.EN13803_DEFAULT_LIMITS
+        for key in ("max_applied_cant", "max_deficiency", "max_excess", "max_cant_gradient", "max_twist"):
+            assert key in limits
+            assert limits[key] > 0.0
+
+    def test_length_limits_are_metres_matching_published_mm_figures(self):
+        limits = subject.EN13803_DEFAULT_LIMITS
+        assert_close(limits["max_applied_cant"], 0.160)
+        assert_close(limits["max_deficiency"], 0.153)
+        assert_close(limits["max_excess"], 0.110)
+
+    def test_rate_limits_are_dimensionless_ratios_matching_published_mm_per_m(self):
+        limits = subject.EN13803_DEFAULT_LIMITS
+        assert_close(limits["max_cant_gradient"], 0.00225)
+        assert_close(limits["max_twist"], 0.003)
+
+
+# ===========================================================================
+# Cant — Semantic IFC Tests (no geometry engine)
+# ===========================================================================
+# These build fixtures either via align_api.create(include_vertical=True,
+# include_cant=True) (bare layouts -- only the mandatory zero-length
+# terminators, confirmed to NOT touch the geometry engine) or by nesting
+# IfcAlignmentSegment entities directly (bypassing
+# create_layout_segment/_add_segment_to_layout, whose _get_segment_endpoint
+# call DOES require ifcopenshell_wrapper.map_shape -- see
+# TestWriteCantSegments below for the one path that genuinely needs it).
+
+
+def _bare_alignment_with_h_v_cant(name="Cant Fixture", rail_head_distance=1.5):
+    """align_api.create() with horizontal + vertical + cant, all bare
+    (zero-length-terminator only, no real segments) -- empirically confirmed
+    to work without the geometry engine (unlike layout_*_by_pi_method)."""
+    ifc_file = tool.Ifc.get()
+    return align_api.create(
+        ifc_file, name=name, include_vertical=True, include_cant=True, rail_head_distance=rail_head_distance
+    )
+
+
+def _nest_semantic_horizontal_segments(alignment, design_params_list):
+    """Directly nest real IfcAlignmentSegments onto the horizontal layout via
+    their DesignParameters, bypassing create_layout_segment (geometry-engine
+    dependent). Semantic-only fixture, mirrored by
+    _nest_semantic_cant_segments below for the cant layout."""
+    import ifcopenshell.guid
+
+    ifc_file = tool.Ifc.get()
+    h_layout = align_api.get_horizontal_layout(alignment)
+    rel = h_layout.IsNestedBy[0]
+    terminator = rel.RelatedObjects[-1]
+    segments = []
+    for dp in design_params_list:
+        segment = ifc_file.createIfcAlignmentSegment(GlobalId=ifcopenshell.guid.new(), DesignParameters=dp)
+        segments.append(segment)
+    rel.RelatedObjects = tuple(segments) + (terminator,)
+    return segments
+
+
+def _line_dp(ifc_file, start_xy, start_direction, length):
+    return ifc_file.createIfcAlignmentHorizontalSegment(
+        StartPoint=ifc_file.createIfcCartesianPoint(start_xy),
+        StartDirection=start_direction,
+        StartRadiusOfCurvature=None,
+        EndRadiusOfCurvature=None,
+        SegmentLength=length,
+        PredefinedType="LINE",
+    )
+
+
+def _arc_dp(ifc_file, start_xy, start_direction, radius, length):
+    return ifc_file.createIfcAlignmentHorizontalSegment(
+        StartPoint=ifc_file.createIfcCartesianPoint(start_xy),
+        StartDirection=start_direction,
+        StartRadiusOfCurvature=radius,
+        EndRadiusOfCurvature=radius,
+        SegmentLength=length,
+        PredefinedType="CIRCULARARC",
+    )
+
+
+def _nest_semantic_cant_segments(alignment, design_params_list):
+    """Directly nest real IfcAlignmentSegments onto the cant layout via their
+    DesignParameters, bypassing create_layout_segment (geometry-engine
+    dependent — see TestWriteCantSegments for why write_cant_segments itself
+    cannot avoid it)."""
+    import ifcopenshell.guid
+
+    ifc_file = tool.Ifc.get()
+    cant_layout = align_api.get_cant_layout(alignment)
+    rel = cant_layout.IsNestedBy[0]
+    terminator = rel.RelatedObjects[-1]
+    segments = []
+    for dp in design_params_list:
+        segment = ifc_file.createIfcAlignmentSegment(GlobalId=ifcopenshell.guid.new(), DesignParameters=dp)
+        segments.append(segment)
+    rel.RelatedObjects = tuple(segments) + (terminator,)
+    return segments
+
+
+def _cant_dp(ifc_file, start, length, start_left, end_left, start_right, end_right, transition_type):
+    return ifc_file.createIfcAlignmentCantSegment(
+        StartDistAlong=start,
+        HorizontalLength=length,
+        StartCantLeft=start_left,
+        EndCantLeft=end_left,
+        StartCantRight=start_right,
+        EndCantRight=end_right,
+        PredefinedType=transition_type,
+    )
+
+
+class TestGetAddRemoveCantLayout(NewIfc4X3):
+    """Tests for get_cant_layout / add_cant_layout / remove_cant_layout —
+    all confirmed to work without the geometry engine on bare layouts."""
+
+    def test_get_cant_layout_returns_none_when_absent(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="NoCant", include_vertical=True)
+        assert subject.get_cant_layout(alignment) is None
+
+    def test_add_cant_layout_creates_and_get_finds_it(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="AddCant", include_vertical=True)
+        cant_layout = subject.add_cant_layout(alignment, rail_head_distance=1.75)
+        assert cant_layout is not None
+        assert cant_layout.is_a("IfcAlignmentCant")
+        assert_close(cant_layout.RailHeadDistance, 1.75)
+        assert subject.get_cant_layout(alignment) == cant_layout
+
+    def test_remove_cant_layout_reverts_representation(self):
+        import ifcopenshell.util.representation
+
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="RemoveCant", include_vertical=True)
+        subject.add_cant_layout(alignment, rail_head_distance=1.5)
+        assert subject.get_cant_layout(alignment) is not None
+
+        subject.remove_cant_layout(alignment)
+
+        assert subject.get_cant_layout(alignment) is None
+        assert len(ifc_file.by_type("IfcAlignmentCant")) == 0
+        assert len(ifc_file.by_type("IfcSegmentedReferenceCurve")) == 0
+
+        representations = list(ifcopenshell.util.representation.get_representations_iter(alignment))
+        identifiers = [(r.RepresentationIdentifier, r.RepresentationType) for r in representations]
+        assert ("Axis", "Curve3D") in identifiers
+        # The gradient curve (vertical's representation) must survive.
+        axis_curve3d = next(
+            r for r in representations if (r.RepresentationIdentifier, r.RepresentationType) == ("Axis", "Curve3D")
+        )
+        assert axis_curve3d.Items[0].is_a("IfcGradientCurve")
+
+    def test_remove_cant_layout_noop_when_absent(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="NothingToRemove", include_vertical=True)
+        subject.remove_cant_layout(alignment)  # should not raise
+        assert subject.get_cant_layout(alignment) is None
+
+
+class TestGetHorizontalExtentSemantic(NewIfc4X3):
+    """Tests for Alignment.get_horizontal_extent_semantic()."""
+
+    def test_returns_zero_for_bare_layout(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Bare")
+        assert subject.get_horizontal_extent_semantic(alignment) == 0.0
+
+    def test_sums_semantic_segment_lengths(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Summed")
+        _nest_semantic_horizontal_segments(
+            alignment,
+            [
+                _line_dp(ifc_file, (0.0, 0.0), 0.0, 100.0),
+                _arc_dp(ifc_file, (100.0, 0.0), 0.0, 200.0, 157.08),
+            ],
+        )
+        assert_close(subject.get_horizontal_extent_semantic(alignment), 257.08, tol=1e-6)
+
+
+class TestRadiusAtStation(NewIfc4X3):
+    """Tests for Alignment.radius_at_station() on a semantically-built
+    line-arc-line layout (bypasses create_layout_segment; see module note)."""
+
+    def _line_arc_line_alignment(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="LineArcLine")
+        _nest_semantic_horizontal_segments(
+            alignment,
+            [
+                _line_dp(ifc_file, (0.0, 0.0), 0.0, 100.0),
+                _arc_dp(ifc_file, (100.0, 0.0), 0.0, 200.0, 157.08),
+                _line_dp(ifc_file, (150.0, 150.0), 1.5708, 100.0),
+            ],
+        )
+        return alignment
+
+    def test_zero_within_first_line_segment(self):
+        alignment = self._line_arc_line_alignment()
+        assert subject.radius_at_station(alignment, 50.0) == 0.0
+
+    def test_constant_radius_within_arc_segment(self):
+        alignment = self._line_arc_line_alignment()
+        assert_close(subject.radius_at_station(alignment, 150.0), 200.0)
+        assert_close(subject.radius_at_station(alignment, 105.0), 200.0)
+
+    def test_zero_within_second_line_segment(self):
+        alignment = self._line_arc_line_alignment()
+        assert subject.radius_at_station(alignment, 300.0) == 0.0
+
+    def test_zero_outside_alignment_domain(self):
+        alignment = self._line_arc_line_alignment()
+        assert subject.radius_at_station(alignment, -10.0) == 0.0
+        assert subject.radius_at_station(alignment, 9999.0) == 0.0
+
+    def test_zero_when_no_horizontal_layout(self):
+        ifc_file = tool.Ifc.get()
+        alignment = ifc_file.createIfcAlignment(GlobalId=ifcopenshell.guid.new())
+        assert subject.radius_at_station(alignment, 0.0) == 0.0
+
+    def test_interpolates_curvature_linearly_across_a_spiral(self):
+        # A CLOTHOID transitioning from a straight (radius None/0) into a
+        # 100 m-radius arc over 50 m: curvature should be exactly half way
+        # between 0 and 1/100 at the segment's midpoint.
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Spiral")
+        spiral_dp = ifc_file.createIfcAlignmentHorizontalSegment(
+            StartPoint=ifc_file.createIfcCartesianPoint((0.0, 0.0)),
+            StartDirection=0.0,
+            StartRadiusOfCurvature=None,
+            EndRadiusOfCurvature=100.0,
+            SegmentLength=50.0,
+            PredefinedType="CLOTHOID",
+        )
+        _nest_semantic_horizontal_segments(alignment, [spiral_dp])
+        radius_at_mid = subject.radius_at_station(alignment, 25.0)
+        expected_curvature = 0.5 * (1.0 / 100.0)
+        assert_close(1.0 / radius_at_mid, expected_curvature, tol=1e-6)
+
+
+class TestCantRotationReferencePset(NewIfc4X3):
+    """Tests for set/get_cant_rotation_reference() — spec 3.3."""
+
+    def test_get_returns_none_when_never_set(self):
+        alignment = _bare_alignment_with_h_v_cant()
+        cant_layout = subject.get_cant_layout(alignment)
+        assert subject.get_cant_rotation_reference(cant_layout) is None
+
+    def test_round_trips_through_pset(self):
+        alignment = _bare_alignment_with_h_v_cant()
+        cant_layout = subject.get_cant_layout(alignment)
+        subject.set_cant_rotation_reference(cant_layout, "HIGH_RAIL")
+        assert subject.get_cant_rotation_reference(cant_layout) == "HIGH_RAIL"
+
+    def test_overwrites_previous_value(self):
+        alignment = _bare_alignment_with_h_v_cant()
+        cant_layout = subject.get_cant_layout(alignment)
+        subject.set_cant_rotation_reference(cant_layout, "LOW_RAIL")
+        subject.set_cant_rotation_reference(cant_layout, "CENTERLINE")
+        assert subject.get_cant_rotation_reference(cant_layout) == "CENTERLINE"
+
+
+class TestBackCalculateCantPointsFromLayout(NewIfc4X3):
+    """Tests for Alignment.back_calculate_cant_points_from_layout() — pure
+    semantic read of IfcAlignmentCantSegment design parameters."""
+
+    def test_empty_when_no_cant_layout(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="NoCant", include_vertical=True)
+        assert subject.back_calculate_cant_points_from_layout(alignment) == []
+
+    def test_empty_when_cant_layout_has_no_real_segments(self):
+        alignment = _bare_alignment_with_h_v_cant()
+        assert subject.back_calculate_cant_points_from_layout(alignment) == []
+
+    def test_round_trips_two_point_table(self):
+        ifc_file = tool.Ifc.get()
+        alignment = _bare_alignment_with_h_v_cant()
+        _nest_semantic_cant_segments(
+            alignment,
+            [_cant_dp(ifc_file, 0.0, 100.0, 0.0, 0.0, 0.0, 0.15, "LINEARTRANSITION")],
+        )
+        points = subject.back_calculate_cant_points_from_layout(alignment)
+        assert len(points) == 2
+        assert_close(points[0]["station"], 0.0)
+        assert_close(points[0]["cant_right"], 0.0)
+        assert points[0]["transition_type"] == "LINEARTRANSITION"
+        assert_close(points[1]["station"], 100.0)
+        assert_close(points[1]["cant_right"], 0.15)
+
+    def test_round_trips_three_point_table(self):
+        ifc_file = tool.Ifc.get()
+        alignment = _bare_alignment_with_h_v_cant()
+        _nest_semantic_cant_segments(
+            alignment,
+            [
+                _cant_dp(ifc_file, 0.0, 100.0, 0.0, 0.0, 0.0, 0.15, "LINEARTRANSITION"),
+                _cant_dp(ifc_file, 100.0, 50.0, 0.0, 0.0, 0.15, 0.15, "CONSTANTCANT"),
+            ],
+        )
+        points = subject.back_calculate_cant_points_from_layout(alignment)
+        assert len(points) == 3
+        assert_close(points[2]["station"], 150.0)
+        assert_close(points[2]["cant_right"], 0.15)
+
+
+def _cant_point(station, cant_left, cant_right, transition_type="LINEARTRANSITION", design_speed=0.0):
+    return {
+        "station": station,
+        "cant_left": cant_left,
+        "cant_right": cant_right,
+        "transition_type": transition_type,
+        "design_speed": design_speed,
+    }
+
+
+class TestComputeCantChecks(NewIfc4X3):
+    """Tests for Alignment.compute_cant_checks() — spec 3.2."""
+
+    def _alignment_with_arc(self, radius=1000.0):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="ChecksFixture")
+        _nest_semantic_horizontal_segments(
+            alignment,
+            [_arc_dp(ifc_file, (0.0, 0.0), 0.0, radius, 500.0)],
+        )
+        return alignment
+
+    def test_out_of_range_index_returns_zero_result_no_violations(self):
+        alignment = self._alignment_with_arc()
+        points = [_cant_point(0.0, 0.0, 0.10)]
+        result = subject.compute_cant_checks(points, 0, alignment, 1.435, subject.EN13803_DEFAULT_LIMITS, 100.0)
+        assert result["violations"] == []
+        assert result["equilibrium"] == 0.0
+
+    def test_applied_cant_is_right_minus_left(self):
+        alignment = self._alignment_with_arc()
+        points = [_cant_point(0.0, 0.02, 0.12), _cant_point(100.0, 0.02, 0.12)]
+        result = subject.compute_cant_checks(points, 0, alignment, 1.435, subject.EN13803_DEFAULT_LIMITS, 0.0)
+        assert_close(result["applied"], 0.10)
+
+    def test_point_level_design_speed_overrides_alignment_default(self):
+        alignment = self._alignment_with_arc(radius=1000.0)
+        points = [
+            _cant_point(0.0, 0.0, 0.0, design_speed=100.0),
+            _cant_point(100.0, 0.0, 0.0),
+        ]
+        result = subject.compute_cant_checks(points, 0, alignment, 1.435, subject.EN13803_DEFAULT_LIMITS, 30.0)
+        expected_eq = subject.cant_equilibrium(100.0, 1000.0, 1.435, False)
+        assert_close(result["equilibrium"], expected_eq, tol=1e-6)
+
+    def test_zero_applied_cant_is_all_deficiency(self):
+        alignment = self._alignment_with_arc(radius=1000.0)
+        points = [_cant_point(0.0, 0.0, 0.0), _cant_point(100.0, 0.0, 0.0)]
+        result = subject.compute_cant_checks(points, 0, alignment, 1.435, subject.EN13803_DEFAULT_LIMITS, 100.0)
+        assert result["deficiency"] > 0.0
+        assert result["excess"] == 0.0
+        assert_close(result["deficiency"], result["equilibrium"], tol=1e-9)
+
+    def test_overcant_produces_excess_not_deficiency(self):
+        # A very tight-radius curve at low speed with a large applied cant.
+        alignment = self._alignment_with_arc(radius=1000.0)
+        points = [_cant_point(0.0, 0.0, 0.15), _cant_point(100.0, 0.0, 0.15)]
+        result = subject.compute_cant_checks(points, 0, alignment, 1.435, subject.EN13803_DEFAULT_LIMITS, 20.0)
+        assert result["excess"] > 0.0
+        assert result["deficiency"] == 0.0
+
+    def test_gradient_and_twist_reflect_change_between_points(self):
+        alignment = self._alignment_with_arc()
+        points = [_cant_point(0.0, 0.0, 0.0), _cant_point(100.0, 0.0, 0.10)]
+        result = subject.compute_cant_checks(points, 0, alignment, 1.435, subject.EN13803_DEFAULT_LIMITS, 0.0)
+        assert_close(result["gradient"], 1.0, tol=1e-6)  # 0.10 m / 100 m = 1 mm/m
+
+    def test_max_applied_cant_violation_is_flagged(self):
+        alignment = self._alignment_with_arc()
+        points = [_cant_point(0.0, 0.0, 0.20), _cant_point(100.0, 0.0, 0.20)]
+        result = subject.compute_cant_checks(points, 0, alignment, 1.435, subject.EN13803_DEFAULT_LIMITS, 0.0)
+        assert "max_applied_cant" in result["violations"]
+
+    def test_max_deficiency_violation_is_flagged_at_high_speed(self):
+        alignment = self._alignment_with_arc(radius=300.0)
+        points = [_cant_point(0.0, 0.0, 0.0), _cant_point(100.0, 0.0, 0.0)]
+        result = subject.compute_cant_checks(points, 0, alignment, 1.435, subject.EN13803_DEFAULT_LIMITS, 160.0)
+        assert "max_deficiency" in result["violations"]
+
+    def test_max_gradient_violation_is_flagged_for_a_steep_transition(self):
+        alignment = self._alignment_with_arc()
+        points = [_cant_point(0.0, 0.0, 0.0), _cant_point(10.0, 0.0, 0.15)]
+        result = subject.compute_cant_checks(points, 0, alignment, 1.435, subject.EN13803_DEFAULT_LIMITS, 0.0)
+        assert "max_cant_gradient" in result["violations"]
+        assert "max_twist" in result["violations"]
+
+    def test_compliant_segment_has_no_violations(self):
+        alignment = self._alignment_with_arc(radius=2000.0)
+        points = [_cant_point(0.0, 0.0, 0.05), _cant_point(500.0, 0.0, 0.05)]
+        result = subject.compute_cant_checks(points, 0, alignment, 1.435, subject.EN13803_DEFAULT_LIMITS, 0.0)
+        assert result["violations"] == []
+
+    def test_missing_limit_key_is_never_flagged(self):
+        alignment = self._alignment_with_arc()
+        points = [_cant_point(0.0, 0.0, 0.30), _cant_point(100.0, 0.0, 0.30)]
+        result = subject.compute_cant_checks(points, 0, alignment, 1.435, {}, 0.0)
+        assert result["violations"] == []
+
+
+# ===========================================================================
+# Cant — Geometry-Dependent (write path)
+# ===========================================================================
+# write_cant_segments() calls ifcopenshell.api.alignment.create_layout_segment,
+# which (via _add_segment_to_layout -> _get_segment_endpoint) unconditionally
+# calls ifcopenshell_wrapper.map_shape to reposition the mandatory zero-length
+# terminator after the new segment -- EVEN for a semantic-only write with no
+# geometric representation on the layout. This was confirmed empirically:
+# every write_cant_segments call fails locally with "No geometry mapping
+# registered for ifc4x3_add2" (IfcOpenShell#9301) until the win64 packaging
+# gap is closed. Reading cant points back out (back_calculate_cant_points_
+# from_layout, tested above) is pure semantic and does NOT need the engine --
+# only the WRITE path does.
+
+
+@requires_geometry_engine
+class TestWriteCantSegments(NewIfc4X3):
+    """Tests for Alignment.write_cant_segments() — spec 3.2 semantic round-trip."""
+
+    def test_raises_when_no_cant_layout(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="NoCant", include_vertical=True)
+        points = [
+            {"station": 0.0, "cant_left": 0.0, "cant_right": 0.0, "transition_type": "LINEARTRANSITION"},
+            {"station": 100.0, "cant_left": 0.0, "cant_right": 0.10, "transition_type": "LINEARTRANSITION"},
+        ]
+        with pytest.raises(ValueError, match="no cant layout"):
+            subject.write_cant_segments(alignment, points)
+
+    def test_writes_two_point_table_as_one_segment(self):
+        alignment = _bare_alignment_with_h_v_cant()
+        points = [
+            {"station": 0.0, "cant_left": 0.0, "cant_right": 0.0, "transition_type": "LINEARTRANSITION"},
+            {"station": 100.0, "cant_left": 0.0, "cant_right": 0.10, "transition_type": "LINEARTRANSITION"},
+        ]
+        subject.write_cant_segments(alignment, points)
+
+        cant_layout = subject.get_cant_layout(alignment)
+        segments = align_api.get_layout_segments(cant_layout)
+        real_segments = [s for s in segments if not subject.is_zero_length_segment(s)]
+        assert len(real_segments) == 1
+        dp = real_segments[0].DesignParameters
+        assert_close(dp.StartDistAlong, 0.0)
+        assert_close(dp.HorizontalLength, 100.0)
+        assert_close(dp.StartCantRight, 0.0)
+        assert_close(dp.EndCantRight, 0.10)
+        assert dp.PredefinedType == "LINEARTRANSITION"
+
+    def test_writes_three_point_table_as_two_segments_with_correct_types(self):
+        alignment = _bare_alignment_with_h_v_cant()
+        points = [
+            {"station": 0.0, "cant_left": 0.0, "cant_right": 0.0, "transition_type": "LINEARTRANSITION"},
+            {"station": 100.0, "cant_left": 0.0, "cant_right": 0.15, "transition_type": "CONSTANTCANT"},
+            {"station": 200.0, "cant_left": 0.0, "cant_right": 0.15, "transition_type": "LINEARTRANSITION"},
+        ]
+        subject.write_cant_segments(alignment, points)
+
+        cant_layout = subject.get_cant_layout(alignment)
+        segments = align_api.get_layout_segments(cant_layout)
+        real_segments = [s for s in segments if not subject.is_zero_length_segment(s)]
+        assert len(real_segments) == 2
+        assert real_segments[0].DesignParameters.PredefinedType == "LINEARTRANSITION"
+        assert real_segments[1].DesignParameters.PredefinedType == "CONSTANTCANT"
+        assert_close(real_segments[1].DesignParameters.StartDistAlong, 100.0)
+        assert_close(real_segments[1].DesignParameters.HorizontalLength, 100.0)
+
+    def test_clears_previous_segments_before_rewriting(self):
+        alignment = _bare_alignment_with_h_v_cant()
+        first_points = [
+            {"station": 0.0, "cant_left": 0.0, "cant_right": 0.0, "transition_type": "LINEARTRANSITION"},
+            {"station": 100.0, "cant_left": 0.0, "cant_right": 0.10, "transition_type": "LINEARTRANSITION"},
+            {"station": 200.0, "cant_left": 0.0, "cant_right": 0.0, "transition_type": "LINEARTRANSITION"},
+        ]
+        subject.write_cant_segments(alignment, first_points)
+
+        second_points = [
+            {"station": 0.0, "cant_left": 0.0, "cant_right": 0.0, "transition_type": "LINEARTRANSITION"},
+            {"station": 50.0, "cant_left": 0.0, "cant_right": 0.05, "transition_type": "LINEARTRANSITION"},
+        ]
+        subject.write_cant_segments(alignment, second_points)
+
+        cant_layout = subject.get_cant_layout(alignment)
+        segments = align_api.get_layout_segments(cant_layout)
+        real_segments = [s for s in segments if not subject.is_zero_length_segment(s)]
+        assert len(real_segments) == 1
+        assert_close(real_segments[0].DesignParameters.HorizontalLength, 50.0)
+
+
 class TestRemoveVerticalLayout(NewIfc4X3):
     """Tests for Alignment.remove_vertical_layout() — spec 2.6."""
 

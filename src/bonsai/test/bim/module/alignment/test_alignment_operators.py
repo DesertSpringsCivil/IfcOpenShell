@@ -970,3 +970,310 @@ class TestVerticalKFlags(NewIfc4X3):
 
         pvi_rows = [r for r in props.vertical_display_rows if r.row_type == "POINT" and r.display_type == "PVI"]
         assert not pvi_rows[0].k_deficient
+
+
+# ===========================================================================
+# Cant Operators (spec Section 3)
+# ===========================================================================
+
+
+def create_alignment_with_horizontal_and_vertical(name="Cant Test Alignment"):
+    """Build an alignment with both horizontal and vertical layouts present
+    (bare — zero-length terminators only), the minimum
+    civil.add_cant_to_alignment's poll requires. Mirrors create_empty_alignment()
+    + civil.add_vertical_to_alignment, neither of which needs the geometry
+    engine (see TestAddVerticalToAlignment above)."""
+    alignment, alignment_obj = create_empty_alignment(name)
+    bpy.ops.civil.add_vertical_to_alignment()
+    return alignment, alignment_obj
+
+
+def add_cant_points_to_props(point_data):
+    """Add cant points to the props collection with specified values.
+
+    Args:
+        point_data: list of (station, cant_left, cant_right, transition_type) tuples.
+    """
+    props = get_alignment_props()
+    for station, cant_left, cant_right, transition_type in point_data:
+        bpy.ops.civil.add_cant_point()
+        point = props.cant_points[len(props.cant_points) - 1]
+        point.station = station
+        point.cant_left = cant_left
+        point.cant_right = cant_right
+        point.transition_type = transition_type
+
+
+class TestAddCantToAlignment(NewIfc4X3):
+    """Tests for CIVIL_OT_add_cant_to_alignment (civil.add_cant_to_alignment).
+
+    add_cant_layout does not require the geometry engine — empirically
+    confirmed (see tool/test_alignment.py's TestGetAddRemoveCantLayout and
+    add_cant_layout's own defensive try/except around update_end_point).
+    """
+
+    def test_poll_fails_without_alignment(self):
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.add_cant_to_alignment()
+
+    def test_poll_fails_without_vertical_layout(self):
+        alignment, alignment_obj = create_empty_alignment()
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.add_cant_to_alignment()
+
+    def test_add_cant_creates_cant_layout(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        ifc_file = tool.Ifc.get()
+        assert len(ifc_file.by_type("IfcAlignmentCant")) == 0
+
+        result = bpy.ops.civil.add_cant_to_alignment("EXEC_DEFAULT", rail_head_distance=1.75)
+        assert result == {"FINISHED"}
+
+        cants = ifc_file.by_type("IfcAlignmentCant")
+        assert len(cants) == 1
+        assert cants[0].RailHeadDistance == pytest.approx(1.75)
+
+    def test_add_cant_twice_raises_on_poll(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        bpy.ops.civil.add_cant_to_alignment()
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.add_cant_to_alignment()
+
+    def test_add_cant_persists_rotation_reference(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        props = get_alignment_props()
+        # No cant layout exists yet, so the update callback is a no-op — it
+        # only sets the Blender property value, which _execute() reads below.
+        props.cant_rotation_reference = "HIGH_RAIL"
+
+        bpy.ops.civil.add_cant_to_alignment()
+
+        ifc_file = tool.Ifc.get()
+        alignment_fresh = ifc_file.by_id(alignment.id())
+        cant_layout = tool.Alignment.get_cant_layout(alignment_fresh)
+        assert tool.Alignment.get_cant_rotation_reference(cant_layout) == "HIGH_RAIL"
+
+    def test_add_cant_creates_outliner_object(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        bpy.ops.civil.add_cant_to_alignment()
+
+        ifc_file = tool.Ifc.get()
+        alignment_fresh = ifc_file.by_id(alignment.id())
+        cant_layout = tool.Alignment.get_cant_layout(alignment_fresh)
+        assert tool.Ifc.get_object(cant_layout) is not None
+
+    def test_add_cant_clears_stale_table(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        props = get_alignment_props()
+        bpy.ops.civil.add_cant_point()
+        assert len(props.cant_points) == 1
+
+        bpy.ops.civil.add_cant_to_alignment()
+
+        assert len(props.cant_points) == 0
+        assert len(props.cant_display_rows) == 0
+
+
+class TestDeleteCantLayout(NewIfc4X3):
+    """Tests for CIVIL_OT_delete_cant_layout (civil.delete_cant_layout).
+
+    Note: delete_cant_layout defines invoke() with invoke_confirm, but
+    calling via bpy.ops in Python uses EXEC_DEFAULT by default, skipping
+    invoke (same as TestDeleteVerticalLayout above).
+    """
+
+    def test_poll_fails_without_alignment(self):
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.delete_cant_layout()
+
+    def test_poll_fails_without_cant_layout(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        with pytest.raises(RuntimeError):
+            bpy.ops.civil.delete_cant_layout()
+
+    def test_delete_cant_layout_removes_ifc_cant(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        ifc_file = tool.Ifc.get()
+        bpy.ops.civil.add_cant_to_alignment()
+        assert len(ifc_file.by_type("IfcAlignmentCant")) == 1
+
+        result = bpy.ops.civil.delete_cant_layout()
+
+        assert result == {"FINISHED"}
+        assert len(ifc_file.by_type("IfcAlignmentCant")) == 0
+
+    def test_delete_cant_layout_clears_cant_table(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        bpy.ops.civil.add_cant_to_alignment()
+        add_cant_points_to_props([(0.0, 0.0, 0.0, "LINEARTRANSITION"), (100.0, 0.0, 0.10, "LINEARTRANSITION")])
+        props = get_alignment_props()
+        assert len(props.cant_points) == 2
+
+        bpy.ops.civil.delete_cant_layout()
+
+        assert len(props.cant_points) == 0
+        assert len(props.cant_display_rows) == 0
+
+    def test_horizontal_and_vertical_survive(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        ifc_file = tool.Ifc.get()
+        bpy.ops.civil.add_cant_to_alignment()
+
+        bpy.ops.civil.delete_cant_layout()
+
+        assert len(ifc_file.by_type("IfcAlignment")) == 1
+        assert len(ifc_file.by_type("IfcAlignmentHorizontal")) == 1
+        assert len(ifc_file.by_type("IfcAlignmentVertical")) == 1
+
+
+class TestAddCantPoint(NewIfc4X3):
+    """Tests for CIVIL_OT_add_cant_point (civil.add_cant_point)."""
+
+    def test_add_first_point_at_origin(self):
+        props = get_alignment_props()
+        result = bpy.ops.civil.add_cant_point()
+        assert result == {"FINISHED"}
+        assert len(props.cant_points) == 1
+        assert props.cant_points[0].station == pytest.approx(0.0)
+        assert props.cant_points[0].transition_type == "LINEARTRANSITION"
+
+    def test_add_second_point_extends_beyond_first(self):
+        props = get_alignment_props()
+        bpy.ops.civil.add_cant_point()
+        bpy.ops.civil.add_cant_point()
+        assert len(props.cant_points) == 2
+        assert props.cant_points[1].station > props.cant_points[0].station
+
+    def test_add_point_rebuilds_point_rows(self):
+        props = get_alignment_props()
+        bpy.ops.civil.add_cant_point()
+        bpy.ops.civil.add_cant_point()
+        point_rows = [r for r in props.cant_display_rows if r.row_type == "POINT"]
+        assert len(point_rows) == 2
+
+
+class TestRemoveCantPoint(NewIfc4X3):
+    """Tests for CIVIL_OT_remove_cant_point (civil.remove_cant_point)."""
+
+    def test_remove_point_decrements_collection(self):
+        props = get_alignment_props()
+        bpy.ops.civil.add_cant_point()
+        bpy.ops.civil.add_cant_point()
+        bpy.ops.civil.add_cant_point()
+        assert len(props.cant_points) == 3
+
+        props.cant_display_rows.clear()
+        props.active_cant_point_index = 0
+        result = bpy.ops.civil.remove_cant_point()
+        assert result == {"FINISHED"}
+        assert len(props.cant_points) == 2
+
+    def test_remove_last_point(self):
+        props = get_alignment_props()
+        bpy.ops.civil.add_cant_point()
+        props.cant_display_rows.clear()
+        props.active_cant_point_index = 0
+        result = bpy.ops.civil.remove_cant_point()
+        assert result == {"FINISHED"}
+        assert len(props.cant_points) == 0
+
+
+class TestClearCantPoints(NewIfc4X3):
+    """Tests for CIVIL_OT_clear_cant_points (civil.clear_cant_points)."""
+
+    def test_clear_removes_all_points_but_not_layout(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical()
+        bpy.ops.civil.add_cant_to_alignment()
+        add_cant_points_to_props([(0.0, 0.0, 0.0, "LINEARTRANSITION"), (100.0, 0.0, 0.10, "LINEARTRANSITION")])
+        props = get_alignment_props()
+        ifc_file = tool.Ifc.get()
+
+        result = bpy.ops.civil.clear_cant_points()
+
+        assert result == {"FINISHED"}
+        assert len(props.cant_points) == 0
+        assert len(props.cant_display_rows) == 0
+        # Rows-only clear (spec 3.2) — the cant layout itself is untouched.
+        assert len(ifc_file.by_type("IfcAlignmentCant")) == 1
+
+
+@requires_geometry_engine
+class TestRecalculateCant(NewIfc4X3):
+    """Tests for CIVIL_OT_recalculate_cant (civil.recalculate_cant) — spec
+    Section 3 end to end: add cant -> table edit -> recalculate -> IFC
+    segments exist.
+
+    Gated: recalculate_cant writes IFC segments via
+    ifcopenshell.api.alignment.create_layout_segment, which (via
+    _add_segment_to_layout -> _get_segment_endpoint) needs the geometry
+    engine even for a purely semantic write — see the note atop
+    TestWriteCantSegments in test/tool/test_alignment.py.
+    """
+
+    def test_recalculate_writes_cant_segments(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical("Recalc Cant")
+        bpy.ops.civil.add_cant_to_alignment()
+        add_cant_points_to_props(
+            [
+                (0.0, 0.0, 0.0, "LINEARTRANSITION"),
+                (100.0, 0.0, 0.15, "LINEARTRANSITION"),
+            ]
+        )
+
+        result = bpy.ops.civil.recalculate_cant()
+        assert result == {"FINISHED"}
+
+        ifc_file = tool.Ifc.get()
+        alignment_fresh = ifc_file.by_id(alignment.id())
+        cant_layout = tool.Alignment.get_cant_layout(alignment_fresh)
+        segments = align_api.get_layout_segments(cant_layout)
+        real_segments = [s for s in segments if not tool.Alignment.is_zero_length_segment(s)]
+        assert len(real_segments) == 1
+        dp = real_segments[0].DesignParameters
+        assert dp.StartDistAlong == pytest.approx(0.0)
+        assert dp.HorizontalLength == pytest.approx(100.0)
+        assert dp.EndCantRight == pytest.approx(0.15)
+        assert dp.PredefinedType == "LINEARTRANSITION"
+
+    def test_recalculate_creates_segment_objects(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical("Recalc Cant Objs")
+        bpy.ops.civil.add_cant_to_alignment()
+        add_cant_points_to_props(
+            [
+                (0.0, 0.0, 0.0, "LINEARTRANSITION"),
+                (100.0, 0.0, 0.10, "LINEARTRANSITION"),
+            ]
+        )
+
+        bpy.ops.civil.recalculate_cant()
+
+        ifc_file = tool.Ifc.get()
+        alignment_fresh = ifc_file.by_id(alignment.id())
+        cant_layout = tool.Alignment.get_cant_layout(alignment_fresh)
+        assert tool.Ifc.get_object(cant_layout) is not None
+
+    def test_recalculate_rewrites_on_second_call(self):
+        alignment, alignment_obj = create_alignment_with_horizontal_and_vertical("Recalc Cant Rewrite")
+        bpy.ops.civil.add_cant_to_alignment()
+        add_cant_points_to_props(
+            [
+                (0.0, 0.0, 0.0, "LINEARTRANSITION"),
+                (100.0, 0.0, 0.10, "LINEARTRANSITION"),
+                (200.0, 0.0, 0.0, "LINEARTRANSITION"),
+            ]
+        )
+        bpy.ops.civil.recalculate_cant()
+
+        props = get_alignment_props()
+        props.cant_points.clear()
+        props.cant_display_rows.clear()
+        add_cant_points_to_props([(0.0, 0.0, 0.0, "LINEARTRANSITION"), (50.0, 0.0, 0.05, "LINEARTRANSITION")])
+        bpy.ops.civil.recalculate_cant()
+
+        ifc_file = tool.Ifc.get()
+        alignment_fresh = ifc_file.by_id(alignment.id())
+        cant_layout = tool.Alignment.get_cant_layout(alignment_fresh)
+        segments = align_api.get_layout_segments(cant_layout)
+        real_segments = [s for s in segments if not tool.Alignment.is_zero_length_segment(s)]
+        assert len(real_segments) == 1
+        assert real_segments[0].DesignParameters.HorizontalLength == pytest.approx(50.0)
