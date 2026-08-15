@@ -21,7 +21,6 @@ import pytest
 import bonsai.core.alignment as subject
 from test.core.bootstrap import alignment, ifc
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -177,6 +176,7 @@ class TestExitPiEditMode:
         alignment.clear_layout_segments("h_layout").should_be_called()
         alignment.layout_by_pi_method("h_layout", hpoints, radii).should_be_called()
         ifc.get_object("h_layout").should_be_called().will_return(None)
+        alignment.commit_layout_change(entity).should_be_called()
         result = subject.exit_pi_edit_mode(ifc, alignment, alignment_id=1, apply=True)
         assert result is True
 
@@ -193,6 +193,7 @@ class TestExitPiEditMode:
         alignment.layout_by_pi_method("h_layout", hpoints, radii).should_be_called()
         ifc.get_object("h_layout").should_be_called().will_return("layout_obj")
         alignment.create_objects_for_layout_segments("h_layout", "layout_obj").should_be_called()
+        alignment.commit_layout_change(entity).should_be_called()
         result = subject.exit_pi_edit_mode(ifc, alignment, alignment_id=1, apply=True)
         assert result is True
 
@@ -387,6 +388,7 @@ class TestExitPviEditMode:
         alignment.clear_layout_segments("v_layout").should_be_called()
         alignment.layout_vertical_by_pvi_method("v_layout", vpoints, lengths).should_be_called()
         ifc.get_object("v_layout").should_be_called().will_return(None)
+        alignment.commit_layout_change(entity).should_be_called()
         result = subject.exit_pvi_edit_mode(ifc, alignment, alignment_id=1, apply=True)
         assert result is True
 
@@ -403,6 +405,7 @@ class TestExitPviEditMode:
         alignment.layout_vertical_by_pvi_method("v_layout", vpoints, lengths).should_be_called()
         ifc.get_object("v_layout").should_be_called().will_return("layout_obj")
         alignment.create_objects_for_layout_segments("v_layout", "layout_obj").should_be_called()
+        alignment.commit_layout_change(entity).should_be_called()
         result = subject.exit_pvi_edit_mode(ifc, alignment, alignment_id=1, apply=True)
         assert result is True
 
@@ -701,6 +704,7 @@ class TestUpdateCantSegments:
         alignment.get_cant_layout(entity).should_be_called().will_return("cant_layout")
         alignment.get_horizontal_extent_semantic(entity).should_be_called().will_return(500.0)
         alignment.write_cant_segments(entity, points).should_be_called()
+        alignment.commit_layout_change(entity).should_be_called()
         result = subject.update_cant_segments(ifc, alignment, alignment_id=1, points=points)
         assert result is True
 
@@ -741,3 +745,149 @@ class TestDeleteCantLayout:
         alignment.remove_cant_layout(entity).should_be_called()
         result = subject.delete_cant_layout(ifc, alignment, alignment_id=1)
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# add_station_equation  (spec 4.3)
+# ---------------------------------------------------------------------------
+
+
+class TestAddStationEquation:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.add_station_equation(ifc, alignment, alignment_id=1, back_station=100.0, ahead_station=200.0)
+
+    def test_raises_when_alignment_not_found(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        with pytest.raises(ValueError, match="not found"):
+            subject.add_station_equation(ifc, alignment, alignment_id=1, back_station=100.0, ahead_station=200.0)
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.add_station_equation(ifc, alignment, alignment_id=1, back_station=100.0, ahead_station=200.0)
+
+    def test_raises_when_back_and_ahead_stations_are_equal(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="must differ"):
+            subject.add_station_equation(ifc, alignment, alignment_id=1, back_station=100.0, ahead_station=100.0)
+
+    def test_raises_when_back_station_unreachable(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.distance_along_from_station(entity, 150.0).should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="not reachable"):
+            subject.add_station_equation(ifc, alignment, alignment_id=1, back_station=150.0, ahead_station=500.0)
+
+    def test_creates_gap_equation_and_returns_referent(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.distance_along_from_station(entity, 100.0).should_be_called().will_return(100.0)
+        alignment.add_station_equation_referent(entity, 100.0, 100.0, 300.0).should_be_called().will_return("referent")
+        result = subject.add_station_equation(ifc, alignment, alignment_id=1, back_station=100.0, ahead_station=300.0)
+        assert result == "referent"
+
+    def test_creates_overlap_equation_and_returns_referent(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.distance_along_from_station(entity, 300.0).should_be_called().will_return(300.0)
+        alignment.add_station_equation_referent(entity, 300.0, 300.0, 100.0).should_be_called().will_return("referent")
+        result = subject.add_station_equation(ifc, alignment, alignment_id=1, back_station=300.0, ahead_station=100.0)
+        assert result == "referent"
+
+
+# ---------------------------------------------------------------------------
+# add_event_referent  (spec 4.4)
+# ---------------------------------------------------------------------------
+
+
+class TestAddEventReferent:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.add_event_referent(ifc, alignment, alignment_id=1, event_type="SUPERELEVATIONEVENT", station=100.0)
+
+    def test_raises_when_alignment_not_found(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        with pytest.raises(ValueError, match="not found"):
+            subject.add_event_referent(ifc, alignment, alignment_id=1, event_type="SUPERELEVATIONEVENT", station=100.0)
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.add_event_referent(ifc, alignment, alignment_id=1, event_type="SUPERELEVATIONEVENT", station=100.0)
+
+    def test_raises_when_event_type_is_unknown(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="Unknown event type"):
+            subject.add_event_referent(ifc, alignment, alignment_id=1, event_type="BOGUSEVENT", station=100.0)
+
+    def test_creates_superelevation_event_and_returns_referent(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.add_event_referent(entity, "SUPERELEVATIONEVENT", 100.0, "", None).should_be_called().will_return(
+            "referent"
+        )
+        result = subject.add_event_referent(
+            ifc, alignment, alignment_id=1, event_type="SUPERELEVATIONEVENT", station=100.0
+        )
+        assert result == "referent"
+
+    def test_creates_width_event_with_name_and_value(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.add_event_referent(entity, "WIDTHEVENT", 250.0, "Lane Widening", 3.6).should_be_called().will_return(
+            "referent"
+        )
+        result = subject.add_event_referent(
+            ifc,
+            alignment,
+            alignment_id=1,
+            event_type="WIDTHEVENT",
+            station=250.0,
+            name="Lane Widening",
+            value=3.6,
+        )
+        assert result == "referent"
+
+
+# ---------------------------------------------------------------------------
+# remove_referent  (spec 4.1)
+# ---------------------------------------------------------------------------
+
+
+class TestRemoveReferent:
+    def test_raises_when_no_ifc_file_loaded(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(None)
+        with pytest.raises(ValueError, match="No IFC file loaded"):
+            subject.remove_referent(ifc, alignment, alignment_id=1, referent_id=99)
+
+    def test_raises_when_alignment_not_found(self, ifc, alignment):
+        ifc.get().should_be_called().will_return(FakeIfcFile(not_found=True))
+        with pytest.raises(ValueError, match="not found"):
+            subject.remove_referent(ifc, alignment, alignment_id=1, referent_id=99)
+
+    def test_raises_when_entity_is_not_an_alignment(self, ifc, alignment):
+        entity = make_non_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        with pytest.raises(ValueError, match="not an IfcAlignment"):
+            subject.remove_referent(ifc, alignment, alignment_id=1, referent_id=99)
+
+    def test_raises_when_referent_not_nested_on_alignment(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_referents(entity).should_be_called().will_return([{"id": 1, "name": "x"}])
+        with pytest.raises(ValueError, match="not nested"):
+            subject.remove_referent(ifc, alignment, alignment_id=1, referent_id=99)
+
+    def test_removes_referent(self, ifc, alignment):
+        entity = make_alignment_entity()
+        ifc.get().should_be_called().will_return(FakeIfcFile(entity=entity))
+        alignment.get_referents(entity).should_be_called().will_return([{"id": 99, "name": "x"}])
+        alignment.remove_referent(entity, 99).should_be_called()
+        subject.remove_referent(ifc, alignment, alignment_id=1, referent_id=99)

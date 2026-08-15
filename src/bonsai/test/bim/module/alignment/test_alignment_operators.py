@@ -445,7 +445,8 @@ class TestCreateAlignmentByPi(NewIfc4X3):
 
         # Should have at least the alignment object in the scene
         alignment_objects = [
-            obj for obj in bpy.data.objects
+            obj
+            for obj in bpy.data.objects
             if tool.Ifc.get_entity(obj) and tool.Ifc.get_entity(obj).is_a("IfcAlignment")
         ]
         assert len(alignment_objects) >= 1
@@ -767,13 +768,15 @@ class TestEndToEndAlignmentCreation(NewIfc4X3):
         ifc_file = tool.Ifc.get()
         props = get_alignment_props()
 
-        add_pis_to_props([
-            (0, 0, 0),
-            (300, 0, 200),
-            (600, 300, 150),
-            (900, 300, 250),
-            (1200, 0, 0),
-        ])
+        add_pis_to_props(
+            [
+                (0, 0, 0),
+                (300, 0, 200),
+                (600, 300, 150),
+                (900, 300, 250),
+                (1200, 0, 0),
+            ]
+        )
 
         result = bpy.ops.civil.create_alignment_by_pi()
         assert result == {"FINISHED"}
@@ -1277,3 +1280,170 @@ class TestRecalculateCant(NewIfc4X3):
         real_segments = [s for s in segments if not tool.Alignment.is_zero_length_segment(s)]
         assert len(real_segments) == 1
         assert real_segments[0].DesignParameters.HorizontalLength == pytest.approx(50.0)
+
+
+# ===========================================================================
+# Stationing Referents (spec Section 4)
+# ===========================================================================
+
+
+@requires_geometry_engine
+class TestAddStationingReferent(NewIfc4X3):
+    """Tests for CIVIL_OT_add_stationing_referent (civil.add_stationing_referent).
+
+    Gated: ifcopenshell.api.alignment.add_stationing_referent calls
+    update_fallback_position, which (via ifcopenshell.util.placement.
+    get_local_placement -> ifcopenshell.geom.create_shape) needs the
+    geometry engine whenever the alignment's curve already has real
+    geometry — true even for the bare create_empty_alignment() fixture,
+    since align_api.create() always builds a zero-length-terminator
+    representation. See TestAddEventReferent below for the one referent
+    kind that stays ungated (spec 4.4's add_event_referent deliberately
+    skips that call).
+    """
+
+    def test_add_stationing_referent_syncs_referent_list(self):
+        alignment, alignment_obj = create_empty_alignment("StaRef")
+        props = get_alignment_props()
+        props.start_station = 0.0
+
+        result = bpy.ops.civil.add_stationing_referent(station=150.0, name="Test Ref")
+
+        assert result == {"FINISHED"}
+        assert len(props.referents) >= 1
+        assert any(r.referent_name == "Test Ref" for r in props.referents)
+        # And it is genuinely on IFC, not just the UI mirror.
+        ifc_file = tool.Ifc.get()
+        alignment_fresh = ifc_file.by_id(alignment.id())
+        assert any(r["name"] == "Test Ref" for r in tool.Alignment.get_referents(alignment_fresh))
+
+
+@requires_geometry_engine
+class TestAddStationEquationOperator(NewIfc4X3):
+    """Tests for CIVIL_OT_add_station_equation (civil.add_station_equation) —
+    spec 4.3.
+
+    Gated for the same reason as TestAddStationingReferent above:
+    add_station_equation_referent is a thin wrapper over
+    align_api.add_stationing_referent.
+    """
+
+    def test_add_station_equation_shows_equation_marker_in_referent_list(self):
+        alignment, alignment_obj = create_empty_alignment("EqnTest")
+        props = get_alignment_props()
+        props.start_station = 0.0
+
+        result = bpy.ops.civil.add_station_equation(back_station=100.0, ahead_station=300.0)
+
+        assert result == {"FINISHED"}
+        equation_items = [r for r in props.referents if r.is_equation]
+        assert len(equation_items) == 1
+        assert equation_items[0].incoming_station == pytest.approx(100.0)
+        assert equation_items[0].station == pytest.approx(300.0)
+
+    def test_add_station_equation_rejects_equal_back_and_ahead(self):
+        alignment, alignment_obj = create_empty_alignment("EqnBad")
+        props = get_alignment_props()
+        props.start_station = 0.0
+
+        result = bpy.ops.civil.add_station_equation(back_station=100.0, ahead_station=100.0)
+
+        # core.add_station_equation raises ValueError -> operator reports
+        # an error and cancels rather than authoring a no-op equation.
+        assert result == {"CANCELLED"}
+        assert not any(r.is_equation for r in props.referents)
+
+
+class TestAddEventReferentOperator(NewIfc4X3):
+    """Tests for CIVIL_OT_add_event_referent (civil.add_event_referent) —
+    spec 4.4. Semantic authoring: NOT gated behind @requires_geometry_engine
+    (see tool.Alignment.add_event_referent's comment on why it skips
+    update_fallback_position)."""
+
+    def test_add_event_referent_creates_entity_and_syncs_list(self):
+        import ifcopenshell.util.element
+
+        alignment, alignment_obj = create_empty_alignment("EventTest")
+        props = get_alignment_props()
+
+        result = bpy.ops.civil.add_event_referent(
+            event_type="WIDTHEVENT", station=150.0, name="Widen Here", use_value=True, value=3.6
+        )
+
+        assert result == {"FINISHED"}
+        # create_empty_alignment() -> align_api.create() already seeds one
+        # default STATION referent at start_station -- the event referent
+        # is the second entry.
+        assert len(props.referents) == 2
+        item = next(r for r in props.referents if r.predefined_type == "WIDTHEVENT")
+        assert item.referent_name == "Widen Here"
+        assert item.has_station
+        assert item.station == pytest.approx(150.0)
+
+        ifc_file = tool.Ifc.get()
+        alignment_fresh = ifc_file.by_id(alignment.id())
+        referents = [r for r in ifc_file.by_type("IfcReferent") if r.PredefinedType == "WIDTHEVENT"]
+        assert len(referents) == 1
+        assert ifcopenshell.util.element.get_pset(referents[0], "Pset_SaikeiEvent")["Value"] == pytest.approx(3.6)
+
+    def test_add_event_referent_without_value_omits_saikei_event_pset(self):
+        import ifcopenshell.util.element
+
+        create_empty_alignment("EventNoValue")
+
+        result = bpy.ops.civil.add_event_referent(event_type="SUPERELEVATIONEVENT", station=75.0, use_value=False)
+
+        assert result == {"FINISHED"}
+        ifc_file = tool.Ifc.get()
+        referent = next(r for r in ifc_file.by_type("IfcReferent") if r.PredefinedType == "SUPERELEVATIONEVENT")
+        assert ifcopenshell.util.element.get_pset(referent, "Pset_SaikeiEvent") is None
+
+
+class TestRemoveReferent(NewIfc4X3):
+    """Tests for CIVIL_OT_remove_referent (civil.remove_referent) — spec
+    4.1 ("Deletable"). Seeds referents via the semantic add_event_referent
+    tool method directly rather than through the geometry-gated stationing
+    operators, so removal itself can be tested without the engine."""
+
+    def test_remove_referent_deletes_entity_and_resyncs_list(self):
+        alignment, alignment_obj = create_empty_alignment("RemoveMe")
+        tool.Alignment.add_event_referent(alignment, "SUPERELEVATIONEVENT", 100.0)
+        props = get_alignment_props()
+        bpy.ops.civil.refresh_referent_list()
+        # create_empty_alignment() -> align_api.create() already seeds one
+        # default STATION referent at station 0.0; sorted ahead of the
+        # SUPERELEVATIONEVENT referent at station 100.0.
+        assert len(props.referents) == 2
+        equation_index = next(i for i, r in enumerate(props.referents) if r.predefined_type == "SUPERELEVATIONEVENT")
+        props.active_referent_index = equation_index
+
+        result = bpy.ops.civil.remove_referent()
+
+        assert result == {"FINISHED"}
+        assert len(props.referents) == 1
+        assert props.referents[0].predefined_type == "STATION"
+        ifc_file = tool.Ifc.get()
+        alignment_fresh = ifc_file.by_id(alignment.id())
+        remaining = tool.Alignment.get_referents(alignment_fresh)
+        assert all(r["predefined_type"] != "SUPERELEVATIONEVENT" for r in remaining)
+
+    def test_remove_referent_poll_fails_when_nothing_selected(self):
+        create_empty_alignment("NothingSelected")
+        assert bpy.ops.civil.remove_referent.poll() is False
+
+
+class TestRefreshReferentList(NewIfc4X3):
+    """Tests for CIVIL_OT_refresh_referent_list (civil.refresh_referent_list)."""
+
+    def test_refresh_populates_referent_list_from_ifc(self):
+        alignment, alignment_obj = create_empty_alignment("RefreshMe")
+        tool.Alignment.add_event_referent(alignment, "WIDTHEVENT", 200.0)
+        props = get_alignment_props()
+        assert len(props.referents) == 0  # not yet synced
+
+        result = bpy.ops.civil.refresh_referent_list()
+
+        assert result == {"FINISHED"}
+        # create_empty_alignment() -> align_api.create() already seeds one
+        # default STATION referent; the WIDTHEVENT referent is the second.
+        assert len(props.referents) == 2

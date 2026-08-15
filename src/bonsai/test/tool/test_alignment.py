@@ -430,9 +430,7 @@ class TestSafeLayoutHorizontalByPiMethod(NewFile):
         alignment = ifc.createIfcAlignment()
         layout = ifc.createIfcAlignmentHorizontal()
         ifc.createIfcRelNests(RelatingObject=alignment, RelatedObjects=[layout])
-        result = subject.safe_layout_horizontal_by_pi_method(
-            ifc, layout, hpoints=[(0.0, 0.0), (100.0, 0.0)], radii=[]
-        )
+        result = subject.safe_layout_horizontal_by_pi_method(ifc, layout, hpoints=[(0.0, 0.0), (100.0, 0.0)], radii=[])
         assert result is True
 
 
@@ -562,8 +560,11 @@ class TestCalculateElevationOnParabola(NewFile):
     def test_falls_back_to_linear_for_zero_curve_length(self):
         """Zero curve length → straight tangent grade."""
         elev = subject.calculate_elevation_on_parabola(
-            start_elevation=100.0, start_gradient=0.05,
-            end_gradient=-0.05, curve_length=0.0, distance_from_bvc=50.0,
+            start_elevation=100.0,
+            start_gradient=0.05,
+            end_gradient=-0.05,
+            curve_length=0.0,
+            distance_from_bvc=50.0,
         )
         assert_close(elev, 102.5)  # 100 + 0.05 * 50
 
@@ -682,7 +683,7 @@ class TestCalculatePviGeometry(NewFile):
         pvis = [(0.0, 100.0), (100.0, 102.0), (300.0, 98.0)]
         result = subject.calculate_pvi_geometry(pvis)
         assert len(result.grades) == 2
-        assert_close(result.grades[0], 0.02)   # +2% uphill
+        assert_close(result.grades[0], 0.02)  # +2% uphill
         assert_close(result.grades[1], -0.02)  # -2% downhill
 
     def test_calculates_bvc_evc_for_interior_pvi(self):
@@ -720,8 +721,8 @@ class TestCalculatePviGeometry(NewFile):
     def test_two_interior_pvis_produce_two_k_values(self):
         pvis = [
             (0.0, 100.0),
-            (200.0, 104.0),   # interior 1: g_in=+2%, g_out varies
-            (600.0, 100.0),   # interior 2
+            (200.0, 104.0),  # interior 1: g_in=+2%, g_out varies
+            (600.0, 100.0),  # interior 2
             (1000.0, 92.0),
         ]
         result = subject.calculate_pvi_geometry(pvis, curve_lengths=[100.0, 150.0])
@@ -907,9 +908,7 @@ class TestGetHorizontalLayout(NewIfc4X3):
     def test_returns_none_for_alignment_without_horizontal(self):
         ifc_file = tool.Ifc.get()
         # Create a bare alignment without the helper (no nesting)
-        alignment = ifc_file.createIfcAlignment(
-            GlobalId=ifcopenshell.guid.new(), Name="Bare"
-        )
+        alignment = ifc_file.createIfcAlignment(GlobalId=ifcopenshell.guid.new(), Name="Bare")
         h_layout = subject.get_horizontal_layout(alignment)
         assert h_layout is None
 
@@ -956,9 +955,7 @@ class TestLayoutByPiMethod(NewIfc4X3):
         alignment = align_api.create(ifc_file, name="Curve")
         h_layout = subject.get_horizontal_layout(alignment)
 
-        subject.layout_by_pi_method(
-            h_layout, [(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], [300.0]
-        )
+        subject.layout_by_pi_method(h_layout, [(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], [300.0])
 
         segments = align_api.get_layout_segments(h_layout)
         real_segments = [s for s in segments if not subject.is_zero_length_segment(s)]
@@ -977,9 +974,7 @@ class TestBackCalculatePisFromAlignment(NewIfc4X3):
     """Tests for Alignment.back_calculate_pis_from_alignment() — PI recovery."""
 
     def test_recovers_endpoints_from_straight_alignment(self):
-        alignment, _ = _create_alignment_with_pis(
-            hpoints=[(0.0, 0.0), (1000.0, 0.0)], radii=[]
-        )
+        alignment, _ = _create_alignment_with_pis(hpoints=[(0.0, 0.0), (1000.0, 0.0)], radii=[])
         pis = subject.back_calculate_pis_from_alignment(alignment)
         assert len(pis) >= 2
         assert pis[0]["pi_type"] == "ENDPOINT"
@@ -990,9 +985,7 @@ class TestBackCalculatePisFromAlignment(NewIfc4X3):
         assert_close(pis[-1]["n"], 0.0, tol=0.01)
 
     def test_recovers_curve_pi_with_radius(self):
-        alignment, _ = _create_alignment_with_pis(
-            hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0]
-        )
+        alignment, _ = _create_alignment_with_pis(hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0])
         pis = subject.back_calculate_pis_from_alignment(alignment)
         # Should have 3 PIs: start endpoint, curve PI, end endpoint
         assert len(pis) == 3
@@ -1004,9 +997,7 @@ class TestBackCalculatePisFromAlignment(NewIfc4X3):
 
     def test_raises_for_alignment_without_horizontal_layout(self):
         ifc_file = tool.Ifc.get()
-        alignment = ifc_file.createIfcAlignment(
-            GlobalId=ifcopenshell.guid.new(), Name="Bare"
-        )
+        alignment = ifc_file.createIfcAlignment(GlobalId=ifcopenshell.guid.new(), Name="Bare")
         with pytest.raises(ValueError, match="no horizontal layout"):
             subject.back_calculate_pis_from_alignment(alignment)
 
@@ -1021,9 +1012,7 @@ class TestBackCalculatePisFromAlignment(NewIfc4X3):
         """Create alignment from PIs, back-calculate, verify positions match."""
         original_hpoints = [(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)]
         original_radii = [300.0]
-        alignment, _ = _create_alignment_with_pis(
-            hpoints=original_hpoints, radii=original_radii
-        )
+        alignment, _ = _create_alignment_with_pis(hpoints=original_hpoints, radii=original_radii)
 
         recovered_pis = subject.back_calculate_pis_from_alignment(alignment)
         assert len(recovered_pis) == len(original_hpoints)
@@ -1154,9 +1143,7 @@ class TestCreatePiEditEmpties(NewIfc4X3):
     """Tests for Alignment.create_pi_edit_empties()."""
 
     def test_creates_empties_at_pi_positions(self):
-        alignment, _ = _create_alignment_with_pis(
-            hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0]
-        )
+        alignment, _ = _create_alignment_with_pis(hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0])
         alignment_obj = subject.create_hierarchy_for_alignment(alignment)
         bpy.context.view_layer.objects.active = alignment_obj
 
@@ -1170,9 +1157,7 @@ class TestCreatePiEditEmpties(NewIfc4X3):
             assert empty.get("civil_alignment_id") == alignment.id()
 
     def test_empties_are_parented_to_alignment_object(self):
-        alignment, _ = _create_alignment_with_pis(
-            hpoints=[(0.0, 0.0), (500.0, 0.0)], radii=[]
-        )
+        alignment, _ = _create_alignment_with_pis(hpoints=[(0.0, 0.0), (500.0, 0.0)], radii=[])
         alignment_obj = subject.create_hierarchy_for_alignment(alignment)
         pis = subject.back_calculate_pis_from_alignment(alignment)
         empties = subject.create_pi_edit_empties(alignment, pis)
@@ -1180,9 +1165,7 @@ class TestCreatePiEditEmpties(NewIfc4X3):
             assert empty.parent == alignment_obj
 
     def test_empties_have_sequential_pi_indices(self):
-        alignment, _ = _create_alignment_with_pis(
-            hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0]
-        )
+        alignment, _ = _create_alignment_with_pis(hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0])
         alignment_obj = subject.create_hierarchy_for_alignment(alignment)
         pis = subject.back_calculate_pis_from_alignment(alignment)
         empties = subject.create_pi_edit_empties(alignment, pis)
@@ -1195,9 +1178,7 @@ class TestGetPiEditEmpties(NewIfc4X3):
     """Tests for Alignment.get_pi_edit_empties()."""
 
     def test_finds_empties_for_given_alignment_id(self):
-        alignment, _ = _create_alignment_with_pis(
-            hpoints=[(0.0, 0.0), (500.0, 0.0)], radii=[]
-        )
+        alignment, _ = _create_alignment_with_pis(hpoints=[(0.0, 0.0), (500.0, 0.0)], radii=[])
         alignment_obj = subject.create_hierarchy_for_alignment(alignment)
         pis = subject.back_calculate_pis_from_alignment(alignment)
         subject.create_pi_edit_empties(alignment, pis)
@@ -1210,9 +1191,7 @@ class TestGetPiEditEmpties(NewIfc4X3):
         assert found == []
 
     def test_returns_sorted_by_pi_index(self):
-        alignment, _ = _create_alignment_with_pis(
-            hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0]
-        )
+        alignment, _ = _create_alignment_with_pis(hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0])
         alignment_obj = subject.create_hierarchy_for_alignment(alignment)
         pis = subject.back_calculate_pis_from_alignment(alignment)
         subject.create_pi_edit_empties(alignment, pis)
@@ -1227,9 +1206,7 @@ class TestRemovePiEditEmpties(NewIfc4X3):
     """Tests for Alignment.remove_pi_edit_empties()."""
 
     def test_removes_all_empties_for_alignment(self):
-        alignment, _ = _create_alignment_with_pis(
-            hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0]
-        )
+        alignment, _ = _create_alignment_with_pis(hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0])
         alignment_obj = subject.create_hierarchy_for_alignment(alignment)
         pis = subject.back_calculate_pis_from_alignment(alignment)
         subject.create_pi_edit_empties(alignment, pis)
@@ -1249,9 +1226,7 @@ class TestCollectPisFromEmpties(NewIfc4X3):
 
     def test_roundtrip_positions_through_empties(self):
         """Create empties from PIs, collect back, verify positions match."""
-        alignment, _ = _create_alignment_with_pis(
-            hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0]
-        )
+        alignment, _ = _create_alignment_with_pis(hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0])
         alignment_obj = subject.create_hierarchy_for_alignment(alignment)
 
         pis = subject.back_calculate_pis_from_alignment(alignment)
@@ -1269,9 +1244,7 @@ class TestCollectPisFromEmpties(NewIfc4X3):
             assert_close(back_n, pi["n"], tol=2.0)
 
     def test_collects_radii_for_interior_pis_only(self):
-        alignment, _ = _create_alignment_with_pis(
-            hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0]
-        )
+        alignment, _ = _create_alignment_with_pis(hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0])
         alignment_obj = subject.create_hierarchy_for_alignment(alignment)
         pis = subject.back_calculate_pis_from_alignment(alignment)
         subject.create_pi_edit_empties(alignment, pis)
@@ -1302,9 +1275,7 @@ class TestRemoveAlignmentHierarchy(NewIfc4X3):
         assert root_obj is not None
 
         # Count objects before removal (excluding default camera/light)
-        alignment_objects_before = [
-            o for o in bpy.data.objects if tool.Ifc.get_entity(o)
-        ]
+        alignment_objects_before = [o for o in bpy.data.objects if tool.Ifc.get_entity(o)]
         assert len(alignment_objects_before) > 0
 
         removed = subject.remove_alignment_hierarchy(alignment)
@@ -1327,9 +1298,7 @@ class TestIfcSaveReloadRoundtrip(NewIfc4X3):
         import tempfile
         import os
 
-        alignment, _ = _create_alignment_with_pis(
-            hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0]
-        )
+        alignment, _ = _create_alignment_with_pis(hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0])
 
         ifc_file = tool.Ifc.get()
         alignment_count_before = len(ifc_file.by_type("IfcAlignment"))
@@ -1481,9 +1450,7 @@ class TestGetAlignmentLength(NewFile):
         ifcopenshell.api.unit.assign_unit(ifc)
         alignment = align_api.create(ifc, name="Len", include_vertical=False)
         h_layout = align_api.get_horizontal_layout(alignment)
-        align_api.layout_horizontal_alignment_by_pi_method(
-            ifc, h_layout, hpoints=[(0.0, 0.0), (1000.0, 0.0)], radii=[]
-        )
+        align_api.layout_horizontal_alignment_by_pi_method(ifc, h_layout, hpoints=[(0.0, 0.0), (1000.0, 0.0)], radii=[])
         assert_close(subject.get_alignment_length(alignment), 1000.0, tol=1e-6)
 
     def test_returns_none_without_horizontal_layout(self):
@@ -1509,9 +1476,7 @@ class TestCreate3DAlignmentObject(NewIfc4X3):
         ifc_file = tool.Ifc.get()
         alignment = align_api.create(ifc_file, name="C3D", include_vertical=False)
         h = align_api.get_horizontal_layout(alignment)
-        align_api.layout_horizontal_alignment_by_pi_method(
-            ifc_file, h, hpoints=[(0.0, 0.0), (1000.0, 0.0)], radii=[]
-        )
+        align_api.layout_horizontal_alignment_by_pi_method(ifc_file, h, hpoints=[(0.0, 0.0), (1000.0, 0.0)], radii=[])
         v = align_api.add_vertical_layout(ifc_file, alignment)
         align_api.layout_vertical_alignment_by_pi_method(
             ifc_file, v, [(0.0, 100.0), (500.0, 110.0), (1000.0, 100.0)], [100.0]
@@ -1679,9 +1644,7 @@ class TestBuildProfileViewTransform(NewFile):
 
     def test_exaggeration_locks_vertical_scale_to_horizontal(self):
         design = [(0.0, 100.0), (1000.0, 110.0)]
-        transform = subject.build_profile_view_transform(
-            design, [], 0.0, 0.0, 500.0, 200.0, vertical_exaggeration=10.0
-        )
+        transform = subject.build_profile_view_transform(design, [], 0.0, 0.0, 500.0, 200.0, vertical_exaggeration=10.0)
         # Horizontal scale: 500 px / 1000 units = 0.5 px/unit; ×10 exaggeration
         # gives 5 px/unit vertically → 200 px shows 40 units, centered on 105.
         assert_close(transform.elevation_min, 85.0)
@@ -1689,9 +1652,7 @@ class TestBuildProfileViewTransform(NewFile):
 
     def test_zero_exaggeration_keeps_auto_fit_with_padding(self):
         design = [(0.0, 100.0), (1000.0, 110.0)]
-        transform = subject.build_profile_view_transform(
-            design, [], 0.0, 0.0, 500.0, 200.0, vertical_exaggeration=0.0
-        )
+        transform = subject.build_profile_view_transform(design, [], 0.0, 0.0, 500.0, 200.0, vertical_exaggeration=0.0)
         # Auto-fit pads the raw [100, 110] range by 10% of the span each side.
         assert_close(transform.elevation_min, 99.0)
         assert_close(transform.elevation_max, 111.0)
@@ -1760,9 +1721,7 @@ class TestSampleTerrainProfile(NewFile):
         ifcopenshell.api.unit.assign_unit(ifc)
         alignment = align_api.create(ifc, name="TerrainAlign", include_vertical=False)
         h_layout = align_api.get_horizontal_layout(alignment)
-        align_api.layout_horizontal_alignment_by_pi_method(
-            ifc, h_layout, hpoints=[(0.0, 0.0), (length, 0.0)], radii=[]
-        )
+        align_api.layout_horizontal_alignment_by_pi_method(ifc, h_layout, hpoints=[(0.0, 0.0), (length, 0.0)], radii=[])
         return alignment
 
     @staticmethod
@@ -1870,9 +1829,7 @@ class TestClearLayoutSegments(NewFile):
             ifc, h, hpoints=[(0.0, 0.0), (500.0, 0.0), (1000.0, 200.0)], radii=[300.0]
         )
         subject.clear_layout_segments(h)
-        align_api.layout_horizontal_alignment_by_pi_method(
-            ifc, h, hpoints=[(0.0, 0.0), (1000.0, 0.0)], radii=[]
-        )
+        align_api.layout_horizontal_alignment_by_pi_method(ifc, h, hpoints=[(0.0, 0.0), (1000.0, 0.0)], radii=[])
         nested = align_api.get_layout_segments(h)
         real = [s for s in nested if not subject.is_zero_length_segment(s)]
         assert len(real) == 1  # exactly one LINE — no leftover from the first layout
@@ -3135,3 +3092,261 @@ class TestRemoveVerticalLayout(NewIfc4X3):
         assert ("Axis", "Curve2D") in identifiers
         assert ("Axis", "Curve3D") not in identifiers
         assert ("FootPrint", "Curve2D") not in identifiers
+
+
+# ---------------------------------------------------------------------------
+# Stationing Referents (spec Section 4)
+# ---------------------------------------------------------------------------
+
+
+class TestGetReferents(NewIfc4X3):
+    """Tests for Alignment.get_referents() — spec 4.2."""
+
+    def test_returns_the_default_start_station_referent(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Test", start_station=100.0, include_vertical=False)
+
+        referents = subject.get_referents(alignment)
+
+        assert len(referents) == 1
+        entry = referents[0]
+        assert entry["predefined_type"] == "STATION"
+        assert_close(entry["station"], 100.0)
+        assert entry["is_equation"] is False
+        assert entry["incoming_station"] is None
+
+    def test_includes_a_manually_nested_position_referent_and_sorts_by_station(self):
+        import ifcopenshell.api.pset
+        import ifcopenshell.guid
+
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Test", start_station=0.0, include_vertical=False)
+
+        # A manually-nested POSITION referent (e.g. representing a bridge
+        # pier or other feature located along the alignment) at a LATER
+        # station than the default start referent -- proves get_referents
+        # walks every IfcRelNests under the alignment, not just the
+        # stationing one, and sorts the combined result by station.
+        position_referent = ifc_file.createIfcReferent(
+            GlobalId=ifcopenshell.guid.new(), Name="Pier 1", PredefinedType="POSITION"
+        )
+        pset = ifcopenshell.api.pset.add_pset(ifc_file, product=position_referent, name="Pset_Stationing")
+        ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset, properties={"Station": 250.0})
+        ifc_file.createIfcRelNests(
+            GlobalId=ifcopenshell.guid.new(), RelatingObject=alignment, RelatedObjects=(position_referent,)
+        )
+
+        referents = subject.get_referents(alignment)
+
+        assert len(referents) == 2
+        assert [r["predefined_type"] for r in referents] == ["STATION", "POSITION"]
+        assert_close(referents[0]["station"], 0.0)
+        assert_close(referents[1]["station"], 250.0)
+        assert referents[1]["name"] == "Pier 1"
+        assert referents[1]["id"] == position_referent.id()
+
+    def test_returns_empty_list_for_alignment_with_no_referents(self):
+        import ifcopenshell.api.root
+
+        ifc_file = tool.Ifc.get()
+        alignment = ifcopenshell.api.root.create_entity(ifc_file, ifc_class="IfcAlignment", name="Bare")
+        assert subject.get_referents(alignment) == []
+
+
+class TestAddEventReferent(NewIfc4X3):
+    """Tests for Alignment.add_event_referent() — spec 4.4.
+
+    Unlike TestAddStationEquationReferent below, this is NOT gated behind
+    @requires_geometry_engine: add_event_referent deliberately skips
+    align_api.update_fallback_position (see its comment in
+    tool.Alignment.add_event_referent) so it stays fully semantic, even
+    though it otherwise mirrors add_stationing_referent's placement
+    construction.
+    """
+
+    def test_creates_superelevation_event_referent(self):
+        import ifcopenshell.util.element
+
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Test", include_vertical=False)
+
+        referent = subject.add_event_referent(alignment, "SUPERELEVATIONEVENT", 250.0)
+
+        assert referent.is_a("IfcReferent")
+        assert referent.PredefinedType == "SUPERELEVATIONEVENT"
+        pset = ifcopenshell.util.element.get_pset(referent, "Pset_Stationing", should_inherit=False)
+        assert_close(pset["Station"], 250.0)
+
+    def test_records_optional_value_in_saikei_event_pset(self):
+        import ifcopenshell.util.element
+
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Test", include_vertical=False)
+
+        referent = subject.add_event_referent(alignment, "WIDTHEVENT", 300.0, name="Widen", value=3.6)
+
+        assert referent.Name == "Widen"
+        pset = ifcopenshell.util.element.get_pset(referent, "Pset_SaikeiEvent", should_inherit=False)
+        assert_close(pset["Value"], 3.6)
+
+    def test_omits_saikei_event_pset_when_no_value_given(self):
+        import ifcopenshell.util.element
+
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Test", include_vertical=False)
+
+        referent = subject.add_event_referent(alignment, "SUPERELEVATIONEVENT", 250.0)
+
+        pset = ifcopenshell.util.element.get_pset(referent, "Pset_SaikeiEvent", should_inherit=False)
+        assert pset is None
+
+    def test_nests_events_separately_from_the_stationing_nest_and_reuses_it(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Test", include_vertical=False)
+
+        first = subject.add_event_referent(alignment, "SUPERELEVATIONEVENT", 250.0)
+
+        stationing_nest = align_api.get_stationing_nest(ifc_file, alignment)
+        assert first not in stationing_nest.RelatedObjects
+
+        second = subject.add_event_referent(alignment, "WIDTHEVENT", 400.0)
+
+        events_nests = [rel for rel in alignment.IsNestedBy if first in rel.RelatedObjects]
+        # The same events nest is reused across calls -- not a fresh
+        # IfcRelNests every time (mirrors commit_layout_change's key-point
+        # nest tracking).
+        assert len(events_nests) == 1
+        assert second in events_nests[0].RelatedObjects
+
+
+@requires_geometry_engine
+class TestAddStationEquationReferent(NewIfc4X3):
+    """Tests for Alignment.add_station_equation_referent() — spec 4.3.
+
+    Gated: this is a thin wrapper over align_api.add_stationing_referent,
+    which needs the geometry engine for the same update_fallback_position
+    reason as TestAddEventReferent above.
+    """
+
+    def test_writes_incoming_station_and_returns_station_referent(self):
+        import ifcopenshell.util.element
+
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Test", start_station=0.0, include_vertical=False)
+
+        referent = subject.add_station_equation_referent(
+            alignment, distance_along=100.0, back_station=100.0, ahead_station=300.0
+        )
+
+        assert referent.PredefinedType == "STATION"
+        pset = ifcopenshell.util.element.get_pset(referent, "Pset_Stationing", should_inherit=False)
+        assert_close(pset["Station"], 300.0)
+        assert_close(pset["IncomingStation"], 100.0)
+
+    def test_downstream_station_conversion_respects_the_equation(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Test", start_station=0.0, include_vertical=False)
+
+        subject.add_station_equation_referent(alignment, distance_along=100.0, back_station=100.0, ahead_station=300.0)
+
+        # distance_along 100 now reads as station 300 -- a 200-unit gap
+        # equation was just introduced at that point -- proving every
+        # downstream reader keyed off distance_along_from_station /
+        # station_from_distance_along automatically respects it.
+        result = align_api.station_from_distance_along(ifc_file, alignment, 100.0)
+        assert_close(result, 300.0)
+
+    def test_supports_an_overlap_equation(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Test", start_station=0.0, include_vertical=False)
+
+        # An overlap equation: ahead_station < back_station.
+        subject.add_station_equation_referent(alignment, distance_along=300.0, back_station=300.0, ahead_station=100.0)
+
+        result = align_api.station_from_distance_along(ifc_file, alignment, 300.0)
+        assert_close(result, 100.0)
+
+
+class TestGetStationTicks(NewIfc4X3):
+    """Tests for Alignment.get_station_ticks() — spec 4.1."""
+
+    def test_returns_empty_list_when_no_real_segments(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Empty", include_vertical=False)
+        assert subject.get_station_ticks(alignment, 100.0) == []
+
+    def test_returns_empty_list_when_evaluation_is_unavailable(self, monkeypatch):
+        """Degrades to [] when evaluate_alignment_at_station can't resolve
+        any station -- e.g. no geometry engine (IfcOpenShell#9301).
+        Monkeypatched so this is deterministic regardless of local engine
+        availability (get_station_ticks itself does nothing engine-specific
+        -- it just consumes evaluate_alignment_at_station's contract)."""
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="NoEval", include_vertical=False)
+        monkeypatch.setattr(subject, "get_alignment_length", classmethod(lambda cls, a: 300.0))
+        monkeypatch.setattr(subject, "evaluate_alignment_at_station", classmethod(lambda cls, a, s: None))
+
+        assert subject.get_station_ticks(alignment, 100.0) == []
+
+    @requires_geometry_engine
+    def test_returns_ticks_with_positions_directions_and_stations(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="WithEngine", start_station=0.0, include_vertical=False)
+        h_layout = align_api.get_horizontal_layout(alignment)
+        align_api.layout_horizontal_alignment_by_pi_method(
+            ifc_file, h_layout, hpoints=[(0.0, 0.0), (200.0, 0.0)], radii=[]
+        )
+
+        ticks = subject.get_station_ticks(alignment, 50.0)
+
+        assert len(ticks) >= 3  # stations 0, 50, 100, 150, 200
+        position, direction, station = ticks[0]
+        assert len(position) == 3
+        assert len(direction) == 3
+        assert isinstance(station, float)
+        assert_close(ticks[0][2], 0.0)
+
+
+class TestCommitLayoutChange(NewIfc4X3):
+    """Tests for Alignment.commit_layout_change() — spec 4.2."""
+
+    def test_returns_zero_for_alignment_with_no_real_segments(self):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Empty", include_vertical=False)
+
+        # A segment-less horizontal layout's update_key_point_referents call
+        # returns an empty nest without ever touching the geometry engine
+        # (no segments to iterate) -- this exercises the whole funnel
+        # deterministically, regardless of local engine availability.
+        count = subject.commit_layout_change(alignment)
+
+        assert count == 0
+
+    def test_swallows_geometry_mapping_runtime_error(self, monkeypatch):
+        """A "No geometry mapping registered" RuntimeError from any one
+        layout's update_key_point_referents call must not fail the commit
+        as a whole (IfcOpenShell#9301) -- spec 4.2's narrow-catch
+        requirement."""
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Test", include_vertical=False)
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("No geometry mapping registered for IfcAlignmentHorizontal")
+
+        monkeypatch.setattr(align_api, "update_key_point_referents", _raise)
+
+        count = subject.commit_layout_change(alignment)  # must not raise
+
+        assert count == 0
+
+    def test_reraises_unrelated_runtime_errors(self, monkeypatch):
+        ifc_file = tool.Ifc.get()
+        alignment = align_api.create(ifc_file, name="Test", include_vertical=False)
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("some unrelated failure")
+
+        monkeypatch.setattr(align_api, "update_key_point_referents", _raise)
+
+        with pytest.raises(RuntimeError, match="some unrelated failure"):
+            subject.commit_layout_change(alignment)
