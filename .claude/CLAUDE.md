@@ -92,37 +92,68 @@ tool.Blender.validate_shader_batch_data() / .scale_font_size()
 
 ## Testing
 
-> ### 0.9.0 test environment status (2026-08-15) — geometry engine LIVE
+> ### 0.9.0 test environment status (2026-08-25) — migrated to Blender 5.2 / Python 3.13
 >
-> The full 0.9 native runtime is **built locally** and installed in
-> `src/ifcopenshell-python/ifcopenshell/`: 59 DLLs including the eight
-> `ifcopenshell_geometry_mapping_*.dll` that the official win64 alpha
-> artifacts omit (upstream **#9301**; fix PR **#9305** open). Nothing is
-> geometry-gated any more — the `requires_geometry_engine` skipif marks
-> stay in place but all evaluate true, so the suites run with **zero
-> skips**: 503 alignment (tool + operator), 121 core, 110 API.
+> Blender 5.0 and 4.5 are **uninstalled**; Blender **5.2.1 LTS (Python 3.13.13)** is the
+> only target. The native runtime was rebuilt locally for cp313 and lives in
+> `src/ifcopenshell-python/ifcopenshell/`: **59 DLLs**, including the eight
+> `ifcopenshell_geometry_mapping_*.dll` and the JSON/GLB serializers that the official
+> win64 alpha artifacts omit (upstream **#9301**; fix PR **#9305** open). Geometry is
+> live — a wall meshes to 8 verts / 12 faces — and all 480 `bonsai.*` modules import.
+>
+> **The rebuild only works on `saikei-dev-0.9.0`.** Branch `bench-baseline-20260823`
+> (commit `eedfd1640`) froze the Python sources to match an *older* compiled wrapper but
+> left `src/ifcwrap` untouched, so its `file.py` has no `class file_mixin` while
+> `IfcParseWrapper.i:968` injects `from .file import file_mixin`. Regenerating the wrapper
+> there yields a circular import via the eager `MethodList` at `entity_instance.py:67`.
+> That branch cannot be rebuilt from its own sources — it is a frozen benchmark only.
+>
+> Rebuild recipe (from `win/`), see also the three traps:
+> 1. `BuildDepsCache-x64.txt` **overwrites env vars** — edit the file, don't export.
+>    Set `PYTHONHOME=C:\Python313` (3.13.7; ABI-compatible with Blender's 3.13.13).
+> 2. `NoDefaultCurrentDirectoryInExePath` is set on this machine, so the `win\*.bat`
+>    scripts cannot find their siblings (`vs-cfg.cmd`). Prepend the script dir to `PATH`
+>    via a small `.cmd` wrapper.
+> 3. Configure with `-DGLTF_SUPPORT=ON` (off by default; omits 9 DLLs), then build target
+>    `ifcopenshell_wrapper` with **`--parallel 1`**. Any N>1 dies with dozens of
+>    `error C1060: compiler is out of heap space` on the `geometry_mapping_ifc4`/`ifc4x1`
+>    units — not RAM size, and not a 32-bit compiler (`PreferredToolArchitecture` is
+>    already x64). MSBuild resumes, so retries make progress.
 >
 > Build inputs kept for rebuilds: `_deps/`, `_deps-vs2022-x64-installed/`,
-> `_installed-vs2022-x64/` (the built runtime, source of the copied DLLs).
-> Toolchain: VS2022 Build Tools v143; deps from the public
-> `IfcOpenShell/build-outputs@windows-x64` LFS cache. The previous official
-> runtime is backed up at
-> `%USERPROFILE%\ifcopenshell-runtime-backups\83fc219-official\`.
+> `_installed-vs2022-x64/`. Toolchain: VS2022 Build Tools v143 (MSVC 14.44.35207),
+> SWIG 4.2.1. **No cp311 fallback remains** — the previous runtime backup and the
+> `_build-vs2022-x64` tree were deleted on 2026-08-25, so a rebuild is a full
+> from-scratch configure + compile (build *inputs* under `_deps*`/`_installed-*` survive,
+> minus `_deps\python.3.11.8`).
 >
-> **TODO when #9305 merges:** swap back to official artifacts — download the
-> next `ifcopenshell-python-311-v0.9.0alpha0-<sha>-win64.zip`, replace the
-> DLLs + `.pyd` + `ifcopenshell_wrapper.py` in the package dir, re-run the
-> three suites. Rationale: bit-parity with what reviewers and CI actually
-> run, so a local pass means the same thing everywhere. Keep the local build
-> until that swap is verified green.
+> **Test status on 5.2 as of 2026-08-25** (measured, not aspirational):
+>
+> | Suite | Result |
+> |---|---|
+> | `test/core/` (no Blender) | **569 passed, 3 skipped** |
+> | `test/tool/` (Blender 5.2 headless) | **1720 passed, 78 failed, 1 skipped** |
+> | `test/bim/module/alignment/` (operators) | **120 passed** |
+>
+> The 78 tool failures span `test_surface` (35), `test_ifcgit` (15), `test_earthwork` (11),
+> `test_voxel` (5), `test_grading` (5), `test_project` (3), `test_blender` (3),
+> `test_drawing` (1). They are **order-dependent**: `test_earthwork` alone with
+> surface+grading reports 51 failures but only 11 in a full `test/tool/` run, so shared
+> state between suites is involved. A representative failure is
+> `bpy.ops.civil.compute_earthwork_volumes` receiving empty GUIDs because
+> `CivilSurfaceProperties.active_surface_guid` is not set after
+> `civil.surface_create_from_points`. Operator kwargs themselves are fine on 5.2
+> (verified with a minimal probe), so this is scene-PropertyGroup state, not a Blender
+> API change. **These have not been bisected against Blender 5.0, which is uninstalled —
+> whether they are 5.2 regressions or pre-existing on this branch is unresolved.**
 >
 > **Operator tests under `test/bim/` need two extra plugins** (see the
 > canonical command below): `-p saikei_parse_fix -p pytest_bdd.plugin`.
 > pytest-bdd + deps are installed in Blender's extensions site-packages
 > but don't autoload under `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`; and the
-> blosm addon shadows the PyPI `parse` package inside Blender, which
-> `saikei_parse_fix.py` (a shim installed in both the outer Python and
-> Blender extensions site-packages) evicts before pytest-bdd loads.
+> blosm addon (still present in 5.2's `scripts/addons`) shadows the PyPI `parse`
+> package inside Blender, which `saikei_parse_fix.py` (a shim installed in both the
+> outer Python and Blender extensions site-packages) evicts before pytest-bdd loads.
 >
 > **Signal to watch:** `.github/workflows/ci-bonsai-daily.yml` still reads
 > `branches: [v0.8.0]` — no 0.9.0 nightly yet; PR-triggered CI is the
@@ -130,7 +161,9 @@ tool.Blender.validate_shader_batch_data() / .scale_font_size()
 >
 > **Note for reviewers on other platforms:** linux64/pyodide artifacts were
 > always complete, so geometry works there out of the box; only win64 needs
-> the local build (or #9305's artifacts).
+> the local build (or #9305's artifacts). Note also that upstream ships **cp311**
+> artifacts — there is no official cp313 build yet, so Blender 5.2 requires the
+> local rebuild regardless of #9305.
 
 Run from `src/bonsai/`.
 
@@ -146,30 +179,30 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/core/test_surface.py -o "
 # positional arg and breaks collection. Always use space-separated form.
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_alignment.py \
   -o "addopts=" -p pytest-blender -v \
-  --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
+  --blender-executable "/c/Program Files/Blender Foundation/Blender 5.2/blender.exe"
 
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_surface.py \
   -o "addopts=" -p pytest-blender -v \
-  --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
+  --blender-executable "/c/Program Files/Blender Foundation/Blender 5.2/blender.exe"
 
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_grading.py \
   -o "addopts=" -p pytest-blender -v \
-  --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
+  --blender-executable "/c/Program Files/Blender Foundation/Blender 5.2/blender.exe"
 
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_earthwork.py \
   -o "addopts=" -p pytest-blender -v \
-  --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
+  --blender-executable "/c/Program Files/Blender Foundation/Blender 5.2/blender.exe"
 
 # Operator tests — requires Blender headless (pytest-blender) plus the
 # pytest_bdd + saikei_parse_fix plugins (see the environment callout above)
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/bim/module/alignment/test_alignment_operators.py \
   -o "addopts=" -p pytest-blender -p saikei_parse_fix -p pytest_bdd.plugin -m "alignment" -v \
-  --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
+  --blender-executable "/c/Program Files/Blender Foundation/Blender 5.2/blender.exe"
 
 # All alignment tests at once (tool + operator, in Blender headless)
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest test/tool/test_alignment.py test/bim/module/alignment/ \
   -o "addopts=" -p pytest-blender -p saikei_parse_fix -p pytest_bdd.plugin -m "alignment or not alignment" -v \
-  --blender-executable "/c/Program Files/Blender Foundation/Blender_5/blender.exe"
+  --blender-executable "/c/Program Files/Blender Foundation/Blender 5.2/blender.exe"
 ```
 
 **Phase 4 / 5 / 6 module note:** the tool tests at
@@ -182,18 +215,27 @@ issue in `test/bim/conftest.py`. Move the operator tests back to
 `test/bim/module/{surface,grading,earthwork}/` once that's fixed
 upstream.
 
-**Prerequisites:** `pytest-blender` and `pytest-bdd` must be installed in Blender's
-extensions site-packages (`%APPDATA%\Blender Foundation\Blender\5.0\extensions\.local\lib\python3.11\site-packages\`).
+**Prerequisites:** `pytest-blender`, `pytest-bdd` (+ `parse`, `parse-type`,
+`gherkin-official`) and the `saikei_parse_fix.py` shim must be installed in Blender's
+extensions site-packages (`%APPDATA%\Blender Foundation\Blender\5.2\extensions\.local\lib\python3.13\site-packages\`).
+Install with `--no-deps` so Blender's bundled `pytest` and `numpy` are not shadowed.
+`scipy` must be there too (`bonsai/tool/surface.py` imports `scipy.spatial`).
 
 **Symlinks required** in that same site-packages directory:
 - `bonsai` → `C:\GitHub\IfcOpenShell-saikei-dev\src\bonsai\bonsai` (dev repo)
-- `ifcopenshell` → `C:\GitHub\IfcOpenShell\src\ifcopenshell-python\ifcopenshell` (upstream, has compiled SWIG wrapper)
+- `ifcopenshell` → `C:\GitHub\IfcOpenShell-saikei-dev\src\ifcopenshell-python\ifcopenshell` (dev repo — holds the locally built cp313 runtime)
+
+Create them with `cmd`'s `mklink /D`, **not** PowerShell: Developer Mode is on and
+`mklink` honours it, so no elevation is needed, whereas PowerShell 5.1's
+`New-Item -ItemType SymbolicLink` does not pass the unprivileged-create flag and fails
+with *Administrator privilege required* — non-terminatingly, so a script can report
+success while creating nothing. Verify with `Get-ChildItem -Force | ... $_.LinkType`.
 
 ## Code Style
 
 - **Black** formatter + **ruff** linter (settings in `pyproject.toml`)
 - PEP 8 naming with long descriptive variable names
-- Blender 5.0+, Python 3.11
+- Blender 5.2+, Python 3.13
 
 ## Current State (May 2026)
 

@@ -1,0 +1,9 @@
+GEN_SHORTHAND=vs2022-x64
+QT6_VERSION=6.8.3
+PYTHONHOME=C:\GitHub\IfcOpenShell-saikei-dev\_deps\python.3.11.8\tools
+CCACHE_INSTALL_DIR=C:\GitHub\IfcOpenShell-saikei-dev\_deps\ccache.4.12.1\tools
+BOOST_INSTALL_DIR=C:\GitHub\IfcOpenShell-saikei-dev\_deps\boost_1_86_0\stage\vs2022-x64
+OCC_INSTALL_DIR=C:\GitHub\IfcOpenShell-saikei-dev\_deps-vs2022-x64-installed\opencascade-7.8.1-new-layout
+SWIG_INSTALL_DIR=C:\GitHub\IfcOpenShell-saikei-dev\_deps-vs2022-x64-installed\swig-4.4.1
+QT6_INSTALL_DIR=C:\GitHub\IfcOpenShell-saikei-dev\_deps-vs2022-x64-installed\qt6-6.8.3-msvc2022_64\6.8.3\msvc2022_64
+QT_DIR=C:\GitHub\IfcOpenShell-saikei-dev\_deps-vs2022-x64-installed\qt6-6.8.3-msvc2022_64\6.8.3\msvc2022_64
